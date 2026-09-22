@@ -1,0 +1,15 @@
+name: it-provisioning-agent
+kind: a2a
+runtime: mule
+interface: a2a/0.3.0
+version: 1.7.8
+build: mvn -B package -DskipTests
+deploy:
+  mule:
+    target: ch2
+    env: Sandbox
+    properties:
+      agent.url: required    # this app's own external URL (the card points callers here)
+      llm.proxy.host: required
+    secure: [llm.apiKey]
+used-by: [networks/onboarding-employees]

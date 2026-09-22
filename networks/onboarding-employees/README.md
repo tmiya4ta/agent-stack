@@ -9,8 +9,11 @@ is told what was left half-done rather than getting a bare success.
 
 - Format: `agentNetwork: 2.0.0` (v2) + AgentScript (`# @dialect: AGENTFABRIC=1.0`)
 - Members: 2 A2A agents, 1 MCP server, 1 LLM provider
-- The Mule implementations of all three members ship in `apps/`, so the reference is
-  reproducible end to end on its own
+- The Mule implementations of all three members live elsewhere in this repository, each built
+  and deployed on its own:
+  - [a2a/it-provisioning-agent](../../a2a/it-provisioning-agent/) — A2A agent. Orders and repairs loaner laptops (mock)
+  - [a2a/office-concierge-agent](../../a2a/office-concierge-agent/) — A2A agent. Issues ID badges, answers office questions (mock)
+  - [mcp/employee-db-app](../../mcp/employee-db-app/) — MCP server. Registers employees in SQLite and issues employee IDs
 
 ---
 
@@ -22,10 +25,10 @@ onboarding-employees/
 ├── exchange.json             Exchange descriptor and variables (where URLs and credentials go)
 ├── brokers/
 │   └── broker1.agent         The broker graph, in AgentScript
-└── apps/                     Member Mule apps, deployed independently of the network
-    ├── employee-db-app/          MCP server. Registers employees in SQLite and issues employee IDs
-    ├── it-provisioning-agent/    A2A agent. Orders and repairs loaner laptops (mock)
-    └── office-concierge-agent/   A2A agent. Issues ID badges, answers office questions (mock)
+└── apps/                     Symlinks to the member apps (not part of the network build)
+    ├── employee-db-app/          -> ../../../mcp/employee-db-app
+    ├── it-provisioning-agent/    -> ../../../a2a/it-provisioning-agent
+    └── office-concierge-agent/   -> ../../../a2a/office-concierge-agent
 ```
 
 ---
@@ -100,10 +103,10 @@ Replacing the two tokens covers all of them.
 
 ## Deploying
 
-1. **Deploy the member apps in `apps/` first.** The network only references them by URL.
-   Pass `agent.url` (this app's externally reachable URL), `llm.proxy.host` and `llm.apiKey` as
-   secure deployment properties rather than editing `app.properties`. Each app serves its own
-   reference page at `/doc`.
+1. **Deploy the three member apps first**, each by the steps in its own README. The network
+   only references them by URL. Pass `agent.url` (this app's externally reachable URL),
+   `llm.proxy.host` and `llm.apiKey` as deployment properties (`llm.apiKey` as secure)
+   rather than editing `app.properties`. Each app serves its own reference page at `/doc`.
 
    `app.properties` wants a bare **host** in `llm.proxy.host` (Mule's HTTP requester takes host,
    port and protocol separately), while the network's variables are whole **URLs**. That is why
@@ -166,11 +169,11 @@ Replacing the two tokens covers all of them.
 - A Managed Flex Gateway on **1.12.x LTS or newer** — below 1.10.0 the required policies have no
   implementation and deployment fails with `errorCode: 3004`
 - `anypoint-cli-v4` with the `agent-network` plugin
-- Maven 3.9+ and JDK 17, to build `apps/`
+- Maven 3.9+ and JDK 17, to build the member apps
 
 ---
 
 ## Credentials
 
-`openAI.*` in `exchange.json` and `llm.apiKey` in `apps/*/src/main/resources/app.properties` are
+`openAI.*` in `exchange.json` and `llm.apiKey` in `a2a/*/src/main/resources/app.properties` are
 placeholders. **Do not commit real values.** Pass them as secure deployment properties instead.

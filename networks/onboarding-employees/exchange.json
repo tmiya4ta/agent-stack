@@ -14,21 +14,21 @@
     "variables": {
       "it-provisioning-agent{{-suffix}}": {
         "url": {
-          "description": "A2A endpoint of the IT Provisioning Agent (apps/it-provisioning-agent), scheme included",
+          "description": "A2A endpoint of the IT Provisioning Agent (agent-stack a2a/it-provisioning-agent), scheme included",
           "default": "{{it-provisioning-agent-url}}",
           "secret": false
         }
       },
       "office-concierge-agent{{-suffix}}": {
         "url": {
-          "description": "A2A endpoint of the Office Concierge Agent (apps/office-concierge-agent), scheme included",
+          "description": "A2A endpoint of the Office Concierge Agent (agent-stack a2a/office-concierge-agent), scheme included",
           "default": "{{office-concierge-agent-url}}",
           "secret": false
         }
       },
       "employee-db-server{{-suffix}}": {
         "url": {
-          "description": "Base URL of the Employee DB MCP Server (apps/employee-db-app), scheme included. The /mcp path is appended by the transport setting in agent-network.yaml",
+          "description": "Base URL of the Employee DB MCP Server (agent-stack mcp/employee-db-app), scheme included. The /mcp path is appended by the transport setting in agent-network.yaml",
           "default": "{{employee-db-app-url}}",
           "secret": false
         }

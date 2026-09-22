@@ -1,0 +1,11 @@
+name: employee-db-app
+kind: mcp
+runtime: mule
+interface: mcp/streamable-http
+version: 1.0.6
+build: mvn -B package -DskipTests
+deploy:
+  mule:
+    target: ch2
+    env: Sandbox
+used-by: [networks/onboarding-employees]
