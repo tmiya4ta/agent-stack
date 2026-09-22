@@ -23,12 +23,8 @@ is told what was left half-done rather than getting a bare success.
 onboarding-employees/
 ├── agent-network.yaml        Network definition (registry / context / brokers)
 ├── exchange.json             Exchange descriptor and variables (where URLs and credentials go)
-├── brokers/
-│   └── broker1.agent         The broker graph, in AgentScript
-└── apps/                     Symlinks to the member apps (not part of the network build)
-    ├── employee-db-app/          -> ../../../mcp/employee-db-app
-    ├── it-provisioning-agent/    -> ../../../a2a/it-provisioning-agent
-    └── office-concierge-agent/   -> ../../../a2a/office-concierge-agent
+└── brokers/
+    └── broker1.agent         The broker graph, in AgentScript
 ```
 
 ---
