@@ -1,0 +1,202 @@
+;; ais/engine.clay — Azure AI Search REST API のエミュレーター本体（HTTP を知らない純粋な部分）。
+;;
+;; (handle 状態 method uri body) → Values(新しい状態, 応答 Map, 変わったか 0/1)
+;; 応答 Map は {"status" "content-type" "body"}（clay.http の run-server の形）。
+;; api-version は受け取るが見ない（どの版でも同じ形で答える）。
+;;
+;; エンドポイント:
+;;   GET    /servicestats
+;;   GET    /indexes                         一覧（$select=name なら名前だけ）
+;;   POST   /indexes                         作成（あれば 409）
+;;   GET    /indexes/{n}                     定義
+;;   PUT    /indexes/{n}                     作成（201）/ 更新（200）
+;;   DELETE /indexes/{n}                     削除（204）
+;;   GET    /indexes/{n}/stats               文書数など
+;;   POST   /indexes/{n}/docs/index          文書のバッチ（docs.clay）
+;;   POST   /indexes/{n}/docs/search         検索（search.clay）
+;;   GET    /indexes/{n}/docs                検索（クエリ文字列版）
+;;   GET    /indexes/{n}/docs/$count         件数（text/plain）
+;;   GET    /indexes/{n}/docs/{key}          1 件
+;; /indexes('n') や /docs('key') の OData 形式のパスも同じに扱う。
+;; docs/search.index と docs/search.post.search は docs/index と docs/search の別名。
+(ns ais.engine
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]
+            [ais.web :as w]
+            [ais.schema :as sc]
+            [ais.docs :as dc]
+            [ais.search :as se]))
+
+(defn new-state Map [service: Str]
+  (assoc (assoc (assoc (map-empty) "service" service) "indexes" (map-empty)) "seq" 0))
+
+(defn- indexes Map [st: Map] (map-get-map st "indexes"))
+
+(defn- put-index Map [st: Map ix: Map]
+  (assoc st "indexes" (assoc (indexes st) (map-get-str ix "name") ix)))
+
+(defn- next-etag Values(Map Str) [st: Map]
+  (let [n (+ 1 (map-get-int st "seq"))
+        hex: Str (let [h: Str (loop [x n out: Str ""]
+                                (if (= x 0) out (recur (/ x 16) (str (chr (nth w/hex-digits (mod x 16))) out))))]
+                   (str (subs "00000000000" 0 (- 11 (count h))) h))]
+    (values (assoc st "seq" n) (str "\"0x8DE" (str/upper-case hex) "\""))))
+
+(defn- unchanged Values(Map Map Int) [st: Map resp: Map] (values st resp 0))
+
+(defn- no-index Map [st: Map name: Str]
+  (w/error 404 "" (str "No index with the name '" name "' was found in the service '" (map-get-str st "service") "'.")))
+
+(defn- parse-body Values(Dyn Str) [body: Str]
+  (let [[d e] (json/parse body)]
+    (cond
+      (> (count e) 0) (values d (str "The request is invalid. Details: parameters : The request body could not be parsed as JSON (" e ")."))
+      (not (dyn-map? d)) (values d "The request is invalid. Details: parameters : The request body must be a JSON object.")
+      :else (values d ""))))
+
+;; ---- インデックス定義 ----
+
+(defn index-json Str [ix: Map]
+  (json/stringify (map->dyn (assoc (assoc (dyn->map (map-get-dyn ix "def"))
+                                         "@odata.etag" (str->dyn (map-get-str ix "etag")))
+                                  "name" (str->dyn (map-get-str ix "name"))))))
+
+;; 作成か更新。status は作成時の番号（POST と新規 PUT は 201）
+(defn- save-index Values(Map Map Int) [st: Map name: Str body: Str allow-update: Bool]
+  (let [[d e] (parse-body body)]
+    (if (> (count e) 0) (unchanged st (w/error 400 "" e))
+      (let [bname: Str (w/dstr d "name" name)]
+        (if (not (= bname name))
+          (unchanged st (w/error 400 "" (str "The request is invalid. Details: definition : The index name '" bname "' in the request body does not match the name '" name "' in the URL.")))
+          (let [[ix0 err] (sc/build d name)
+                exists (map-contains? (indexes st) name)]
+            (cond
+              (> (count err) 0) (unchanged st (w/error 400 "" err))
+              (and exists (not allow-update))
+              (unchanged st (w/error 409 "ResourceNameAlreadyInUse" (str "Cannot create index '" name "' because it already exists.")))
+              (and exists (not (= (map-get-str ix0 "key") (map-get-str (map-get-map (indexes st) name) "key"))))
+              (unchanged st (w/error 400 "OperationNotAllowed" (str "The request is invalid. Details: definition : The key field of index '" name "' cannot be changed.")))
+              :else
+              (let [[st2 etag] (next-etag st)
+                    docs: Map (if exists (map-get-map (map-get-map (indexes st) name) "docs") (map-empty))
+                    ix: Map (assoc (assoc ix0 "docs" docs) "etag" etag)]
+                (values (put-index st2 ix) (w/json-resp (if exists 200 201) (index-json ix)) 1)))))))))
+
+(defn- list-indexes Map [st: Map q: Map]
+  (let [names: Vec(Str) (map-keys-str (indexes st))
+        only-names (= (str/trim (w/qget q "$select")) "name")
+        items: Vec(Str) (loop [i 0 acc: Vec(Str) []]
+                          (if (>= i (count names)) acc
+                            (recur (+ i 1) (conj acc (if only-names (str "{\"name\":" (w/jstr (nth names i)) "}")
+                                                       (index-json (map-get-map (indexes st) (nth names i))))))))]
+    (w/json-resp 200 (str "{\"value\":[" (str/join "," items) "]}"))))
+
+;; ---- 統計 ----
+
+(defn- storage-size Int [ix: Map]
+  (let [docs: Map (map-get-map ix "docs") keys: Vec(Str) (map-keys-str docs)]
+    (loop [i 0 n 0]
+      (if (>= i (count keys)) n (recur (+ i 1) (+ n (count (json/stringify (map-get-dyn docs (nth keys i))))))))))
+
+(defn- vector-size Int [ix: Map]
+  (let [vf: Vec(Str) (sc/vector-fields ix)
+        per (loop [i 0 n 0] (if (>= i (count vf)) n (recur (+ i 1) (+ n (* 4 (map-get-int (sc/field ix (nth vf i)) "dims"))))))]
+    (* per (count (map-keys-str (map-get-map ix "docs"))))))
+
+(defn- doc-count Int [ix: Map] (count (map-keys-str (map-get-map ix "docs"))))
+
+(defn- index-stats Map [ix: Map]
+  (w/json-resp 200 (str "{\"documentCount\":" (doc-count ix) ",\"storageSize\":" (storage-size ix)
+                        ",\"vectorIndexSize\":" (vector-size ix) "}")))
+
+(defn- sum-over Int [st: Map f: Fn(Map Int)]
+  (let [names: Vec(Str) (map-keys-str (indexes st))]
+    (loop [i 0 n 0]
+      (if (>= i (count names)) n (recur (+ i 1) (+ n (f (map-get-map (indexes st) (nth names i)))))))))
+
+(defn- service-stats Map [st: Map]
+  (let [names: Vec(Str) (map-keys-str (indexes st))
+        docs (sum-over st doc-count)
+        stor (sum-over st storage-size)
+        vsz (sum-over st vector-size)
+        c (fn: Str [name: Str usage: Int quota: Str] (str "\"" name "\":{\"usage\":" usage ",\"quota\":" quota "}"))]
+    (w/json-resp 200 (str "{\"counters\":{"
+                          (c "documentCount" docs "null") ","
+                          (c "indexesCount" (count names) "50") ","
+                          (c "indexersCount" 0 "50") ","
+                          (c "dataSourcesCount" 0 "50") ","
+                          (c "storageSize" stor "2147483648") ","
+                          (c "synonymMaps" 0 "5") ","
+                          (c "skillsetCount" 0 "50") ","
+                          (c "vectorIndexSize" vsz "1073741824")
+                          "},\"limits\":{\"maxFieldsPerIndex\":1000,\"maxFieldNestingDepthPerIndex\":10,"
+                          "\"maxComplexCollectionFieldsPerIndex\":40,\"maxComplexObjectsInCollectionsPerDocument\":3000}}"))))
+
+;; ---- 文書 ----
+
+(defn- get-doc Map [ix: Map key: Str q: Map]
+  (let [docs: Map (map-get-map ix "docs")]
+    (if (not (map-contains? docs key))
+      (w/error 404 "" (str "Document with key '" key "' was not found."))
+      (w/json-resp 200 (se/doc-json ix (map-get-dyn docs key)
+                                    (let [s: Str (str/trim (w/qget q "$select"))] (if (or (= s "") (= s "*")) [] (w/split-list s)))
+                                    "")))))
+
+(defn- docs-route Values(Map Map Int) [st: Map method: Str ix: Map rest: Vec(Str) q: Map body: Str]
+  (let [n (count rest)
+        op: Str (if (> n 0) (nth rest 0) "")]
+    (cond
+      (and (= n 0) (= method "GET")) (unchanged st (se/search ix (se/request-of-query q)))
+      (and (= n 1) (= method "GET") (= op "$count"))
+      (unchanged st (w/resp 200 "text/plain" (str (doc-count ix))))
+      (and (= n 1) (= method "POST") (or (= op "index") (= op "search.index")))
+      (let [[d e] (parse-body body)]
+        (if (> (count e) 0) (unchanged st (w/error 400 "" e))
+          (let [[ix2 resp] (dc/index-batch ix d)
+                status (map-get-int resp "status")]
+            (if (or (= status 200) (= status 207))
+              (values (put-index st ix2) resp 1)
+              (unchanged st resp)))))
+      (and (= n 1) (= method "POST") (or (= op "search") (= op "search.post.search")))
+      (let [[d e] (parse-body body)]
+        (if (> (count e) 0) (unchanged st (w/error 400 "" e))
+          (unchanged st (se/search ix (se/request-of-body d)))))
+      (and (= n 1) (= method "GET")) (unchanged st (get-doc ix op q))
+      :else (unchanged st (w/error 405 "" (str "The requested resource does not support http method '" method "'."))))))
+
+;; ---- 入口 ----
+
+(defn handle Values(Map Map Int) [st: Map method: Str uri: Str body: Str]
+  (let [segs: Vec(Str) (w/segments (w/path-of uri))
+        q: Map (w/parse-query (w/query-of uri))
+        n (count segs)
+        s0: Str (if (> n 0) (nth segs 0) "")]
+    (cond
+      (and (= n 1) (= s0 "servicestats"))
+      (if (= method "GET") (unchanged st (service-stats st))
+        (unchanged st (w/error 405 "" (str "The requested resource does not support http method '" method "'."))))
+      (not (= s0 "indexes")) (unchanged st (w/error 404 "" (str "The resource '" (w/path-of uri) "' was not found.")))
+      (= n 1)
+      (cond (= method "GET") (unchanged st (list-indexes st q))
+            (= method "POST")
+            (let [[d e] (parse-body body)]
+              (if (> (count e) 0) (unchanged st (w/error 400 "" e))
+                (save-index st (w/dstr d "name" "") body false)))
+            :else (unchanged st (w/error 405 "" (str "The requested resource does not support http method '" method "'."))))
+      :else
+      (let [name: Str (nth segs 1)
+            exists (map-contains? (indexes st) name)]
+        (cond
+          (= n 2)
+          (cond (= method "PUT") (save-index st name body true)
+                (not exists) (unchanged st (no-index st name))
+                (= method "GET") (unchanged st (w/json-resp 200 (index-json (map-get-map (indexes st) name))))
+                (= method "DELETE") (values (assoc st "indexes" (map-remove (indexes st) name)) (w/no-content) 1)
+                :else (unchanged st (w/error 405 "" (str "The requested resource does not support http method '" method "'."))))
+          (not exists) (unchanged st (no-index st name))
+          (and (= n 3) (or (= (nth segs 2) "stats") (= (nth segs 2) "search.stats")) (= method "GET"))
+          (unchanged st (index-stats (map-get-map (indexes st) name)))
+          (= (nth segs 2) "docs")
+          (docs-route st method (map-get-map (indexes st) name) (subvec segs 3 n) q body)
+          :else (unchanged st (w/error 404 "" (str "The resource '" (w/path-of uri) "' was not found."))))))))

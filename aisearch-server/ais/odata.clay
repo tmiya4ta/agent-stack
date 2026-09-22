@@ -1,0 +1,290 @@
+;; ais/odata.clay — Azure AI Search の $filter（OData の部分集合）を読んで文書に当てる。
+;;
+;; 扱う式:
+;;   比較      field eq 'str' / ne / gt / ge / lt / le（右辺は 'str'、数、true/false/null、日時）
+;;   論理      and / or / not、括弧
+;;   関数      search.in(field, 'a,b,c') / search.in(field, 'a|b', '|')
+;;   真偽値    field（Edm.Boolean の欄をそのまま条件にする）、true / false
+;; フィールドは a/b のようにパスで書ける。コレクションの any/all はまだ扱わない。
+;;
+;; 構文木は Map（"t" が種類）。parse の失敗は {"t" "err" "msg" ..} で返す。
+(ns ais.odata
+  (:require [clay.core]
+            [clay.string :as str]))
+
+(defn- node Map [t: Str] (assoc (map-empty) "t" t))
+
+(defn- err Map [msg: Str] (assoc (node "err") "msg" msg))
+
+(defn err? Bool [n: Map] (= (map-get-str n "t") "err"))
+
+;; ---- 字句 ----
+
+(defn- space? Bool [c: Int] (or (= c 32) (= c 9) (= c 10) (= c 13)))
+
+(defn- skip-ws Int [s: Str i: Int]
+  (loop [j i] (if (and (< j (count s)) (space? (nth s j))) (recur (+ j 1)) j)))
+
+(defn- ident-start? Bool [c: Int]
+  (or (and (>= c 65) (<= c 90)) (and (>= c 97) (<= c 122)) (= c 95)))
+
+(defn- ident-char? Bool [c: Int]
+  (or (ident-start? c) (and (>= c 48) (<= c 57)) (= c 47) (= c 46)))
+
+(defn- digit? Bool [c: Int] (and (>= c 48) (<= c 57)))
+
+;; i から識別子（a/b/c や search.in も含む）を読む。終わりの位置を返す。
+(defn- ident-end Int [s: Str i: Int]
+  (loop [j i] (if (and (< j (count s)) (ident-char? (nth s j))) (recur (+ j 1)) j)))
+
+;; i が語 w で始まり、その直後が識別子の続きでないか
+(defn- word-at? Bool [s: Str i: Int w: Str]
+  (let [e (+ i (count w))]
+    (and (<= e (count s))
+         (= (lower-case (subs s i e)) w)
+         (or (= e (count s)) (not (ident-char? (nth s e)))))))
+
+;; '...'（'' は ' 1 文字）を読む。Values(中身, 終わりの位置)。閉じていなければ位置は -1。
+(defn- read-quoted Values(Str Int) [s: Str i: Int]
+  (loop [j (+ i 1) out: Str ""]
+    (if (>= j (count s)) (values out -1)
+      (let [c (nth s j)]
+        (if (= c 39)
+          (if (and (< (+ j 1) (count s)) (= (nth s (+ j 1)) 39))
+            (recur (+ j 2) (str out "'"))
+            (values out (+ j 1)))
+          (recur (+ j 1) (str out (chr c))))))))
+
+;; 数か日時（2024-01-01T00:00:00Z）の終わり。日時は '-' ':' 'T' 'Z' '+' '.' を含む。
+(defn- literal-end Int [s: Str i: Int]
+  (loop [j (+ i 1)]
+    (if (>= j (count s)) j
+      (let [c (nth s j)]
+        (if (or (digit? c) (= c 46) (= c 45) (= c 43) (= c 58) (= c 84) (= c 90) (= c 101) (= c 69))
+          (recur (+ j 1)) j)))))
+
+(defn- datetime-literal? Bool [t: Str]
+  (and (> (count t) 10) (= (nth t 4) 45) (str/includes? t "T")))
+
+;; 右辺・左辺の定数。Values(値の Map {"t" "lit" "v" Dyn}, 終わり)。定数でなければ終わりは -1。
+(defn- read-literal Values(Map Int) [s: Str i: Int]
+  (let [c (nth s i)]
+    (cond
+      (= c 39) (let [[v e] (read-quoted s i)]
+                 (if (< e 0) (values (err "unterminated string literal") -1)
+                   (values (assoc (node "lit") "v" (str->dyn v)) e)))
+      (word-at? s i "true") (values (assoc (node "lit") "v" (bool->dyn true)) (+ i 4))
+      (word-at? s i "false") (values (assoc (node "lit") "v" (bool->dyn false)) (+ i 5))
+      (word-at? s i "null") (values (assoc (node "lit") "v" (nil->dyn)) (+ i 4))
+      (or (digit? c) (and (= c 45) (< (+ i 1) (count s)) (digit? (nth s (+ i 1)))))
+      (let [e (literal-end s i)
+            t: Str (subs s i e)]
+        (cond
+          (datetime-literal? t) (values (assoc (node "lit") "v" (str->dyn t)) e)
+          (or (str/includes? t ".") (str/includes? t "e") (str/includes? t "E"))
+          (values (assoc (node "lit") "v" (float->dyn (str-to-float t))) e)
+          :else (values (assoc (node "lit") "v" (int->dyn (parse-long t))) e)))
+      :else (values (node "none") -1))))
+
+(defn- cmp-op Str [s: Str i: Int]
+  (cond (word-at? s i "eq") "eq" (word-at? s i "ne") "ne"
+        (word-at? s i "gt") "gt" (word-at? s i "ge") "ge"
+        (word-at? s i "lt") "lt" (word-at? s i "le") "le"
+        :else ""))
+
+;; 定数が左にあるときは向きを入れ替える（5 lt x → x gt 5）
+(defn- flip-op Str [op: Str]
+  (cond (= op "gt") "lt" (= op "lt") "gt" (= op "ge") "le" (= op "le") "ge" :else op))
+
+;; ---- 構文 ----
+
+;; search.in(field, 'a,b' [, 'delims'])
+(defn- parse-search-in Values(Map Int) [s: Str i0: Int]
+  (let [i (skip-ws s i0)]
+    (if (or (>= i (count s)) (not (= (nth s i) 40))) (values (err "expected '(' after search.in") -1)
+      (let [f0 (skip-ws s (+ i 1))
+            f1 (ident-end s f0)
+            field: Str (subs s f0 f1)
+            c1 (skip-ws s f1)]
+        (if (or (= f0 f1) (>= c1 (count s)) (not (= (nth s c1) 44)))
+          (values (err "search.in expects (field, 'values'[, 'delimiters'])") -1)
+          (let [q1 (skip-ws s (+ c1 1))]
+            (if (or (>= q1 (count s)) (not (= (nth s q1) 39))) (values (err "search.in expects a string of values") -1)
+              (let [[vals e1] (read-quoted s q1)
+                    a (skip-ws s e1)]
+                (cond
+                  (< e1 0) (values (err "unterminated string literal") -1)
+                  (and (< a (count s)) (= (nth s a) 41))
+                  (values (assoc (assoc (assoc (node "in") "f" field) "vals" vals) "delims" " ,") (+ a 1))
+                  (and (< a (count s)) (= (nth s a) 44))
+                  (let [q2 (skip-ws s (+ a 1))
+                        [delims e2] (read-quoted s q2)
+                        z (skip-ws s e2)]
+                    (if (or (< e2 0) (>= z (count s)) (not (= (nth s z) 41)))
+                      (values (err "search.in: expected ')'") -1)
+                      (values (assoc (assoc (assoc (node "in") "f" field) "vals" vals) "delims" delims) (+ z 1))))
+                  :else (values (err "search.in: expected ')'") -1))))))))))
+
+;; 比較・関数・括弧・真偽値の欄
+(defn- parse-primary Values(Map Int) [s: Str i0: Int]
+  (let [i (skip-ws s i0)]
+    (cond
+      (>= i (count s)) (values (err "unexpected end of expression") -1)
+      (= (nth s i) 40)
+      (let [[x e] (parse-or s (+ i 1))]
+        (if (err? x) (values x -1)
+          (let [z (skip-ws s e)]
+            (if (and (< z (count s)) (= (nth s z) 41)) (values x (+ z 1))
+              (values (err "expected ')'") -1)))))
+      (word-at? s i "search.in") (parse-search-in s (+ i 9))
+      :else
+      (let [[lit le] (read-literal s i)]
+        (if (err? lit) (values lit -1)
+          (if (>= le 0)
+            ;; 定数が左: true / false 単独、または 定数 op 欄
+            (let [o (skip-ws s le)
+                  op: Str (if (< o (count s)) (cmp-op s o) "")]
+              (if (= op "")
+                (let [v (map-get-dyn lit "v")]
+                  (if (dyn-bool? v) (values (assoc (node "const") "b" v) le)
+                    (values (err "a constant cannot stand alone as a condition") -1)))
+                (let [f0 (skip-ws s (+ o 2))
+                      f1 (ident-end s f0)]
+                  (if (= f0 f1) (values (err (str "expected a field name after '" op "'")) -1)
+                    (values (assoc (assoc (assoc (node "cmp") "op" (flip-op op)) "f" (subs s f0 f1))
+                                   "v" (map-get-dyn lit "v"))
+                            f1)))))
+            ;; 欄が左
+            (if (not (ident-start? (nth s i)))
+              (values (err (str "unexpected character '" (chr (nth s i)) "' at position " i)) -1)
+              (let [f1 (ident-end s i)
+                    field: Str (subs s i f1)
+                    o (skip-ws s f1)
+                    op: Str (if (< o (count s)) (cmp-op s o) "")]
+                (if (= op "") (values (assoc (node "field") "f" field) f1)
+                  (let [r (skip-ws s (+ o 2))]
+                    (if (>= r (count s)) (values (err (str "expected a value after '" op "'")) -1)
+                      (let [[rv re] (read-literal s r)]
+                        (cond
+                          (err? rv) (values rv -1)
+                          (< re 0) (values (err (str "expected a constant after '" op "' (comparing two fields is not supported)")) -1)
+                          :else (values (assoc (assoc (assoc (node "cmp") "op" op) "f" field) "v" (map-get-dyn rv "v"))
+                                        re))))))))))))))
+
+(defn- parse-unary Values(Map Int) [s: Str i0: Int]
+  (let [i (skip-ws s i0)]
+    (if (word-at? s i "not")
+      (let [[x e] (parse-unary s (+ i 3))]
+        (if (err? x) (values x -1) (values (assoc (node "not") "x" x) e)))
+      (parse-primary s i))))
+
+(defn- parse-and Values(Map Int) [s: Str i0: Int]
+  (let [[l e] (parse-unary s i0)]
+    (if (err? l) (values l -1)
+      (loop [acc: Map l pos e]
+        (let [j (skip-ws s pos)]
+          (if (word-at? s j "and")
+            (let [[r e2] (parse-unary s (+ j 3))]
+              (if (err? r) (values r -1)
+                (recur (assoc (assoc (node "and") "l" acc) "r" r) e2)))
+            (values acc pos)))))))
+
+(defn- parse-or Values(Map Int) [s: Str i0: Int]
+  (let [[l e] (parse-and s i0)]
+    (if (err? l) (values l -1)
+      (loop [acc: Map l pos e]
+        (let [j (skip-ws s pos)]
+          (if (word-at? s j "or")
+            (let [[r e2] (parse-and s (+ j 2))]
+              (if (err? r) (values r -1)
+                (recur (assoc (assoc (node "or") "l" acc) "r" r) e2)))
+            (values acc pos)))))))
+
+;; 式全体を読む。空文字は「条件なし」（{"t" "const" "b" true}）。
+(defn parse Map [s: Str]
+  (if (str/blank? s) (assoc (node "const") "b" (bool->dyn true))
+    (let [[x e] (parse-or s 0)]
+      (if (err? x) x
+        (let [z (skip-ws s e)]
+          (if (< z (count s)) (err (str "unexpected text at position " z ": '" (subs s z (count s)) "'"))
+            x))))))
+
+;; ---- 評価 ----
+
+(defn- dyn-has? Bool [d: Dyn k: Str]
+  (if (not (dyn-map? d)) false
+    (loop [i 0]
+      (if (>= i (dyn-count d)) false
+        (if (= (dyn-key d i) k) true (recur (+ i 1)))))))
+
+;; a/b/c をたどる。無ければ nil。
+(defn field-value Dyn [doc: Dyn path: Str]
+  (let [parts: Vec(Str) (str/split path "/")]
+    (loop [i 0 cur: Dyn doc]
+      (if (>= i (count parts)) cur
+        (if (dyn-has? cur (nth parts i))
+          (recur (+ i 1) (dyn-get cur (nth parts i)))
+          (nil->dyn))))))
+
+(defn- num? Bool [d: Dyn] (or (dyn-int? d) (dyn-float? d)))
+
+(defn- as-float Float [d: Dyn] (if (dyn-float? d) (dyn->float d) (int->float (dyn->int d))))
+
+;; 文字列の大小（バイト順）。-1 / 0 / 1
+(defn- str-compare Int [a: Str b: Str]
+  (let [n (if (< (count a) (count b)) (count a) (count b))]
+    (loop [i 0]
+      (if (>= i n) (cond (< (count a) (count b)) -1 (> (count a) (count b)) 1 :else 0)
+        (let [x (nth a i) y (nth b i)]
+          (cond (< x y) -1 (> x y) 1 :else (recur (+ i 1))))))))
+
+;; 比べられないとき（型違い・コレクション）は 2
+(defn- compare-dyn Int [a: Dyn b: Dyn]
+  (cond
+    (and (num? a) (num? b))
+    (let [x (as-float a) y (as-float b)] (cond (< x y) -1 (> x y) 1 :else 0))
+    (and (dyn-str? a) (dyn-str? b)) (str-compare (dyn->str a) (dyn->str b))
+    (and (dyn-bool? a) (dyn-bool? b)) (if (= (dyn->bool a) (dyn->bool b)) 0 2)
+    :else 2))
+
+(defn- eval-cmp Bool [op: Str a: Dyn b: Dyn]
+  (cond
+    (dyn-nil? b) (if (= op "eq") (dyn-nil? a) (if (= op "ne") (not (dyn-nil? a)) false))
+    (dyn-nil? a) (= op "ne")
+    :else
+    (let [c (compare-dyn a b)]
+      (cond
+        (= c 2) (= op "ne")
+        (= op "eq") (= c 0) (= op "ne") (not (= c 0))
+        (= op "gt") (> c 0) (= op "ge") (>= c 0)
+        (= op "lt") (< c 0) (= op "le") (<= c 0)
+        :else false))))
+
+;; search.in: delims の各文字で区切った値のどれかと一致するか
+(defn- split-any Vec(Str) [s: Str delims: Str]
+  (loop [i 0 cur: Str "" acc: Vec(Str) []]
+    (if (>= i (count s)) (if (> (count cur) 0) (conj acc cur) acc)
+      (let [c (nth s i)]
+        (if (>= (str/index-of delims (chr c)) 0)
+          (recur (+ i 1) "" (if (> (count cur) 0) (conj acc cur) acc))
+          (recur (+ i 1) (str cur (chr c)) acc))))))
+
+(defn- eval-in Bool [v: Dyn vals: Str delims: Str]
+  (if (not (dyn-str? v)) false
+    (let [x: Str (dyn->str v)
+          parts: Vec(Str) (split-any vals delims)]
+      (loop [i 0]
+        (if (>= i (count parts)) false
+          (if (= (nth parts i) x) true (recur (+ i 1))))))))
+
+(defn matches? Bool [n: Map doc: Dyn]
+  (let [t: Str (map-get-str n "t")]
+    (cond
+      (= t "const") (dyn->bool (map-get-dyn n "b"))
+      (= t "and") (and (matches? (map-get-map n "l") doc) (matches? (map-get-map n "r") doc))
+      (= t "or") (or (matches? (map-get-map n "l") doc) (matches? (map-get-map n "r") doc))
+      (= t "not") (not (matches? (map-get-map n "x") doc))
+      (= t "cmp") (eval-cmp (map-get-str n "op") (field-value doc (map-get-str n "f")) (map-get-dyn n "v"))
+      (= t "in") (eval-in (field-value doc (map-get-str n "f")) (map-get-str n "vals") (map-get-str n "delims"))
+      (= t "field") (let [v (field-value doc (map-get-str n "f"))] (and (dyn-bool? v) (dyn->bool v)))
+      :else false)))

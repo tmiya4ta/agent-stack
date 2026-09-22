@@ -1,0 +1,146 @@
+;; ais/schema.clay — インデックス定義（PUT/POST /indexes の本文）を検証して、内部の形にする。
+;;
+;; 内部の形（Map）:
+;;   "name"   インデックス名
+;;   "def"    受け取った定義（Dyn）。GET ではこれに @odata.etag を足して返す
+;;   "key"    キー欄の名前
+;;   "fields" 欄名 → {"type" Str "retrievable" 0/1 "searchable" 0/1 "vector" 0/1 "dims" Int "metric" Str}
+;;            （入れ子の欄は "a/b" の名前で入れる）
+;;   "docs"   キー → 文書（Dyn）
+;;   "etag"   更新ごとに変わる文字列
+;;
+;; ベクトル欄の類似度は vectorSearch.profiles[].algorithm → vectorSearch.algorithms[] の
+;; hnswParameters / exhaustiveKnnParameters の metric（既定 cosine）。2023-07-01-Preview の
+;; vectorSearchConfiguration → vectorSearch.algorithmConfigurations[] の形も読む。
+(ns ais.schema
+  (:require [clay.core]
+            [clay.string :as str]
+            [ais.web :as w]))
+
+(def invalid-prefix "The request is invalid. Details: definition : ")
+
+(defn- name-char? Bool [c: Int]
+  (or (and (>= c 97) (<= c 122)) (and (>= c 48) (<= c 57)) (= c 45)))
+
+;; 小文字・数字・ダッシュ、先頭と末尾はダッシュ不可、連続ダッシュ不可、128 文字まで
+(defn valid-index-name? Bool [n: Str]
+  (and (> (count n) 1) (<= (count n) 128)
+       (not (= (nth n 0) 45)) (not (= (nth n (- (count n) 1)) 45))
+       (not (str/includes? n "--"))
+       (loop [i 0] (if (>= i (count n)) true (if (name-char? (nth n i)) (recur (+ i 1)) false)))))
+
+(defn- vector-type? Bool [t: Str]
+  (or (= t "Collection(Edm.Single)") (= t "Collection(Edm.Half)") (= t "Collection(Edm.Int16)")
+      (= t "Collection(Edm.SByte)") (= t "Collection(Edm.Byte)")))
+
+(defn- text-type? Bool [t: Str] (or (= t "Edm.String") (= t "Collection(Edm.String)")))
+
+(defn- find-named Dyn [arr: Dyn name: Str]
+  (if (not (dyn-vec? arr)) (nil->dyn)
+    (loop [i 0]
+      (if (>= i (dyn-count arr)) (nil->dyn)
+        (let [x (dyn-nth arr i)]
+          (if (= (w/dstr x "name" "") name) x (recur (+ i 1))))))))
+
+(defn- algorithm-metric Str [alg: Dyn]
+  (let [p1 (w/dget alg "hnswParameters")
+        p2 (w/dget alg "exhaustiveKnnParameters")
+        m1: Str (w/dstr p1 "metric" "")
+        m2: Str (w/dstr p2 "metric" "")]
+    (cond (> (count m1) 0) m1 (> (count m2) 0) m2 :else "cosine")))
+
+;; ベクトル欄の metric を探す。Values(metric, エラー文 or "")
+(defn- vector-metric Values(Str Str) [vs: Dyn f: Dyn fname: Str]
+  (let [profile: Str (w/dstr f "vectorSearchProfile" "")
+        legacy: Str (w/dstr f "vectorSearchConfiguration" "")]
+    (cond
+      (> (count profile) 0)
+      (let [p (find-named (w/dget vs "profiles") profile)]
+        (if (dyn-nil? p)
+          (values "" (str "The vector search profile '" profile "' referenced by field '" fname "' was not found in the index definition."))
+          (let [aname: Str (w/dstr p "algorithm" "")
+                alg (find-named (w/dget vs "algorithms") aname)]
+            (if (dyn-nil? alg)
+              (values "" (str "The vector search algorithm configuration '" aname "' referenced by profile '" profile "' was not found."))
+              (values (algorithm-metric alg) "")))))
+      (> (count legacy) 0)
+      (let [alg (find-named (w/dget vs "algorithmConfigurations") legacy)]
+        (if (dyn-nil? alg)
+          (values "" (str "The vector search configuration '" legacy "' referenced by field '" fname "' was not found."))
+          (values (algorithm-metric alg) "")))
+      :else (values "" (str "The vector field '" fname "' must have a vectorSearchProfile.")))))
+
+(defn- flag Int [b: Bool] (if b 1 0))
+
+;; fields 配列を読んで欄の Map に足す。Values(欄の Map, キー欄の名前, エラー文)
+(defn- read-fields Values(Map Str Str) [vs: Dyn arr: Dyn prefix: Str acc0: Map key0: Str]
+  (loop [i 0 acc: Map acc0 key: Str key0]
+    (if (>= i (dyn-count arr)) (values acc key "")
+      (let [f (dyn-nth arr i)
+            fname0: Str (w/dstr f "name" "")
+            fname: Str (str prefix fname0)
+            ftype: Str (w/dstr f "type" "")]
+        (cond
+          (= (count fname0) 0) (values acc key "Every field must have a name.")
+          (= (count ftype) 0) (values acc key (str "The field '" fname "' must have a type."))
+          (map-contains? acc fname) (values acc key (str "The field '" fname "' is defined more than once."))
+          (or (= ftype "Edm.ComplexType") (= ftype "Collection(Edm.ComplexType)"))
+          (let [sub (w/dget f "fields")]
+            (if (not (dyn-vec? sub)) (values acc key (str "The complex field '" fname "' must have sub-fields."))
+              (let [info: Map (assoc (assoc (assoc (assoc (map-empty) "type" ftype) "retrievable" 1) "searchable" 0) "vector" 0)
+                    [acc2 key2 e] (read-fields vs sub (str fname "/") (assoc acc fname info) key)]
+                (if (> (count e) 0) (values acc2 key2 e) (recur (+ i 1) acc2 key2)))))
+          :else
+          (let [is-key (w/dbool f "key" false)
+                retr (and (w/dbool f "retrievable" true) (not (w/dbool f "hidden" false)) (w/dbool f "stored" true))
+                vec? (vector-type? ftype)
+                srch (w/dbool f "searchable" (or vec? (text-type? ftype)))
+                base: Map (assoc (assoc (assoc (assoc (map-empty) "type" ftype) "retrievable" (flag retr))
+                                        "searchable" (flag srch)) "vector" (flag vec?))]
+            (cond
+              (and is-key (> (count key) 0)) (values acc key "The index must contain exactly one key field.")
+              (and is-key (not (= ftype "Edm.String"))) (values acc key (str "The key field '" fname "' must be of type Edm.String."))
+              (and is-key (> (count prefix) 0)) (values acc key "The key field must be a top-level field.")
+              vec?
+              (let [dims (w/dint f "dimensions" 0)
+                    [metric e] (vector-metric vs f fname)]
+                (cond
+                  (or (< dims 2) (> dims 4096))
+                  (values acc key (str "The vector field '" fname "' must have a 'dimensions' value between 2 and 4096."))
+                  (> (count e) 0) (values acc key e)
+                  :else (recur (+ i 1) (assoc acc fname (assoc (assoc base "dims" dims) "metric" metric)) key)))
+              :else (recur (+ i 1) (assoc acc fname base) (if is-key fname key)))))))))
+
+;; 定義 d（name は path-name で上書き確認済みのもの）から内部の形を作る。Values(index, エラー文)
+(defn build Values(Map Str) [d: Dyn name: Str]
+  (let [fields (w/dget d "fields")
+        vs (w/dget d "vectorSearch")]
+    (cond
+      (not (valid-index-name? name))
+      (values (map-empty) (str invalid-prefix "Index name must only contain lowercase letters, digits or dashes, cannot start or end with dashes and is limited to 128 characters."))
+      (or (not (dyn-vec? fields)) (= (dyn-count fields) 0))
+      (values (map-empty) (str invalid-prefix "The index must contain at least one field."))
+      :else
+      (let [[fm key e] (read-fields vs fields "" (map-empty) "")]
+        (cond
+          (> (count e) 0) (values (map-empty) (str invalid-prefix e))
+          (= (count key) 0) (values (map-empty) (str invalid-prefix "The index must contain exactly one key field."))
+          :else (values (assoc (assoc (assoc (assoc (map-empty) "name" name) "def" d) "key" key) "fields" fm) ""))))))
+
+(defn field-names Vec(Str) [ix: Map] (map-keys-str (map-get-map ix "fields")))
+
+(defn field Map [ix: Map fname: Str] (map-get-map (map-get-map ix "fields") fname))
+
+(defn has-field? Bool [ix: Map fname: Str] (map-contains? (map-get-map ix "fields") fname))
+
+(defn vector-field? Bool [ix: Map fname: Str]
+  (and (has-field? ix fname) (= (map-get-int (field ix fname) "vector") 1)))
+
+(defn vector-fields Vec(Str) [ix: Map]
+  (let [names: Vec(Str) (field-names ix)]
+    (loop [i 0 acc: Vec(Str) []]
+      (if (>= i (count names)) acc
+        (recur (+ i 1) (if (vector-field? ix (nth names i)) (conj acc (nth names i)) acc))))))
+
+(defn retrievable? Bool [ix: Map fname: Str]
+  (and (has-field? ix fname) (= (map-get-int (field ix fname) "retrievable") 1)))

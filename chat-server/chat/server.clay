@@ -1,0 +1,448 @@
+;; chat/server.clay — OpenAI / Gemini 互換の LLM API サーバ（clay + llama.cpp）。
+;;
+;;   POST /v1/chat/completions                      OpenAI Chat Completions（stream も受ける。…/openai/chat/completions なども同じ）
+;;   GET  /v1/models                                OpenAI のモデル一覧
+;;   POST …/models/{model}:generateContent          Gemini（/v1beta/models/.. も Vertex の /v1/projects/../models/.. も）
+;;   POST …/models/{model}:streamGenerateContent    Gemini の stream（?alt=sse なら SSE、無ければ JSON 配列）
+;;   POST …/models/{model}:countTokens              Gemini のトークン数
+;;   GET  /v1beta/models                            Gemini のモデル一覧
+;;   GET  /health                                   死活確認（認証なし）
+;;
+;; 返答は llama.cpp で生成する（chatshim.c。モデルは CHAT_MODEL の GGUF、既定は Llama 3.2 3B Instruct）。model はどの名前でも受け、
+;; 応答にはそのまま返す（Anypoint の Model Proxy のルートに書いた名前がそのまま来るため）。
+;; stream: true のときは Server-Sent Events の形で返すが、生成が終わってからまとめて送る（逐次ではない）。
+;;
+;; 環境変数:
+;;   CHAT_MODEL       GGUF のパス（既定 ~/models/gguf/llama3.2-3b-instruct-q4_k_m.gguf）
+;;   CHAT_MODEL_ID    /v1/models などで名乗る名前（既定は GGUF のファイル名から .gguf を除いたもの）
+;;   CHAT_HOST        bind するアドレス（既定 172.23.0.1 = kind bridge。theorems-edge からだけ届く）
+;;   CHAT_PORT        既定 8898
+;;   CHAT_THREADS     計算スレッド数（既定 8）
+;;   CHAT_GPU_LAYERS  GPU（Vulkan）に載せる層数（既定 -1 = 全層、0 = CPU のみ）
+;;   CHAT_CTX         会話全体のトークン上限（既定 8192）
+;;   CHAT_API_KEYS    許可する API キー（カンマ区切り）。空なら認証しない。
+;;                    Authorization: Bearer <key>、x-goog-api-key: <key>、?key=<key> のどれでもよい
+(ns chat.server
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]
+            [clay.http :as http]))
+
+;; chatshim.c（llama.cpp の薄い層）。宣言は build.sh が `-include chatshim.h` で渡す。
+(defextern chat-load-c Int "chat_load" [path: Str n-ctx: Int threads: Int gpu-layers: Int])
+(defextern chat-generate-c Int "chat_generate" [msgs: Str max-tokens: Int temp-milli: Int out: Str cap: Int])
+(defextern chat-count-tokens-c Int "chat_count_tokens" [msgs: Str])
+
+(def default-max-tokens 512)
+(def api-reference "Please check the API reference: https://platform.openai.com/docs/api-reference.")
+
+(defvar ^Int g-n-ctx 0)  ; 会話全体のトークン上限（main で設定）
+
+;; ---- 小道具 ----
+
+(defn env-or Str [name: Str dflt: Str]
+  (let [v: Str (getenv name)] (if (= (count v) 0) dflt v)))
+
+(defn env-int Int [name: Str dflt: Int]
+  (let [v: Str (getenv name)] (if (= (count v) 0) dflt (parse-long v))))
+
+(defn model-path Str []
+  (env-or "CHAT_MODEL" (str (getenv "HOME") "/models/gguf/llama3.2-3b-instruct-q4_k_m.gguf")))
+
+;; /v1/models や /health で名乗る名前。CHAT_MODEL_ID か、GGUF のファイル名から .gguf を除いたもの
+(defn model-id Str []
+  (let [p: Str (model-path)
+        slash (str/last-index-of p "/")
+        base: Str (if (< slash 0) p (subs p (+ slash 1) (count p)))]
+    (env-or "CHAT_MODEL_ID" (if (str/ends-with? base ".gguf") (subs base 0 (- (count base) 5)) base))))
+
+;; dyn-get は無いキーで nil ではなく int 0 を返すので、先に有無を見る。
+(defn dyn-has-key? Bool [d: Dyn k: Str]
+  (if (not (dyn-map? d)) false
+    (let [n (dyn-count d)]
+      (loop [i 0]
+        (if (>= i n) false
+          (if (= (dyn-key d i) k) true (recur (+ i 1))))))))
+
+(defn safe-get Dyn [d: Dyn k: Str]
+  (if (dyn-has-key? d k) (dyn-get d k) (nil->dyn)))
+
+(def hex-digits "0123456789abcdef")
+
+;; JSON の文字列リテラル（引用符付き）。制御文字も \u00XX にする（UTF-8 のバイトはそのまま通す）。
+(defn jstr Str [s: Str]
+  (let [n (count s)]
+    (loop [i 0 out: Str "\""]
+      (if (>= i n) (str out "\"")
+        (let [c (nth s i)]
+          (recur (+ i 1)
+                 (cond (= c 34) (str out "\\\"")
+                       (= c 92) (str out "\\\\")
+                       (= c 10) (str out "\\n")
+                       (= c 13) (str out "\\r")
+                       (= c 9) (str out "\\t")
+                       (< c 32) (str out "\\u00" (chr (nth hex-digits (/ c 16))) (chr (nth hex-digits (mod c 16))))
+                       :else (str out (chr c)))))))))
+
+(defn resp-json Map [status: Int body: Str]
+  (assoc (assoc (assoc (map-empty) "status" status) "body" body) "content-type" "application/json"))
+
+;; OpenAI のエラー形式 {"error":{"message","type","param","code"}}。param / code は "" なら null。
+(defn api-error-typed Map [status: Int message: Str param: Str code: Str etype: Str]
+  (do (eprintln (str "chat-server: " status " " message))
+      (resp-json status
+                 (str "{\"error\":{\"message\":" (jstr message)
+                      ",\"type\":" (jstr etype)
+                      ",\"param\":" (if (= (count param) 0) "null" (jstr param))
+                      ",\"code\":" (if (= (count code) 0) "null" (jstr code)) "}}"))))
+
+(defn api-error Map [status: Int message: Str param: Str code: Str]
+  (api-error-typed status message param code "invalid_request_error"))
+
+;; ---- 認証 ----
+
+(defn key-listed? Bool [k: Str keys: Str]
+  (let [parts: Vec(Str) (str/split keys ",")]
+    (loop [i 0]
+      (if (>= i (count parts)) false
+        (if (= (str/trim (nth parts i)) k) true (recur (+ i 1)))))))
+
+;; クエリ文字列の 1 つの値（%XX は戻さない。key や alt の値は英数字なので足りる）
+(defn query-param Str [uri: Str name: Str]
+  (let [q (str/index-of uri "?")]
+    (if (< q 0) ""
+      (let [parts: Vec(Str) (str/split (subs uri (+ q 1) (count uri)) "&")]
+        (loop [i 0]
+          (if (>= i (count parts)) ""
+            (let [p: Str (nth parts i)
+                  eq (str/index-of p "=")]
+              (if (and (> eq 0) (= (subs p 0 eq) name)) (subs p (+ eq 1) (count p)) (recur (+ i 1))))))))))
+
+;; 要求が持ってきたキー。Authorization: Bearer、x-goog-api-key、?key= の順に見る
+(defn request-key Str [req: Map]
+  (let [h: Str (http/header req "authorization")
+        g: Str (http/header req "x-goog-api-key")]
+    (cond (and (str/starts-with? h "Bearer ") (> (count h) 7)) (subs h 7 (count h))
+          (> (count g) 0) g
+          :else (query-param (map-get-str req "uri") "key"))))
+
+;; CHAT_API_KEYS が空なら常に通す
+(defn auth-ok? Bool [req: Map]
+  (let [keys: Str (getenv "CHAT_API_KEYS")]
+    (or (= (count keys) 0)
+        (let [k: Str (request-key req)] (and (> (count k) 0) (key-listed? k keys))))))
+
+(defn auth-error Map [req: Map]
+  (if (= (count (request-key req)) 0)
+    (api-error 401 "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY)." "" "")
+    (api-error 401 "Incorrect API key provided." "" "invalid_api_key")))
+
+;; ---- 会話 ----
+
+;; content は文字列か、{"type":"text","text":..} の配列（画像などの部分は無視する）
+(defn content-text Str [c: Dyn]
+  (cond
+    (dyn-str? c) (dyn->str c)
+    (dyn-vec? c) (loop [i 0 out: Str ""]
+                   (if (>= i (dyn-count c)) out
+                     (let [part (dyn-nth c i)
+                           t (safe-get part "text")]
+                       (recur (+ i 1) (if (dyn-str? t) (str out (if (> (count out) 0) "\n" "") (dyn->str t)) out)))))
+    :else ""))
+
+;; developer は system、tool / function は user として渡す（テンプレートが知らない役割を避ける）
+(defn role-of Str [r: Str]
+  (cond (= r "developer") "system"
+        (or (= r "tool") (= r "function")) "user"
+        :else r))
+
+(defn known-role? Bool [r: Str]
+  (or (= r "system") (= r "developer") (= r "user") (= r "assistant") (= r "tool") (= r "function")))
+
+;; messages を chatshim の形（role \x1F content を \x1E で区切る）にする。問題があればエラー文を返す。
+(defn encode-messages Values(Str Str) [ms: Dyn]
+  (if (or (not (dyn-vec? ms)) (= (dyn-count ms) 0))
+    (values "" "'messages' must be a non-empty array.")
+    (loop [i 0 out: Str ""]
+      (if (>= i (dyn-count ms)) (values out "")
+        (let [m (dyn-nth ms i)
+              rv (safe-get m "role")
+              role: Str (if (dyn-str? rv) (dyn->str rv) "")]
+          (cond
+            (not (dyn-map? m)) (values "" (str "Invalid type for 'messages[" i "]': expected an object."))
+            (not (known-role? role))
+            (values "" (str "Invalid value: '" role "'. Supported values are: 'system', 'assistant', 'user', 'function', 'tool', and 'developer'."))
+            :else
+            (recur (+ i 1) (str out (if (> i 0) (chr 30) "") (role-of role) (chr 31) (content-text (safe-get m "content"))))))))))
+
+;; ---- /v1/chat/completions ----
+
+(defn completion-id Str [] (str "chatcmpl-" (now-us) (rand-int 1000000)))
+
+(defn usage-json Str [p: Int c: Int]
+  (str "{\"prompt_tokens\":" p ",\"completion_tokens\":" c ",\"total_tokens\":" (+ p c) "}"))
+
+(defn chunk Str [id: Str created: Int model: Str delta: Str finish: Str]
+  (str "data: {\"id\":" (jstr id) ",\"object\":\"chat.completion.chunk\",\"created\":" created
+       ",\"model\":" (jstr model) ",\"system_fingerprint\":\"fp_clay_llama\",\"choices\":[{\"index\":0,\"delta\":" delta
+       ",\"logprobs\":null,\"finish_reason\":" finish "}]}\n\n"))
+
+(defn completion-response Map [model: Str text: Str p: Int c: Int finish: Str stream?: Bool usage-chunk?: Bool]
+  (let [id: Str (completion-id)
+        created (/ (now-ms) 1000)]
+    (if stream?
+      (assoc (assoc (assoc (map-empty) "status" 200) "content-type" "text/event-stream")
+             "body" (str (chunk id created model "{\"role\":\"assistant\",\"content\":\"\",\"refusal\":null}" "null")
+                         (chunk id created model (str "{\"content\":" (jstr text) "}") "null")
+                         (chunk id created model "{}" (jstr finish))
+                         (if usage-chunk?
+                           (str "data: {\"id\":" (jstr id) ",\"object\":\"chat.completion.chunk\",\"created\":" created
+                                ",\"model\":" (jstr model) ",\"choices\":[],\"usage\":" (usage-json p c) "}\n\n")
+                           "")
+                         "data: [DONE]\n\n"))
+      (resp-json 200 (str "{\"id\":" (jstr id) ",\"object\":\"chat.completion\",\"created\":" created
+                          ",\"model\":" (jstr model)
+                          ",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" (jstr text)
+                          ",\"refusal\":null},\"logprobs\":null,\"finish_reason\":" (jstr finish) "}]"
+                          ",\"usage\":" (usage-json p c) ",\"system_fingerprint\":\"fp_clay_llama\"}")))))
+
+(defn generate Map [model: Str msgs: Str max-tokens: Int temp-milli: Int stream?: Bool usage-chunk?: Bool]
+  (let [cap (+ 1024 (* 32 max-tokens))
+        out: Str (bytes-alloc cap)
+        t0 (now-us)
+        n (unsafe (chat-generate-c msgs max-tokens temp-milli out cap))]
+    (cond
+      (= n -3)
+      (let [need (unsafe (chat-count-tokens-c msgs))]
+        (api-error 400 (str "This model's maximum context length is " g-n-ctx " tokens. However, your messages resulted in "
+                            need " tokens. Please reduce the length of the messages.")
+                   "messages" "context_length_exceeded"))
+      (< n 0) (api-error-typed 500 (str "The server had an error while processing your request (code " n ").") "" "" "server_error")
+      :else
+      (let [p (parse-long (subs out 0 6))
+            c (parse-long (subs out 7 13))
+            finish: Str (if (= (subs out 14 15) "l") "length" "stop")
+            text: Str (subs out 16 n)
+            ms (/ (- (now-us) t0) 1000)]
+        (do (eprintln (str "chat-server: 200 model=" model " prompt_tokens=" p " completion_tokens=" c
+                           " finish=" finish " stream=" (if stream? "true" "false") " ms=" ms
+                           (if (> ms 0) (str " tok/s=" (/ (* c 1000) ms)) "")))
+            (completion-response model text p c finish stream? usage-chunk?))))))
+
+(defn num-or Int [d: Dyn dflt: Int]
+  (cond (dyn-int? d) (dyn->int d) (dyn-float? d) (float->int (dyn->float d)) :else dflt))
+
+(defn handle-request Map [d: Dyn]
+  (let [mv (safe-get d "model")
+        model: Str (if (dyn-str? mv) (dyn->str mv) "")
+        [msgs merr] (encode-messages (safe-get d "messages"))
+        mt1 (safe-get d "max_completion_tokens")
+        mt2 (safe-get d "max_tokens")
+        max-tokens (num-or (if (dyn-nil? mt1) mt2 mt1) default-max-tokens)
+        tv (safe-get d "temperature")
+        temp (cond (dyn-float? tv) (dyn->float tv) (dyn-int? tv) (int->float (dyn->int tv)) :else 0.7)
+        sv (safe-get d "stream")
+        stream? (and (dyn-bool? sv) (dyn->bool sv))
+        so (safe-get d "stream_options")
+        iu (safe-get so "include_usage")
+        usage-chunk? (and (dyn-bool? iu) (dyn->bool iu))
+        nv (safe-get d "n")]
+    (cond
+      (not (dyn-str? mv)) (api-error 400 "you must provide a model parameter" "" "")
+      (> (count merr) 0) (api-error 400 merr "messages" "")
+      (< max-tokens 1) (api-error 400 "Invalid 'max_tokens': integer below minimum value. Expected a value >= 1." "max_tokens" "integer_below_min_value")
+      (or (< temp 0.0) (> temp 2.0)) (api-error 400 "Invalid 'temperature': must be between 0 and 2." "temperature" "")
+      (and (dyn-int? nv) (> (dyn->int nv) 1)) (api-error 400 "This server supports only n=1." "n" "")
+      :else (generate model msgs max-tokens (float->int (* temp 1000.0)) stream? usage-chunk?))))
+
+(defn handle-completions Map [req: Map]
+  (let [[d e] (json/parse (map-get-str req "body"))]
+    (if (and (= e "") (dyn-map? d))
+      (handle-request d)
+      (api-error 400 "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON.)" "" ""))))
+
+;; ---- Gemini（generateContent）----
+
+;; Gemini 形式のエラー {"error":{"code":400,"message":"..","status":"INVALID_ARGUMENT"}}
+(defn gemini-error Map [code: Int message: Str status: Str]
+  (do (eprintln (str "chat-server: " code " " message))
+      (resp-json code (str "{\"error\":{\"code\":" code ",\"message\":" (jstr message) ",\"status\":" (jstr status) "}}"))))
+
+(defn gemini-auth-error Map [req: Map]
+  (if (= (count (request-key req)) 0)
+    (gemini-error 403 "Method doesn't allow unregistered callers (callers without established identity). Please use API Key or other form of API consumer identity to call this API." "PERMISSION_DENIED")
+    (gemini-error 400 "API key not valid. Please pass a valid API key." "INVALID_ARGUMENT")))
+
+;; パスの "…/models/<model>:<op>" を分ける。Values(model, op)。合わなければ op は ""
+(defn gemini-target Values(Str Str) [path: Str]
+  (let [i (str/last-index-of path "/models/")]
+    (if (< i 0) (values "" "")
+      (let [rest: Str (subs path (+ i 8) (count path))
+            c (str/index-of rest ":")]
+        (if (<= c 0) (values "" "")
+          (values (subs rest 0 c) (subs rest (+ c 1) (count rest))))))))
+
+;; parts の text をつなぐ（functionCall や inlineData などは無視する）
+(defn parts-text Str [parts: Dyn]
+  (if (not (dyn-vec? parts)) ""
+    (loop [i 0 out: Str ""]
+      (if (>= i (dyn-count parts)) out
+        (let [t (safe-get (dyn-nth parts i) "text")]
+          (recur (+ i 1) (if (dyn-str? t) (str out (dyn->str t)) out)))))))
+
+;; camelCase か snake_case のどちらかで来る欄（REST は両方受ける）
+(defn get2 Dyn [d: Dyn a: Str b: Str]
+  (let [x (safe-get d a)] (if (dyn-nil? x) (safe-get d b) x)))
+
+;; contents と systemInstruction を chatshim の形にする。Values(msgs, エラー文)
+(defn encode-contents Values(Str Str) [d: Dyn]
+  (let [cs (safe-get d "contents")
+        si (get2 d "systemInstruction" "system_instruction")
+        sys: Str (parts-text (safe-get si "parts"))
+        head: Str (if (> (count sys) 0) (str "system" (chr 31) sys) "")]
+    (if (or (not (dyn-vec? cs)) (= (dyn-count cs) 0))
+      (values "" "* GenerateContentRequest.contents: contents is not specified")
+      (loop [i 0 out: Str head]
+        (if (>= i (dyn-count cs)) (values out "")
+          (let [c (dyn-nth cs i)
+                rv (safe-get c "role")
+                role: Str (if (dyn-str? rv) (dyn->str rv) "user")]
+            (if (not (or (= role "user") (= role "model") (= role "function")))
+              (values "" (str "Please use a valid role: user, model."))
+              (recur (+ i 1) (str out (if (> (count out) 0) (chr 30) "")
+                                  (if (= role "model") "assistant" "user") (chr 31)
+                                  (parts-text (safe-get c "parts")))))))))))
+
+(defn gemini-body Str [model: Str text: Str p: Int c: Int finish: Str]
+  (str "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":" (jstr text) "}],\"role\":\"model\"},"
+       "\"finishReason\":" (jstr finish) ",\"index\":0}],"
+       "\"usageMetadata\":{\"promptTokenCount\":" p ",\"candidatesTokenCount\":" c ",\"totalTokenCount\":" (+ p c)
+       ",\"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":" p "}]},"
+       "\"modelVersion\":" (jstr model) ",\"responseId\":" (jstr (str (now-us) (rand-int 1000000))) "}"))
+
+;; op: generateContent / streamGenerateContent。sse? は ?alt=sse
+(defn gemini-generate Map [model: Str d: Dyn op: Str sse?: Bool]
+  (let [[msgs merr] (encode-contents d)
+        gc (get2 d "generationConfig" "generation_config")
+        max-tokens (num-or (get2 gc "maxOutputTokens" "max_output_tokens") default-max-tokens)
+        tv (safe-get gc "temperature")
+        temp (cond (dyn-float? tv) (dyn->float tv) (dyn-int? tv) (int->float (dyn->int tv)) :else 0.7)]
+    (cond
+      (> (count merr) 0) (gemini-error 400 merr "INVALID_ARGUMENT")
+      (< max-tokens 1) (gemini-error 400 "* GenerationConfig.max_output_tokens: must be positive" "INVALID_ARGUMENT")
+      (or (< temp 0.0) (> temp 2.0)) (gemini-error 400 "* GenerationConfig.temperature: must be between 0 and 2" "INVALID_ARGUMENT")
+      :else
+      (let [cap (+ 1024 (* 32 max-tokens))
+            out: Str (bytes-alloc cap)
+            t0 (now-us)
+            n (unsafe (chat-generate-c msgs max-tokens (float->int (* temp 1000.0)) out cap))]
+        (cond
+          (= n -3)
+          (gemini-error 400 (str "The input token count (" (unsafe (chat-count-tokens-c msgs)) ") exceeds the maximum number of tokens allowed (" g-n-ctx ").") "INVALID_ARGUMENT")
+          (< n 0) (gemini-error 500 (str "An internal error has occurred (code " n ").") "INTERNAL")
+          :else
+          (let [p (parse-long (subs out 0 6))
+                c (parse-long (subs out 7 13))
+                finish: Str (if (= (subs out 14 15) "l") "MAX_TOKENS" "STOP")
+                body: Str (gemini-body model (subs out 16 n) p c finish)
+                ms (/ (- (now-us) t0) 1000)]
+            (do (eprintln (str "chat-server: 200 gemini model=" model " op=" op (if sse? " alt=sse" "")
+                               " prompt_tokens=" p " completion_tokens=" c " finish=" finish " ms=" ms
+                               (if (> ms 0) (str " tok/s=" (/ (* c 1000) ms)) "")))
+                (cond
+                  (= op "generateContent") (resp-json 200 body)
+                  sse? (assoc (assoc (assoc (map-empty) "status" 200) "content-type" "text/event-stream") "body" (str "data: " body "\r\n\r\n"))
+                  :else (resp-json 200 (str "[" body "]"))))))))))
+
+(defn handle-gemini Map [req: Map path: Str]
+  (let [[model op] (gemini-target path)
+        method: Str (map-get-str req "method")]
+    (cond
+      (not (= method "POST")) (gemini-error 405 (str "Method not allowed (" method " " path ")") "INVALID_ARGUMENT")
+      (not (auth-ok? req)) (gemini-auth-error req)
+      :else
+      (let [[d e] (json/parse (map-get-str req "body"))]
+        (cond
+          (or (> (count e) 0) (not (dyn-map? d)))
+          (gemini-error 400 "Invalid JSON payload received." "INVALID_ARGUMENT")
+          (= op "countTokens")
+          (let [[msgs merr] (encode-contents d)]
+            (if (> (count merr) 0) (gemini-error 400 merr "INVALID_ARGUMENT")
+              (resp-json 200 (str "{\"totalTokens\":" (unsafe (chat-count-tokens-c msgs)) "}"))))
+          (or (= op "generateContent") (= op "streamGenerateContent"))
+          (gemini-generate model d op (= (query-param (map-get-str req "uri") "alt") "sse"))
+          :else (gemini-error 404 (str "Unknown method '" op "'.") "NOT_FOUND"))))))
+
+(defn gemini-models Map []
+  (resp-json 200 (str "{\"models\":[{\"name\":\"models/gemini-2.5-flash\",\"version\":\"001\",\"displayName\":\"Gemini 2.5 Flash (served by "
+                      (model-id) ")\",\"inputTokenLimit\":" g-n-ctx ",\"outputTokenLimit\":8192,"
+                      "\"supportedGenerationMethods\":[\"generateContent\",\"countTokens\"]}]}")))
+
+;; ---- その他のエンドポイント ----
+
+(defn handle-models Map []
+  (resp-json 200 (str "{\"object\":\"list\",\"data\":[{\"id\":" (jstr (model-id))
+                      ",\"object\":\"model\",\"created\":1727222400,\"owned_by\":\"meta\"}]}")))
+
+(defn handle-health Map []
+  (resp-json 200 (str "{\"status\":\"ok\",\"model\":" (jstr (model-id)) ",\"n_ctx\":" g-n-ctx "}")))
+
+(defn- hexv Int [c: Int]
+  (cond (and (>= c 48) (<= c 57)) (- c 48)
+        (and (>= c 97) (<= c 102)) (- c 87)
+        (and (>= c 65) (<= c 70)) (- c 55)
+        :else -1))
+
+;; パスの %XX を戻す。リレー（theorems-relay）はパスをセグメントごとに encodeURIComponent し直すので、
+;; Gemini の ".../models/gemini-2.5-flash:generateContent" の ":" が "%3A" になって届く。
+(defn percent-decode Str [s: Str]
+  (let [n (count s)]
+    (loop [i 0 out: Str ""]
+      (if (>= i n) out
+        (let [c (nth s i)]
+          (if (and (= c 37) (< (+ i 2) n) (>= (hexv (nth s (+ i 1))) 0) (>= (hexv (nth s (+ i 2))) 0))
+            (recur (+ i 3) (str out (chr (+ (* 16 (hexv (nth s (+ i 1)))) (hexv (nth s (+ i 2)))))))
+            (recur (+ i 1) (str out (chr c)))))))))
+
+(defn path-of Str [uri: Str]
+  (let [q (str/index-of uri "?")] (percent-decode (if (< q 0) uri (subs uri 0 q)))))
+
+(defn- route-inner Map [req: Map]
+  (let [method: Str (map-get-str req "method")
+        path: Str (path-of (map-get-str req "uri"))]
+    (cond
+      (= path "/health") (handle-health)
+      (> (str/index-of path ":") 0) (handle-gemini req path)
+      (or (= path "/v1beta/models") (= path "/v1/models/"))
+      (if (auth-ok? req) (gemini-models) (gemini-auth-error req))
+      ;; /v1/chat/completions のほか、Gemini の OpenAI 互換の口 /v1beta/openai/chat/completions なども受ける
+      (not (or (str/ends-with? path "/chat/completions") (str/ends-with? path "/models")))
+      (api-error 404 (str "Invalid URL (" method " " path ")") "" "")
+      (not (auth-ok? req)) (auth-error req)
+      (str/ends-with? path "/models")
+      (if (= method "GET") (handle-models) (api-error 405 (str "Method not allowed (" method " " path ")") "" ""))
+      :else
+      (if (= method "POST") (handle-completions req) (api-error 405 (str "Method not allowed (" method " " path ")") "" "")))))
+
+;; 全要求を 1 行ずつ記録する（どこから何が来たかを見るため）
+(defn route Map [req: Map]
+  (let [resp: Map (route-inner req)]
+    (do (eprintln (str "chat-server: req " (map-get-str req "method") " " (map-get-str req "uri")
+                       " -> " (map-get-int resp "status") " ua=" (http/header req "user-agent")))
+        resp)))
+
+(defn main Int []
+  (let [path: Str (model-path)
+        n-ctx (env-int "CHAT_CTX" 8192)
+        threads (env-int "CHAT_THREADS" 8)
+        gpu-layers (env-int "CHAT_GPU_LAYERS" -1)
+        host: Str (env-or "CHAT_HOST" "172.23.0.1")
+        port (env-int "CHAT_PORT" 8898)
+        loaded (unsafe (chat-load-c path n-ctx threads gpu-layers))]
+    (if (<= loaded 0)
+      (do (eprintln (str "chat-server: cannot load model " path " (code " loaded ")")) 1)
+      (do (set! g-n-ctx loaded)
+          (eprintln (str "chat-server: " (model-id) " n_ctx=" loaded " threads=" threads " gpu_layers=" gpu-layers
+                         " listening on " host ":" port
+                         (if (= (count (getenv "CHAT_API_KEYS")) 0) " (no auth)" " (auth: CHAT_API_KEYS)")))
+          (http/run-server route (assoc (assoc (assoc (map-empty) "port" port) "host" host) "max-body" 16777216))))))

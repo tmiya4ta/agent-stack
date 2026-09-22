@@ -1,0 +1,97 @@
+;; ais.engine の結合テスト（HTTP を通さない）。
+;;   bash ~/projects/clay/build.sh test/engine_test.clay -o build/engine_test && build/engine_test
+(ns test.engine-test
+  (:require [clay.core]
+            [clay.json :as json]
+            [ais.web :as w]
+            [ais.engine :as en]))
+
+(defvar ^Int g-fail 0)
+
+(defn fail Int [msg: Str] (do (println (str "FAIL " msg)) (set! g-fail (+ g-fail 1)) 1))
+
+(defn body-of Dyn [resp: Map] (let [[d e] (json/parse (map-get-str resp "body"))] d))
+
+(defn expect-status Int [label: Str resp: Map want: Int]
+  (if (= (map-get-int resp "status") want) 0
+    (fail (str label ": status " (map-get-int resp "status") " (want " want ") body=" (map-get-str resp "body")))))
+
+(def index-def "{\"name\":\"semantic-cache\",\"fields\":[{\"name\":\"id\",\"type\":\"Edm.String\",\"key\":true,\"filterable\":true},{\"name\":\"prompt\",\"type\":\"Edm.String\",\"searchable\":true},{\"name\":\"api\",\"type\":\"Edm.String\",\"filterable\":true},{\"name\":\"hidden\",\"type\":\"Edm.String\",\"retrievable\":false},{\"name\":\"vec\",\"type\":\"Collection(Edm.Single)\",\"searchable\":true,\"dimensions\":3,\"vectorSearchProfile\":\"p1\"}],\"vectorSearch\":{\"algorithms\":[{\"name\":\"a1\",\"kind\":\"hnsw\",\"hnswParameters\":{\"metric\":\"cosine\"}}],\"profiles\":[{\"name\":\"p1\",\"algorithm\":\"a1\"}]}}")
+
+(def docs-batch "{\"value\":[{\"@search.action\":\"upload\",\"id\":\"d1\",\"prompt\":\"注文の配送状況を教えて\",\"api\":\"orders\",\"hidden\":\"x\",\"vec\":[1.0,0.0,0.0]},{\"@search.action\":\"upload\",\"id\":\"d2\",\"prompt\":\"返品したい\",\"api\":\"orders\",\"vec\":[0.0,1.0,0.0]},{\"id\":\"d3\",\"prompt\":\"天気\",\"api\":\"weather\",\"vec\":[0.6,0.8,0.0]}]}")
+
+(defn main Int []
+  (let [st0: Map (en/new-state "test-svc")
+        ;; インデックス作成
+        [st1 r1 c1] (en/handle st0 "PUT" "/indexes('semantic-cache')?api-version=2024-07-01" index-def)
+        _ (expect-status "PUT index" r1 201)
+        [st1b r1b c1b] (en/handle st1 "POST" "/indexes?api-version=2024-07-01" index-def)
+        _ (expect-status "POST existing index" r1b 409)
+        [st1c r1c c1c] (en/handle st1 "GET" "/indexes/semantic-cache?api-version=2024-07-01" "")
+        _ (expect-status "GET index" r1c 200)
+        _ (if (= (w/dstr (body-of r1c) "name" "") "semantic-cache") 0 (fail "GET index name"))
+        [stx rx cx] (en/handle st1 "GET" "/indexes/nope?api-version=2024-07-01" "")
+        _ (expect-status "GET missing index" rx 404)
+        ;; 文書
+        [st2 r2 c2] (en/handle st1 "POST" "/indexes/semantic-cache/docs/index?api-version=2024-07-01" docs-batch)
+        _ (expect-status "upload" r2 200)
+        _ (if (= c2 1) 0 (fail "upload should change state"))
+        _ (let [v (w/dget (body-of r2) "value")]
+            (if (and (= (dyn-count v) 3) (= (w/dint (dyn-nth v 0) "statusCode" 0) 201)) 0 (fail (str "upload result " (map-get-str r2 "body")))))
+        [st2b r2b c2b] (en/handle st2 "POST" "/indexes/semantic-cache/docs/index" "{\"value\":[{\"id\":\"d9\",\"vec\":[1.0,2.0]}]}")
+        _ (expect-status "wrong dims" r2b 400)
+        [st2c r2c c2c] (en/handle st2 "POST" "/indexes/semantic-cache/docs/index" "{\"value\":[{\"id\":\"d9\",\"nosuch\":1}]}")
+        _ (expect-status "unknown field" r2c 400)
+        [st2d r2d c2d] (en/handle st2 "POST" "/indexes/semantic-cache/docs/index" "{\"value\":[{\"@search.action\":\"merge\",\"id\":\"zz\",\"api\":\"x\"},{\"id\":\"bad key!\"}]}")
+        _ (expect-status "partial failure" r2d 207)
+        ;; 件数と 1 件取得
+        [s3 r3 c3] (en/handle st2 "GET" "/indexes/semantic-cache/docs/$count?api-version=2024-07-01" "")
+        _ (if (= (map-get-str r3 "body") "3") 0 (fail (str "$count=" (map-get-str r3 "body"))))
+        [s4 r4 c4] (en/handle st2 "GET" "/indexes/semantic-cache/docs('d1')?api-version=2024-07-01" "")
+        _ (expect-status "get doc" r4 200)
+        _ (if (w/has? (body-of r4) "hidden") (fail "non-retrievable field returned") 0)
+        ;; ベクトル検索: [1,0,0] に一番近いのは d1（cos=1 → score 1.0）、次が d3（cos=0.6 → 1/1.4）
+        [s5 r5 c5] (en/handle st2 "POST" "/indexes/semantic-cache/docs/search?api-version=2024-07-01"
+                              "{\"count\":true,\"select\":\"id,prompt\",\"vectorQueries\":[{\"kind\":\"vector\",\"vector\":[1.0,0.0,0.0],\"fields\":\"vec\",\"k\":2}]}")
+        _ (expect-status "vector search" r5 200)
+        b5 (body-of r5)
+        v5 (w/dget b5 "value")
+        _ (if (= (dyn-count v5) 2) 0 (fail (str "k=2 returned " (dyn-count v5) ": " (map-get-str r5 "body"))))
+        _ (if (= (w/dstr (dyn-nth v5 0) "id" "") "d1") 0 (fail "top hit should be d1"))
+        _ (if (= (w/dstr (dyn-nth v5 1) "id" "") "d3") 0 (fail "second hit should be d3"))
+        s1 (w/as-float (w/dget (dyn-nth v5 0) "@search.score"))
+        s2 (w/as-float (w/dget (dyn-nth v5 1) "@search.score"))
+        _ (if (and (> s1 0.9999) (< s1 1.0001)) 0 (fail (str "score1=" s1)))
+        _ (if (and (> s2 0.71428) (< s2 0.71429)) 0 (fail (str "score2=" s2 " (want 1/1.4)")))
+        _ (if (w/has? (dyn-nth v5 0) "vec") (fail "select should drop vec") 0)
+        _ (if (= (w/dint b5 "@odata.count" -1) 2) 0 (fail "@odata.count"))
+        ;; フィルタ付き
+        [s6 r6 c6] (en/handle st2 "POST" "/indexes/semantic-cache/docs/search"
+                              "{\"filter\":\"api eq 'weather'\",\"vectorQueries\":[{\"kind\":\"vector\",\"vector\":[1.0,0.0,0.0],\"fields\":\"vec\",\"k\":5}]}")
+        v6 (w/dget (body-of r6) "value")
+        _ (if (and (= (dyn-count v6) 1) (= (w/dstr (dyn-nth v6 0) "id" "") "d3")) 0 (fail (str "filtered: " (map-get-str r6 "body"))))
+        ;; しきい値（cos >= 0.7 → d1 だけ）
+        [s7 r7 c7] (en/handle st2 "POST" "/indexes/semantic-cache/docs/search"
+                              "{\"vectorQueries\":[{\"kind\":\"vector\",\"vector\":[1.0,0.0,0.0],\"fields\":\"vec\",\"k\":5,\"threshold\":{\"kind\":\"vectorSimilarity\",\"value\":0.7}}]}")
+        _ (if (= (dyn-count (w/dget (body-of r7) "value")) 1) 0 (fail (str "threshold: " (map-get-str r7 "body"))))
+        ;; 文字列検索（GET）
+        [s8 r8 c8] (en/handle st2 "GET" "/indexes/semantic-cache/docs?api-version=2024-07-01&search=%E8%BF%94%E5%93%81&$count=true" "")
+        v8 (w/dget (body-of r8) "value")
+        _ (if (and (= (dyn-count v8) 1) (= (w/dstr (dyn-nth v8 0) "id" "") "d2")) 0 (fail (str "text search: " (map-get-str r8 "body"))))
+        ;; 不正なフィルタ
+        [s9 r9 c9] (en/handle st2 "POST" "/indexes/semantic-cache/docs/search" "{\"filter\":\"api eq\"}")
+        _ (expect-status "bad filter" r9 400)
+        ;; 削除
+        [s10 r10 c10] (en/handle st2 "POST" "/indexes/semantic-cache/docs/index" "{\"value\":[{\"@search.action\":\"delete\",\"id\":\"d1\"}]}")
+        [s11 r11 c11] (en/handle s10 "GET" "/indexes/semantic-cache/docs/$count" "")
+        _ (if (= (map-get-str r11 "body") "2") 0 (fail "count after delete"))
+        [s12 r12 c12] (en/handle s10 "GET" "/indexes/semantic-cache/stats" "")
+        _ (expect-status "stats" r12 200)
+        [s13 r13 c13] (en/handle s10 "GET" "/servicestats" "")
+        _ (expect-status "servicestats" r13 200)
+        [s14 r14 c14] (en/handle s10 "DELETE" "/indexes/semantic-cache" "")
+        _ (expect-status "delete index" r14 204)
+        [s15 r15 c15] (en/handle s14 "GET" "/indexes" "")
+        _ (if (= (dyn-count (w/dget (body-of r15) "value")) 0) 0 (fail "index list after delete"))]
+    (do (println (if (= g-fail 0) "engine: all passed" (str "engine: " g-fail " failure(s)")))
+        g-fail)))

@@ -1,0 +1,296 @@
+;; emb/server.clay — OpenAI 互換の埋め込み API サーバ（clay + llama.cpp）。
+;;
+;;   POST /v1/embeddings   OpenAI と同じリクエスト / レスポンス / エラー形式
+;;   GET  /v1/models       受け付けるモデル名の一覧
+;;   GET  /health          死活確認（認証なし）
+;;
+;; ベクトルは gte-Qwen2-1.5B-instruct（1536 次元）を llama.cpp で計算する（embshim.c）。
+;; text-embedding-ada-002 / text-embedding-3-small の名前でも受け付ける（中身は同じモデル）。
+;;
+;; 環境変数:
+;;   EMB_MODEL      GGUF のパス（既定 ~/models/gguf/gte-Qwen2-1.5B-instruct-q8_0.gguf）
+;;   EMB_HOST       bind するアドレス（既定 172.23.0.1 = kind bridge。theorems-edge からだけ届く）
+;;   EMB_PORT       既定 8896
+;;   EMB_THREADS    計算スレッド数（既定 8。物理コア数を超えると遅くなる）
+;;   EMB_GPU_LAYERS GPU（Vulkan）に載せる層数（既定 -1 = 全層、0 = CPU のみ）
+;;   EMB_CTX        1 入力のトークン上限（既定 8192）
+;;   EMB_API_KEYS   許可する API キー（カンマ区切り）。空なら認証しない
+;;
+;; 認証は OpenAI と同じ Authorization: Bearer <key>（clay 0.41.0 からハンドラでヘッダを読める）。
+
+(ns emb.server
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]
+            [clay.http :as http]
+            [clay.base64 :as b64]))
+
+;; embshim.c（llama.cpp の薄い層）。宣言は build.sh が `-include embshim.h` で渡す。
+(defextern emb-load-c Int "emb_load" [path: Str n-ctx: Int threads: Int gpu-layers: Int])
+(defextern emb-count-tokens-c Int "emb_count_tokens" [text: Str])
+(defextern emb-embed-c Int "emb_embed" [text: Str dims: Int out: Str])
+(defextern emb-format-json-c Int "emb_format_json" [f32: Str n: Int out: Str cap: Int])
+
+(def model-id "gte-Qwen2-1.5B-instruct")
+(def max-inputs 2048)
+(def api-reference "Please check the API reference: https://platform.openai.com/docs/api-reference.")
+
+(defvar ^Int g-dim 0)    ; モデルの次元数（main で設定）
+(defvar ^Int g-n-ctx 0)  ; 1 入力のトークン上限（main で設定）
+
+;; ---- 小道具 ----
+
+(defn env-or Str [name: Str dflt: Str]
+  (let [v: Str (getenv name)] (if (= (count v) 0) dflt v)))
+
+(defn env-int Int [name: Str dflt: Int]
+  (let [v: Str (getenv name)] (if (= (count v) 0) dflt (parse-long v))))
+
+;; dyn-get は無いキーで nil ではなく int 0 を返すので、先に有無を見る。
+(defn dyn-has-key? Bool [d: Dyn k: Str]
+  (if (not (dyn-map? d)) false
+    (let [n (dyn-count d)]
+      (loop [i 0]
+        (if (>= i n) false
+          (if (= (dyn-key d i) k) true (recur (+ i 1))))))))
+
+(defn safe-get Dyn [d: Dyn k: Str]
+  (if (dyn-has-key? d k) (dyn-get d k) (nil->dyn)))
+
+(def hex-digits "0123456789abcdef")
+
+;; JSON の文字列リテラル（引用符付き）。json/escape は制御文字を通してしまうので自前で書く。
+(defn jstr Str [s: Str]
+  (let [n (count s)]
+    (loop [i 0 out: Str "\""]
+      (if (>= i n) (str out "\"")
+        (let [c (nth s i)]
+          (recur (+ i 1)
+                 (cond (= c 34) (str out "\\\"")
+                       (= c 92) (str out "\\\\")
+                       (= c 10) (str out "\\n")
+                       (= c 13) (str out "\\r")
+                       (= c 9) (str out "\\t")
+                       (< c 32) (str out "\\u00" (chr (nth hex-digits (/ c 16))) (chr (nth hex-digits (- c (* 16 (/ c 16))))))
+                       :else (str out (chr c)))))))))
+
+(defn resp-json Map [status: Int body: Str]
+  (assoc (assoc (assoc (map-empty) "status" status) "body" body)
+         "content-type" "application/json"))
+
+;; OpenAI のエラー形式 {"error":{"message","type","param","code"}}。param / code は "" なら null。
+(defn api-error-typed Map [status: Int message: Str param: Str code: Str etype: Str]
+  (do (eprintln (str "embeddings-server: " status " " message))
+      (resp-json status
+                 (str "{\"error\":{\"message\":" (jstr message)
+                      ",\"type\":" (jstr etype)
+                      ",\"param\":" (if (= (count param) 0) "null" (jstr param))
+                      ",\"code\":" (if (= (count code) 0) "null" (jstr code)) "}}"))))
+
+(defn api-error Map [status: Int message: Str param: Str code: Str]
+  (api-error-typed status message param code "invalid_request_error"))
+
+;; ---- 認証 ----
+
+(defn key-listed? Bool [k: Str keys: Str]
+  (let [parts: Vec(Str) (str/split keys ",")]
+    (loop [i 0]
+      (if (>= i (count parts)) false
+        (if (= (str/trim (nth parts i)) k) true (recur (+ i 1)))))))
+
+;; EMB_API_KEYS が空なら常に通す。そうでなければ Authorization: Bearer <key> を見る。
+(defn auth-ok? Bool [req: Map]
+  (let [keys: Str (getenv "EMB_API_KEYS")]
+    (if (= (count keys) 0) true
+      (let [h: Str (http/header req "authorization")]
+        (and (str/starts-with? h "Bearer ")
+             (> (count h) 7)
+             (key-listed? (subs h 7 (count h)) keys))))))
+
+(defn auth-error Map [req: Map]
+  (if (= (count (http/header req "authorization")) 0)
+    (api-error 401 "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY)." "" "")
+    (api-error 401 "Incorrect API key provided." "" "invalid_api_key")))
+
+;; ---- /v1/embeddings ----
+
+(defn known-model? Bool [m: Str]
+  (or (= m model-id) (= m "text-embedding-ada-002") (= m "text-embedding-3-small")))
+
+;; input が「空でない文字列」か「空でない文字列だけの配列」か
+(defn texts? Bool [in: Dyn]
+  (if (dyn-str? in) (> (count (dyn->str in)) 0)
+    (and (dyn-vec? in)
+         (> (dyn-count in) 0)
+         (loop [i 0]
+           (if (>= i (dyn-count in)) true
+             (let [x (dyn-nth in i)]
+               (if (and (dyn-str? x) (> (count (dyn->str x)) 0)) (recur (+ i 1)) false)))))))
+
+;; OpenAI はトークン ID 配列（[1, 2, ..] や [[1, 2], ..]）も受けるが、tiktoken の ID は
+;; このモデルの語彙に戻せないので受け付けない。
+(defn token-ids? Bool [in: Dyn]
+  (and (dyn-vec? in)
+       (> (dyn-count in) 0)
+       (let [x (dyn-nth in 0)] (or (dyn-int? x) (dyn-vec? x)))))
+
+(defn input-texts Vec(Str) [in: Dyn]
+  (if (dyn-str? in) [(dyn->str in)]
+    (loop [i 0 acc: Vec(Str) []]
+      (if (>= i (dyn-count in)) acc
+        (recur (+ i 1) (conj acc (dyn->str (dyn-nth in i))))))))
+
+;; 1 件分の {"object":"embedding",...}。計算に失敗したら ""。
+(defn embedding-item Str [text: Str index: Int dims: Int base64?: Bool]
+  (let [buf: Str (bytes-alloc (* 4 dims))
+        n (unsafe (emb-embed-c text dims buf))]
+    (if (< n 0) ""
+      (let [vec-json: Str (if base64?
+                            (jstr (b64/encode buf))
+                            (let [cap (+ 16 (* 17 dims))
+                                  out: Str (bytes-alloc cap)
+                                  m (unsafe (emb-format-json-c buf dims out cap))]
+                              (if (< m 0) "" (subs out 0 m))))]
+        (if (= (count vec-json) 0) ""
+          (str "{\"object\":\"embedding\",\"index\":" index ",\"embedding\":" vec-json "}"))))))
+
+;; 各入力のトークン数。上限を超えるものがあれば、その数を負にして返す（最初の 1 件）。
+(defn token-counts Vec(Int) [texts: Vec(Str)]
+  (loop [i 0 acc: Vec(Int) []]
+    (if (>= i (count texts)) acc
+      (recur (+ i 1) (conj acc (unsafe (emb-count-tokens-c (nth texts i))))))))
+
+(defn first-over-limit Int [counts: Vec(Int)]
+  (loop [i 0]
+    (if (>= i (count counts)) 0
+      (if (> (nth counts i) g-n-ctx) (nth counts i) (recur (+ i 1))))))
+
+(defn sum-ints Int [xs: Vec(Int)]
+  (loop [i 0 acc 0] (if (>= i (count xs)) acc (recur (+ i 1) (+ acc (nth xs i))))))
+
+(defn embed-texts Map [model: Str texts: Vec(Str) dims: Int base64?: Bool]
+  (let [counts: Vec(Int) (token-counts texts)
+        over (first-over-limit counts)
+        tokens (sum-ints counts)
+        t0 (now-us)]
+    (if (> over 0)
+      (api-error 400 (str "This model's maximum context length is " g-n-ctx " tokens, however you requested "
+                          over " tokens (" over " in your prompt; 0 for the completion). Please reduce your prompt; or completion length.")
+                 "" "")
+      (let [data: Str (loop [i 0 acc: Str "["]
+                        (if (>= i (count texts)) (str acc "]")
+                          (let [item: Str (embedding-item (nth texts i) i dims base64?)]
+                            (if (= (count item) 0) ""
+                              (recur (+ i 1) (str acc (if (> i 0) "," "") item))))))]
+        (if (= (count data) 0)
+          (api-error-typed 500 "The server had an error while processing your request." "" "" "server_error")
+          (do (eprintln (str "embeddings-server: 200 model=" model " inputs=" (count texts) " tokens=" tokens
+                             " dims=" dims " format=" (if base64? "base64" "float")
+                             " ms=" (/ (- (now-us) t0) 1000)))
+              (resp-json 200 (str "{\"object\":\"list\",\"data\":" data
+                                  ",\"model\":" (jstr model)
+                                  ",\"usage\":{\"prompt_tokens\":" tokens ",\"total_tokens\":" tokens "}}"))))))))
+
+(defn handle-request Map [d: Dyn]
+  (let [mv (safe-get d "model")
+        model: Str (if (dyn-str? mv) (dyn->str mv) "")
+        in (safe-get d "input")
+        fv (safe-get d "encoding_format")
+        fmt: Str (if (dyn-str? fv) (dyn->str fv) "")
+        dv (safe-get d "dimensions")
+        has-dims (not (dyn-nil? dv))
+        dims (if has-dims (if (dyn-int? dv) (dyn->int dv) -1) g-dim)]
+    (cond
+      (not (dyn-str? mv)) (api-error 400 "you must provide a model parameter" "" "")
+      (not (known-model? model))
+      (api-error 404 (str "The model `" model "` does not exist or you do not have access to it.") "" "model_not_found")
+      (dyn-nil? in) (api-error 400 "'input' is a required property" "input" "")
+      (token-ids? in) (api-error 400 "Token-ID input is not supported by this server. Send the text itself." "input" "")
+      (not (texts? in)) (api-error 400 (str "'$.input' is invalid. " api-reference) "input" "")
+      (and (dyn-vec? in) (> (dyn-count in) max-inputs))
+      (api-error 400 (str "'$.input' is too long. Maximum array size is " max-inputs ".") "input" "")
+      (not (or (dyn-nil? fv) (= fmt "float") (= fmt "base64")))
+      (api-error 400 "Invalid value for 'encoding_format': expected one of 'float' or 'base64'." "encoding_format" "")
+      (and has-dims (= model "text-embedding-ada-002"))
+      (api-error 400 "This model does not support specifying dimensions." "dimensions" "")
+      (or (< dims 1) (> dims g-dim))
+      (api-error 400 (str "Invalid value for 'dimensions': must be an integer between 1 and " g-dim ".") "dimensions" "")
+      :else (embed-texts model (input-texts in) dims (= fmt "base64")))))
+
+(defn handle-embeddings Map [req: Map]
+  (let [[d e] (json/parse (map-get-str req "body"))]
+    (if (and (= e "") (dyn-map? d))
+      (handle-request d)
+      (api-error 400 "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON.)" "" ""))))
+
+;; ---- その他のエンドポイント ----
+
+(defn model-entry Str [id: Str created: Int owner: Str]
+  (str "{\"id\":" (jstr id) ",\"object\":\"model\",\"created\":" created ",\"owned_by\":" (jstr owner) "}"))
+
+(defn handle-models Map []
+  (resp-json 200 (str "{\"object\":\"list\",\"data\":["
+                      (model-entry model-id 1717200000 "Alibaba-NLP") ","
+                      (model-entry "text-embedding-ada-002" 1671217299 "openai-internal") ","
+                      (model-entry "text-embedding-3-small" 1705948997 "system") "]}")))
+
+(defn handle-health Map []
+  (resp-json 200 (str "{\"status\":\"ok\",\"model\":" (jstr model-id) ",\"dimensions\":" g-dim "}")))
+
+(defn path-of Str [uri: Str]
+  (let [q (str/index-of uri "?")] (if (< q 0) uri (subs uri 0 q))))
+
+(defn- route-inner Map [req: Map]
+  (let [method: Str (map-get-str req "method")
+        path: Str (path-of (map-get-str req "uri"))]
+    (cond
+      (= path "/health") (handle-health)
+      (not (or (= path "/v1/embeddings") (= path "/v1/models")))
+      (api-error 404 (str "Invalid URL (" method " " path ")") "" "")
+      (not (auth-ok? req)) (auth-error req)
+      (= path "/v1/models")
+      (if (= method "GET") (handle-models) (api-error 405 (str "Method not allowed (" method " " path ")") "" ""))
+      :else
+      (if (= method "POST") (handle-embeddings req) (api-error 405 (str "Method not allowed (" method " " path ")") "" "")))))
+
+;; 要求の要約（ログ用）: model、input の形、encoding_format、dimensions
+(defn- input-shape Str [in: Dyn]
+  (cond (dyn-nil? in) "none"
+        (dyn-str? in) (str "str(" (count (dyn->str in)) "B)")
+        (dyn-vec? in) (str "array(" (dyn-count in) (if (and (> (dyn-count in) 0) (not (dyn-str? (dyn-nth in 0)))) ",non-str" "") ")")
+        :else "other"))
+
+(defn- body-summary Str [body: Str]
+  (if (= (count body) 0) ""
+    (let [[d e] (json/parse body)]
+      (if (or (> (count e) 0) (not (dyn-map? d))) (str "body=unparsable(" (count body) "B)")
+        (let [mv (safe-get d "model") fv (safe-get d "encoding_format") dv (safe-get d "dimensions")]
+          (str "model=" (if (dyn-str? mv) (dyn->str mv) "-") " input=" (input-shape (safe-get d "input"))
+               (if (dyn-str? fv) (str " format=" (dyn->str fv)) "")
+               (if (dyn-int? dv) (str " dimensions=" (dyn->int dv)) "")))))))
+
+;; 全要求を 1 行ずつ記録する（成功した /v1/models や /health も。接続確認の中身を見るため）
+(defn route Map [req: Map]
+  (let [resp: Map (route-inner req)]
+    (do (eprintln (str "embeddings-server: req " (map-get-str req "method") " " (map-get-str req "uri")
+                       " -> " (map-get-int resp "status") " ua=" (http/header req "user-agent")
+                       (let [b: Str (body-summary (map-get-str req "body"))] (if (= (count b) 0) "" (str " " b)))))
+        resp)))
+
+(defn main Int []
+  (let [path: Str (env-or "EMB_MODEL" (str (getenv "HOME") "/models/gguf/gte-Qwen2-1.5B-instruct-q8_0.gguf"))
+        n-ctx (env-int "EMB_CTX" 8192)
+        threads (env-int "EMB_THREADS" 8)
+        gpu-layers (env-int "EMB_GPU_LAYERS" -1)
+        host: Str (env-or "EMB_HOST" "172.23.0.1")
+        port (env-int "EMB_PORT" 8896)
+        dim (unsafe (emb-load-c path n-ctx threads gpu-layers))]
+    (if (<= dim 0)
+      (do (eprintln (str "embeddings-server: cannot load model " path " (code " dim ")")) 1)
+      (do (set! g-dim dim)
+          (set! g-n-ctx n-ctx)
+          (eprintln (str "embeddings-server: " model-id " dim=" dim " n_ctx=" n-ctx " threads=" threads " gpu_layers=" gpu-layers
+                         " listening on " host ":" port
+                         (if (= (count (getenv "EMB_API_KEYS")) 0) " (no auth)" " (auth: EMB_API_KEYS)")))
+          (http/run-server route (assoc (assoc (assoc (map-empty) "port" port) "host" host)
+                                        "max-body" 16777216))))))

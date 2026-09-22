@@ -1,0 +1,130 @@
+;; ais/web.clay — HTTP まわりの小道具（パス・クエリの分解、Azure 形式の応答）。
+(ns ais.web
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]))
+
+(def hex-digits "0123456789abcdef")
+
+;; JSON の文字列リテラル（引用符付き）。制御文字も \u00XX にする。
+(defn jstr Str [s: Str]
+  (let [n (count s)]
+    (loop [i 0 out: Str "\""]
+      (if (>= i n) (str out "\"")
+        (let [c (nth s i)]
+          (recur (+ i 1)
+                 (cond (= c 34) (str out "\\\"")
+                       (= c 92) (str out "\\\\")
+                       (= c 10) (str out "\\n")
+                       (= c 13) (str out "\\r")
+                       (= c 9) (str out "\\t")
+                       (< c 32) (str out "\\u00" (chr (nth hex-digits (/ c 16))) (chr (nth hex-digits (mod c 16))))
+                       :else (str out (chr c)))))))))
+
+(defn resp Map [status: Int ctype: Str body: Str]
+  (assoc (assoc (assoc (map-empty) "status" status) "content-type" ctype) "body" body))
+
+(defn json-resp Map [status: Int body: Str]
+  (resp status "application/json; odata.metadata=minimal" body))
+
+;; Azure AI Search のエラー形式 {"error":{"code":"...","message":"..."}}
+(defn error Map [status: Int code: Str message: Str]
+  (json-resp status (str "{\"error\":{\"code\":" (jstr code) ",\"message\":" (jstr message) "}}")))
+
+(defn no-content Map [] (resp 204 "" ""))
+
+;; ---- URI ----
+
+(defn path-of Str [uri: Str]
+  (let [q (str/index-of uri "?")] (if (< q 0) uri (subs uri 0 q))))
+
+(defn query-of Str [uri: Str]
+  (let [q (str/index-of uri "?")] (if (< q 0) "" (subs uri (+ q 1) (count uri)))))
+
+(defn- hexv Int [c: Int]
+  (cond (and (>= c 48) (<= c 57)) (- c 48)
+        (and (>= c 97) (<= c 102)) (- c 87)
+        (and (>= c 65) (<= c 70)) (- c 55)
+        :else -1))
+
+;; %XX と +（クエリでは空白）を戻す
+(defn url-decode Str [s: Str plus-space?: Bool]
+  (let [n (count s)]
+    (loop [i 0 out: Str ""]
+      (if (>= i n) out
+        (let [c (nth s i)]
+          (cond
+            (and (= c 37) (< (+ i 2) n) (>= (hexv (nth s (+ i 1))) 0) (>= (hexv (nth s (+ i 2))) 0))
+            (recur (+ i 3) (str out (chr (+ (* 16 (hexv (nth s (+ i 1)))) (hexv (nth s (+ i 2)))))))
+            (and plus-space? (= c 43)) (recur (+ i 1) (str out " "))
+            :else (recur (+ i 1) (str out (chr c)))))))))
+
+;; a=1&b=x%20y → {"a" "1" "b" "x y"}。キーは大文字小文字を区別しない（小文字にそろえる）。
+(defn parse-query Map [q: Str]
+  (if (= (count q) 0) (map-empty)
+    (let [parts: Vec(Str) (str/split q "&")]
+      (loop [i 0 m: Map (map-empty)]
+        (if (>= i (count parts)) m
+          (let [p: Str (nth parts i)
+                eq (str/index-of p "=")
+                k: Str (lower-case (url-decode (if (< eq 0) p (subs p 0 eq)) true))
+                v: Str (if (< eq 0) "" (url-decode (subs p (+ eq 1) (count p)) true))]
+            (recur (+ i 1) (if (= (count k) 0) m (assoc m k v)))))))))
+
+(defn qget Str [q: Map k: Str]
+  (if (map-contains? q k) (map-get-str q k) ""))
+
+;; /indexes('x')/docs('k') → /indexes/x/docs/k。セグメントのリスト（空は除く、%XX は戻す）。
+(defn- odata-key-segment Str [seg: Str]
+  (let [p (str/index-of seg "('")]
+    (if (and (> p 0) (str/ends-with? seg "')"))
+      (str (subs seg 0 p) "/" (subs seg (+ p 2) (- (count seg) 2)))
+      seg)))
+
+(defn segments Vec(Str) [path: Str]
+  (let [raw: Vec(Str) (str/split path "/")]
+    (loop [i 0 acc: Vec(Str) []]
+      (if (>= i (count raw)) acc
+        (let [s: Str (nth raw i)]
+          (if (= (count s) 0) (recur (+ i 1) acc)
+            (let [parts: Vec(Str) (str/split (odata-key-segment s) "/")]
+              (recur (+ i 1)
+                     (loop [j 0 a: Vec(Str) acc]
+                       (if (>= j (count parts)) a
+                         (recur (+ j 1) (conj a (url-decode (nth parts j) false)))))))))))))
+
+;; ---- Dyn ----
+
+;; dyn-get は無いキーで int 0 を返すので、先に有無を見る
+(defn has? Bool [d: Dyn k: Str]
+  (if (not (dyn-map? d)) false
+    (loop [i 0]
+      (if (>= i (dyn-count d)) false
+        (if (= (dyn-key d i) k) true (recur (+ i 1)))))))
+
+(defn dget Dyn [d: Dyn k: Str]
+  (if (has? d k) (dyn-get d k) (nil->dyn)))
+
+(defn dstr Str [d: Dyn k: Str dflt: Str]
+  (let [v (dget d k)] (if (dyn-str? v) (dyn->str v) dflt)))
+
+(defn dint Int [d: Dyn k: Str dflt: Int]
+  (let [v (dget d k)] (if (dyn-int? v) (dyn->int v) dflt)))
+
+(defn dbool Bool [d: Dyn k: Str dflt: Bool]
+  (let [v (dget d k)] (if (dyn-bool? v) (dyn->bool v) dflt)))
+
+(defn num? Bool [d: Dyn] (or (dyn-int? d) (dyn-float? d)))
+
+(defn as-float Float [d: Dyn] (if (dyn-float? d) (dyn->float d) (int->float (dyn->int d))))
+
+;; "a, b ,c" → ["a" "b" "c"]
+(defn split-list Vec(Str) [s: Str]
+  (let [parts: Vec(Str) (str/split s ",")]
+    (loop [i 0 acc: Vec(Str) []]
+      (if (>= i (count parts)) acc
+        (let [p: Str (str/trim (nth parts i))]
+          (recur (+ i 1) (if (= (count p) 0) acc (conj acc p))))))))
+
+(defn vec-has? Bool [v: Vec(Str) x: Str]
+  (loop [i 0] (if (>= i (count v)) false (if (= (nth v i) x) true (recur (+ i 1))))))

@@ -1,0 +1,17 @@
+# systemd --user のユニット。install.sh が ~/.config/systemd/user/ に置く。
+#   systemctl --user status aisearch-server
+#   journalctl --user -u aisearch-server -f
+[Unit]
+Description=Azure AI Search emulator (clay)
+After=network-online.target
+
+[Service]
+Type=simple
+# AIS_API_KEYS など。無ければ既定値で起動する（api-key 無し = 認証しない）
+EnvironmentFile=-%h/.config/aisearch-server/env
+ExecStart=%h/.local/lib/aisearch-server/aisearch-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

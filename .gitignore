@@ -1,0 +1,8 @@
+# build outputs
+build/
+build-llama/
+*.log
+data/
+# local env / secrets
+.env
+*.env

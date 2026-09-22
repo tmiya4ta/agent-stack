@@ -1,0 +1,17 @@
+# systemd --user のユニット。install.sh が ~/.config/systemd/user/ に置く。
+#   systemctl --user status chat-server
+#   journalctl --user -u chat-server -f
+[Unit]
+Description=OpenAI-compatible chat completions server (clay + llama.cpp, Llama 3.2 3B Instruct)
+After=network-online.target
+
+[Service]
+Type=simple
+# CHAT_API_KEYS など。無ければ既定値で起動する（API キー無し = 認証しない）
+EnvironmentFile=-%h/.config/chat-server/env
+ExecStart=%h/.local/lib/chat-server/chat-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

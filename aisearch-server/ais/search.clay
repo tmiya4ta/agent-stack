@@ -1,0 +1,284 @@
+;; ais/search.clay — POST /indexes/{name}/docs/search と GET /indexes/{name}/docs。
+;;
+;; 流れ: $filter で候補を絞る（preFilter）→ 順位リストを作る → 1 本ならそのスコア、
+;; 2 本以上（ベクトル問い合わせ複数・ベクトル + 文字列）なら RRF で合わせる → skip / top → select。
+;;
+;; ベクトルのスコア（@search.score）は Azure の定義に合わせる:
+;;   cosine     1 / (1 + (1 - cos))        … 0.333〜1.0（公式ドキュメントどおり）
+;;   euclidean  1 / (1 + 距離)             … 未検証
+;;   dotProduct 内積そのもの                … 未検証
+;; 検索は常に総当たり（exhaustive KNN）。hnsw 指定でも結果は同じ（近似しない）。
+;; threshold {"kind":"vectorSimilarity"} は cos（cosine のとき）、{"kind":"searchScore"} は
+;; @search.score で足切りする。
+;; 文字列検索（search が * 以外）は語の出現回数を数えるだけの簡易版（BM25 ではない）。
+(ns ais.search
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]
+            [ais.web :as w]
+            [ais.schema :as sc]
+            [ais.odata :as od]))
+
+(def rrf-k 60.0)
+
+';; ---- 順位リスト ----
+;; キーをスコアの降順に並べた Vec(Str) と、キー → スコア（float->dyn）の Map の 2 つで持つ。
+
+(defn- score-of Float [sc: Map k: Str] (map-get-float sc k))
+
+;; 降順を保って差し込み、limit 件（負なら無制限）で切る
+(defn- insert-ranked Values(Vec(Str) Map) [ks: Vec(Str) sc: Map key: Str score: Float limit: Int]
+  (let [n (count ks)]
+    (if (and (>= limit 0) (>= n limit) (or (= limit 0) (<= score (score-of sc (nth ks (- n 1))))))
+      (values ks sc)
+      (let [pos (loop [i 0] (if (or (>= i n) (> score (score-of sc (nth ks i)))) i (recur (+ i 1))))
+            ks2: Vec(Str) (loop [i 0 acc: Vec(Str) []]
+                            (if (> i n) acc
+                              (recur (+ i 1) (cond (= i pos) (conj acc key)
+                                                   (< i pos) (conj acc (nth ks i))
+                                                   :else (conj acc (nth ks (- i 1)))))))
+            sc2: Map (assoc sc key (float->dyn score))]
+        (if (and (>= limit 0) (> (count ks2) limit))
+          (values (subvec ks2 0 limit) (map-remove sc2 (nth ks2 limit)))
+          (values ks2 sc2))))))
+
+;; ---- ベクトル ----
+
+(defn- to-floats Vec(Float) [v: Dyn]
+  (loop [i 0 acc: Vec(Float) []]
+    (if (>= i (dyn-count v)) acc (recur (+ i 1) (conj acc (w/as-float (dyn-nth v i)))))))
+
+;; Values(スコア, 類似度)。文書にベクトルが無ければスコアは -1。
+(defn- vector-score Values(Float Float) [metric: Str q: Vec(Float) qnorm: Float dv: Dyn]
+  (if (or (not (dyn-vec? dv)) (not (= (dyn-count dv) (count q)))) (values -1.0 0.0)
+    (let [n (count q)]
+      (cond
+        (= metric "euclidean")
+        (let [d2 (loop [i 0 acc 0.0]
+                   (if (>= i n) acc
+                     (let [x (- (nth q i) (w/as-float (dyn-nth dv i)))] (recur (+ i 1) (+ acc (* x x))))))
+              dist (sqrt d2)]
+          (values (/ 1.0 (+ 1.0 dist)) dist))
+        (= metric "dotProduct")
+        (let [dot (loop [i 0 acc 0.0]
+                    (if (>= i n) acc (recur (+ i 1) (+ acc (* (nth q i) (w/as-float (dyn-nth dv i)))))))]
+          (values dot dot))
+        :else
+        (let [[dot dn2] (loop [i 0 a 0.0 b 0.0]
+                          (if (>= i n) (values a b)
+                            (let [y (w/as-float (dyn-nth dv i))]
+                              (recur (+ i 1) (+ a (* (nth q i) y)) (+ b (* y y))))))
+              denom (* qnorm (sqrt dn2))
+              cos (if (> denom 0.0) (/ dot denom) 0.0)]
+          (values (/ 1.0 (+ 1.0 (- 1.0 cos))) cos))))))
+
+(defn- threshold-ok? Bool [kind: Str value: Float score: Float sim: Float metric: Str]
+  (cond
+    (= kind "searchScore") (>= score value)
+    (= kind "vectorSimilarity") (if (= metric "euclidean") (<= sim value) (>= sim value))
+    :else true))
+
+;; 1 つのベクトル問い合わせの 1 欄ぶんの順位リスト
+(defn- rank-vector Values(Vec(Str) Map) [ix: Map docs: Map cands: Vec(Str) fname: Str q: Vec(Float) k: Int tkind: Str tval: Float]
+  (let [metric: Str (map-get-str (sc/field ix fname) "metric")
+        qnorm (sqrt (loop [i 0 acc 0.0] (if (>= i (count q)) acc (recur (+ i 1) (+ acc (* (nth q i) (nth q i)))))))]
+    (loop [i 0 ks: Vec(Str) [] scs: Map (map-empty)]
+      (if (>= i (count cands)) (values ks scs)
+        (let [key: Str (nth cands i)
+              [score sim] (vector-score metric q qnorm (w/dget (map-get-dyn docs key) fname))]
+          (if (and (>= score 0.0) (threshold-ok? tkind tval score sim metric))
+            (let [[ks2 scs2] (insert-ranked ks scs key score k)] (recur (+ i 1) ks2 scs2))
+            (recur (+ i 1) ks scs)))))))
+
+;; ---- 文字列 ----
+
+(defn- occurrences Int [hay: Str needle: Str]
+  (if (= (count needle) 0) 0
+    (loop [from 0 n 0]
+      (let [p (str/index-of-after hay needle from)]
+        (if (< p 0) n (recur (+ p (count needle)) (+ n 1)))))))
+
+(defn- text-of Str [v: Dyn]
+  (cond (dyn-str? v) (lower-case (dyn->str v))
+        (dyn-vec? v) (loop [i 0 acc: Str ""]
+                       (if (>= i (dyn-count v)) acc (recur (+ i 1) (str acc " " (text-of (dyn-nth v i))))))
+        :else ""))
+
+(defn- rank-text Values(Vec(Str) Map) [ix: Map docs: Map cands: Vec(Str) search: Str search-fields: Vec(Str)]
+  (let [terms: Vec(Str) (loop [ps: Vec(Str) (str/split (lower-case search) " ") i 0 acc: Vec(Str) []]
+                          (if (>= i (count ps)) acc
+                            (let [t: Str (str/trim (nth ps i))]
+                              (recur ps (+ i 1) (if (or (= (count t) 0) (= t "*")) acc (conj acc t))))))
+        fields: Vec(Str) (loop [names: Vec(Str) (sc/field-names ix) i 0 acc: Vec(Str) []]
+                           (if (>= i (count names)) acc
+                             (let [f: Str (nth names i)
+                                   info: Map (sc/field ix f)
+                                   ok (and (= (map-get-int info "searchable") 1) (= (map-get-int info "vector") 0)
+                                           (or (= (count search-fields) 0) (w/vec-has? search-fields f)))]
+                               (recur names (+ i 1) (if ok (conj acc f) acc)))))]
+    (loop [i 0 ks: Vec(Str) [] scs: Map (map-empty)]
+      (if (>= i (count cands)) (values ks scs)
+        (let [key: Str (nth cands i)
+              doc (map-get-dyn docs key)
+              hits (loop [j 0 n 0]
+                     (if (>= j (count fields)) n
+                       (let [txt: Str (text-of (od/field-value doc (nth fields j)))]
+                         (recur (+ j 1) (+ n (loop [t 0 m 0]
+                                               (if (>= t (count terms)) m
+                                                 (recur (+ t 1) (+ m (occurrences txt (nth terms t)))))))))))]
+          (if (> hits 0)
+            (let [[ks2 scs2] (insert-ranked ks scs key (int->float hits) -1)] (recur (+ i 1) ks2 scs2))
+            (recur (+ i 1) ks scs)))))))
+
+';; ---- RRF ----
+
+;; 順位リストを 1 本ずつ畳み込む Map:
+;;   "n" 何本入ったか / "first" 最初の 1 本のキー / "first-scores" そのスコア /
+;;   "rrf" キー → Σ weight / (60 + 順位)
+;; 1 本だけならそのスコアをそのまま使い、2 本以上なら RRF のスコアで並べる。
+(defn- empty-fold Map []
+  (let [none: Vec(Str) []]
+    (assoc (assoc (assoc (assoc (map-empty) "n" 0) "first" none) "first-scores" (map-empty)) "rrf" (map-empty))))
+
+(defn- fold-add Map [f: Map ks: Vec(Str) scs: Map wt: Float]
+  (let [n (map-get-int f "n")
+        acc: Map (loop [i 0 m: Map (map-get-map f "rrf")]
+                   (if (>= i (count ks)) m
+                     (let [k: Str (nth ks i)
+                           prev (if (map-contains? m k) (map-get-float m k) 0.0)]
+                       (recur (+ i 1) (assoc m k (float->dyn (+ prev (/ wt (+ rrf-k (int->float (+ i 1)))))))))))
+        f2: Map (assoc (assoc f "n" (+ n 1)) "rrf" acc)]
+    (if (= n 0) (assoc (assoc f2 "first" ks) "first-scores" scs) f2)))
+
+;; 畳み込んだ結果。1 本も無ければ all をスコア 1.0 で並べる
+(defn- fold-result Values(Vec(Str) Map) [f: Map all: Vec(Str)]
+  (let [n (map-get-int f "n")]
+    (cond
+      (= n 0) (values all (loop [i 0 m: Map (map-empty)] (if (>= i (count all)) m (recur (+ i 1) (assoc m (nth all i) (float->dyn 1.0))))))
+      (= n 1) (let [ks: Vec(Str) (map-get-vec f "first")] (values ks (map-get-map f "first-scores")))
+      :else
+      (let [acc: Map (map-get-map f "rrf") keys: Vec(Str) (map-keys-str acc)]
+        (loop [i 0 ks: Vec(Str) [] scs: Map (map-empty)]
+          (if (>= i (count keys)) (values ks scs)
+            (let [[ks2 scs2] (insert-ranked ks scs (nth keys i) (map-get-float acc (nth keys i)) -1)]
+              (recur (+ i 1) ks2 scs2))))))))
+
+;; ---- 出力 ----
+
+(defn- select-list Vec(Str) [select: Str]
+  (let [s: Str (str/trim select)] (if (or (= s "") (= s "*")) [] (w/split-list s))))
+
+;; 文書を 1 件ぶんの JSON にする（retrievable な欄だけ。sel が空なら全部）。
+;; head は先頭に置く "\"@search.score\":0.9" のような部分（無ければ ""）。
+(defn doc-json Str [ix: Map doc: Dyn sel: Vec(Str) head: Str]
+  (let [parts: Vec(Str) (loop [j 0 acc: Vec(Str) (if (> (count head) 0) [head] [])]
+                          (if (>= j (dyn-count doc)) acc
+                            (let [k: Str (dyn-key doc j)
+                                  ok (and (sc/retrievable? ix k) (or (= (count sel) 0) (w/vec-has? sel k)))]
+                              (recur (+ j 1) (if ok (conj acc (str (w/jstr k) ":" (json/stringify (dyn-val doc j)))) acc)))))]
+    (str "{" (str/join "," parts) "}")))
+
+;; ---- 本体 ----
+
+(defn- dims-error Str [f: Str dims: Int n: Int]
+  (str "The vector field '" f "', with dimension of '" dims "', expects a length of '" dims
+       "'. However, the provided length is '" n "'."))
+
+;; vectorQueries を全部畳み込む。Values(Map, エラー文)
+(defn- fold-vectors Values(Map Str) [ix: Map docs: Map cands: Vec(Str) vqs: Dyn]
+  (if (not (dyn-vec? vqs)) (values (empty-fold) "")
+    (loop [qi 0 fo: Map (empty-fold)]
+      (if (>= qi (dyn-count vqs)) (values fo "")
+        (let [vq (dyn-nth vqs qi)
+              kind: Str (w/dstr vq "kind" "vector")
+              vv (w/dget vq "vector")
+              fs: Str (w/dstr vq "fields" "")
+              flds: Vec(Str) (if (= fs "") (sc/vector-fields ix) (w/split-list fs))
+              k (w/dint vq "k" 50)
+              wv (w/dget vq "weight")
+              wt (if (w/num? wv) (w/as-float wv) 1.0)
+              th (w/dget vq "threshold")
+              tkind: Str (w/dstr th "kind" "")
+              tv (w/dget th "value")
+              tval (if (w/num? tv) (w/as-float tv) 0.0)]
+          (cond
+            (not (= kind "vector"))
+            (values fo (str "The vector query kind '" kind "' is not supported by this emulator (no vectorizers). Send \"kind\": \"vector\" with the vector itself."))
+            (or (not (dyn-vec? vv)) (= (dyn-count vv) 0))
+            (values fo "The vector query must have a non-empty 'vector' array.")
+            :else
+            (let [q: Vec(Float) (to-floats vv)
+                  [fo2 e] (loop [fi 0 f2: Map fo]
+                            (if (>= fi (count flds)) (values f2 "")
+                              (let [f: Str (nth flds fi)]
+                                (cond
+                                  (not (sc/vector-field? ix f))
+                                  (values f2 (str "The field '" f "' in the vector query is not a vector field."))
+                                  (not (= (map-get-int (sc/field ix f) "dims") (count q)))
+                                  (values f2 (dims-error f (map-get-int (sc/field ix f) "dims") (count q)))
+                                  :else (let [[ks scs] (rank-vector ix docs cands f q k tkind tval)]
+                                          (recur (+ fi 1) (fold-add f2 ks scs wt)))))))]
+              (if (> (count e) 0) (values fo2 e) (recur (+ qi 1) fo2)))))))))
+
+;; req: 正規化した検索要求 {"search" Str "filter" Str "select" Str "top" Int "skip" Int "count" Int
+;;                          "searchFields" Str "vq" Dyn}（top は -1 = 指定なし）
+(defn search Map [ix: Map req: Map]
+  (let [fnode: Map (od/parse (map-get-str req "filter"))]
+    (if (od/err? fnode)
+      (w/error 400 "" (str "Invalid expression: " (map-get-str fnode "msg") "\r\nParameter name: $filter"))
+      (let [docs: Map (map-get-map ix "docs")
+            all: Vec(Str) (map-keys-str docs)
+            cands: Vec(Str) (loop [i 0 acc: Vec(Str) []]
+                              (if (>= i (count all)) acc
+                                (let [k: Str (nth all i)]
+                                  (recur (+ i 1) (if (od/matches? fnode (map-get-dyn docs k)) (conj acc k) acc)))))
+            [fo verr] (fold-vectors ix docs cands (map-get-dyn req "vq"))]
+        (if (> (count verr) 0) (w/error 400 "" verr)
+          (let [search: Str (str/trim (map-get-str req "search"))
+                text? (and (> (count search) 0) (not (= search "*")))
+                fo2: Map (if text?
+                           (let [[tks tsc] (rank-text ix docs cands search (w/split-list (map-get-str req "searchFields")))]
+                             (fold-add fo tks tsc 1.0))
+                           fo)
+                [rkeys rscores] (fold-result fo2 cands)
+                total (count rkeys)
+                skip (map-get-int req "skip")
+                t (map-get-int req "top")
+                top (if (< t 0) 50 t)
+                sel: Vec(Str) (select-list (map-get-str req "select"))
+                body: Str (loop [i skip out: Str "" n 0]
+                            (if (or (>= i total) (>= n top)) out
+                              (let [k: Str (nth rkeys i)
+                                    item: Str (doc-json ix (map-get-dyn docs k) sel (str "\"@search.score\":" (score-of rscores k)))]
+                                (recur (+ i 1) (str out (if (> n 0) "," "") item) (+ n 1)))))]
+            (w/json-resp 200 (str "{"
+                                  (if (= (map-get-int req "count") 1) (str "\"@odata.count\":" total ",") "")
+                                  "\"value\":[" body "]}"))))))))
+
+;; POST 本文 → 正規化した要求
+(defn request-of-body Map [b: Dyn]
+  (let [top (w/dint b "top" -1)
+        cnt (w/dbool b "count" false)]
+    (assoc (assoc (assoc (assoc (assoc (assoc (assoc (assoc (map-empty)
+      "search" (w/dstr b "search" ""))
+      "filter" (w/dstr b "filter" ""))
+      "select" (w/dstr b "select" ""))
+      "top" top)
+      "skip" (w/dint b "skip" 0))
+      "count" (if cnt 1 0))
+      "searchFields" (w/dstr b "searchFields" ""))
+      "vq" (w/dget b "vectorQueries"))))
+
+;; GET のクエリ → 正規化した要求
+(defn request-of-query Map [q: Map]
+  (let [top: Str (w/qget q "$top")
+        skip: Str (w/qget q "$skip")]
+    (assoc (assoc (assoc (assoc (assoc (assoc (assoc (assoc (map-empty)
+      "search" (w/qget q "search"))
+      "filter" (w/qget q "$filter"))
+      "select" (w/qget q "$select"))
+      "top" (if (= top "") -1 (parse-long top)))
+      "skip" (if (= skip "") 0 (parse-long skip)))
+      "count" (if (= (lower-case (w/qget q "$count")) "true") 1 0))
+      "searchFields" (w/qget q "searchfields"))
+      "vq" (nil->dyn))))

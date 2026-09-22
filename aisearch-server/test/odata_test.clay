@@ -1,0 +1,52 @@
+;; ais.odata の単体テスト。build.sh test/odata_test.clay -o build/odata_test && build/odata_test
+(ns test.odata-test
+  (:require [clay.core]
+            [clay.json :as json]
+            [ais.odata :as od]))
+
+(defvar ^Int g-fail 0)
+
+(defn check Int [label: Str got: Bool want: Bool]
+  (if (= got want) 0
+    (do (println (str "FAIL " label ": got " got ", want " want))
+        (set! g-fail (+ g-fail 1))
+        1)))
+
+(defn doc Dyn []
+  (let [[d e] (json/parse "{\"id\":\"a1\",\"api\":\"orders\",\"n\":5,\"x\":2.5,\"ok\":true,\"ts\":\"2026-09-22T01:00:00Z\",\"meta\":{\"lang\":\"ja\"},\"nul\":null,\"q\":\"it's\"}")] d))
+
+(defn t Int [expr: Str want: Bool]
+  (let [n: Map (od/parse expr)]
+    (if (od/err? n)
+      (do (println (str "FAIL " expr ": parse error " (map-get-str n "msg"))) (set! g-fail (+ g-fail 1)) 1)
+      (check expr (od/matches? n (doc)) want))))
+
+(defn bad Int [expr: Str]
+  (if (od/err? (od/parse expr)) 0
+    (do (println (str "FAIL expected parse error: " expr)) (set! g-fail (+ g-fail 1)) 1)))
+
+(defn main Int []
+  (do
+    (t "" true)
+    (t "api eq 'orders'" true)
+    (t "api eq 'other'" false)
+    (t "api ne 'other'" true)
+    (t "n gt 4" true) (t "n ge 5" true) (t "n lt 5" false) (t "n le 5" true)
+    (t "x gt 2" true) (t "x eq 2.5" true)
+    (t "5 lt n" false) (t "4 lt n" true)
+    (t "ok" true) (t "ok eq true" true) (t "not ok" false)
+    (t "ts ge 2026-09-22T00:00:00Z" true) (t "ts lt 2026-09-22T00:00:00Z" false)
+    (t "meta/lang eq 'ja'" true)
+    (t "nul eq null" true) (t "missing eq null" true) (t "api eq null" false) (t "api ne null" true)
+    (t "q eq 'it''s'" true)
+    (t "api eq 'orders' and n gt 1" true)
+    (t "api eq 'x' or n gt 1" true)
+    (t "api eq 'x' or (n gt 1 and not ok)" false)
+    (t "search.in(api, 'a,orders,b')" true)
+    (t "search.in(api, 'a|b', '|')" false)
+    (t "search.in(api, 'a|orders', '|')" true)
+    (t "true" true) (t "false" false)
+    (t "API EQ 'orders'" false)
+    (bad "api eq") (bad "api eq 'x") (bad "(api eq 'x'") (bad "api eq 'x' foo") (bad "5")
+    (println (if (= g-fail 0) "odata: all passed" (str "odata: " g-fail " failure(s)")))
+    g-fail))

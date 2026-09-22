@@ -1,0 +1,115 @@
+;; ais/docs.clay — POST /indexes/{name}/docs/index（文書の登録・更新・削除のバッチ）。
+;;
+;; 本文 {"value":[{"@search.action":"upload","id":"..",...}, ...]}（action の既定は upload）。
+;;   upload         置き換え（新規は statusCode 201、既存は 200）
+;;   merge          既存の文書に欄を上書き（無ければ 404）
+;;   mergeOrUpload  あれば merge、無ければ upload
+;;   delete         削除（無くても 200）
+;; 定義に無い欄・ベクトルの長さ違いはバッチ全体を 400 にする（Azure と同じ）。
+;; キーの文字が不正なものは、その 1 件だけ失敗（statusCode 400）にして全体は 207 で返す。
+(ns ais.docs
+  (:require [clay.core]
+            [clay.string :as str]
+            [ais.web :as w]
+            [ais.schema :as sc]))
+
+(def invalid-prefix "The request is invalid. Details: actions : ")
+
+(defn- key-char? Bool [c: Int]
+  (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (and (>= c 48) (<= c 57))
+      (= c 95) (= c 45) (= c 61)))
+
+(defn- valid-key? Bool [k: Str]
+  (and (> (count k) 0) (<= (count k) 1024)
+       (loop [i 0] (if (>= i (count k)) true (if (key-char? (nth k i)) (recur (+ i 1)) false)))))
+
+(defn- action-of Str [a: Dyn] (w/dstr a "@search.action" "upload"))
+
+(defn- known-action? Bool [s: Str]
+  (or (= s "upload") (= s "merge") (= s "mergeOrUpload") (= s "delete")))
+
+(defn- all-numbers? Bool [v: Dyn]
+  (loop [i 0] (if (>= i (dyn-count v)) true (if (w/num? (dyn-nth v i)) (recur (+ i 1)) false))))
+
+;; 1 件の欄を検査する。問題があればエラー文、なければ ""。
+(defn- check-field Str [ix: Map fname: Str v: Dyn]
+  (cond
+    (= fname "@search.action") ""
+    (not (sc/has-field? ix fname))
+    (str "The property '" fname "' does not exist on type 'search.documentFields'. Make sure to only use property names that are defined by the type.")
+    (and (sc/vector-field? ix fname) (not (dyn-nil? v)))
+    (let [dims (map-get-int (sc/field ix fname) "dims")]
+      (cond
+        (not (dyn-vec? v)) (str "The vector field '" fname "' must be an array of numbers.")
+        (not (= (dyn-count v) dims))
+        (str "The vector field '" fname "', with dimension of '" dims "', expects a length of '" dims
+             "'. However, the provided length is '" (dyn-count v) "'.")
+        (not (all-numbers? v)) (str "The vector field '" fname "' must contain only numbers.")
+        :else ""))
+    :else ""))
+
+;; バッチ全体の検査。Values(何件目か, エラー文)。問題なければ ("" )。
+(defn- check-batch Str [ix: Map arr: Dyn]
+  (let [key: Str (map-get-str ix "key")]
+    (loop [i 0]
+      (if (>= i (dyn-count arr)) ""
+        (let [a (dyn-nth arr i)
+              act: Str (action-of a)
+              kv (w/dget a key)]
+          (cond
+            (not (dyn-map? a)) (str i ": Each action must be a JSON object.")
+            (not (known-action? act)) (str i ": Invalid @search.action '" act "'. Valid values are upload, merge, mergeOrUpload and delete.")
+            (or (not (dyn-str? kv)) (= (count (dyn->str kv)) 0)) (str i ": Document key cannot be missing or empty.")
+            (= act "delete") (recur (+ i 1))
+            :else
+            (let [e: Str (loop [j 0]
+                           (if (>= j (dyn-count a)) ""
+                             (let [m: Str (check-field ix (dyn-key a j) (dyn-val a j))]
+                               (if (> (count m) 0) m (recur (+ j 1))))))]
+              (if (> (count e) 0) (str i ": " e) (recur (+ i 1))))))))))
+
+;; "@search.action" を除いた文書
+(defn- strip-action Dyn [a: Dyn]
+  (map->dyn (map-remove (dyn->map a) "@search.action")))
+
+;; 既存の文書 old に a の欄を上書き
+(defn- merge-doc Dyn [old: Dyn a: Dyn]
+  (loop [j 0 m: Map (dyn->map old)]
+    (if (>= j (dyn-count a)) (map->dyn m)
+      (let [k: Str (dyn-key a j)]
+        (recur (+ j 1) (if (= k "@search.action") m (assoc m k (dyn-val a j))))))))
+
+(defn- result-item Str [key: Str ok: Bool msg: Str code: Int]
+  (str "{\"key\":" (w/jstr key) ",\"status\":" (if ok "true" "false")
+       ",\"errorMessage\":" (if (= (count msg) 0) "null" (w/jstr msg)) ",\"statusCode\":" code "}"))
+
+;; バッチを当てる。Values(新しい index, 応答)
+(defn index-batch Values(Map Map) [ix: Map body: Dyn]
+  (let [arr (w/dget body "value")]
+    (if (not (dyn-vec? arr))
+      (values ix (w/error 400 "" (str invalid-prefix "The request must have a 'value' array of indexing actions.")))
+      (let [e: Str (check-batch ix arr)]
+        (if (> (count e) 0) (values ix (w/error 400 "" (str invalid-prefix e)))
+          (let [key: Str (map-get-str ix "key")]
+            (loop [i 0 docs: Map (map-get-map ix "docs") out: Str "" failed false]
+              (if (>= i (dyn-count arr))
+                (values (assoc ix "docs" docs)
+                        (w/json-resp (if failed 207 200) (str "{\"value\":[" out "]}")))
+                (let [a (dyn-nth arr i)
+                      act: Str (action-of a)
+                      k: Str (dyn->str (w/dget a key))
+                      exists (map-contains? docs k)
+                      sep: Str (if (> i 0) "," "")]
+                  (cond
+                    (not (valid-key? k))
+                    (recur (+ i 1) docs
+                           (str out sep (result-item k false (str "Invalid document key: '" k "'. Keys can only contain letters, digits, underscore (_), dash (-), or equal sign (=).") 400))
+                           true)
+                    (= act "delete")
+                    (recur (+ i 1) (if exists (map-remove docs k) docs) (str out sep (result-item k true "" 200)) failed)
+                    (and (= act "merge") (not exists))
+                    (recur (+ i 1) docs (str out sep (result-item k false "Document not found." 404)) true)
+                    (or (= act "merge") (and (= act "mergeOrUpload") exists))
+                    (recur (+ i 1) (assoc docs k (merge-doc (map-get-dyn docs k) a)) (str out sep (result-item k true "" 200)) failed)
+                    :else
+                    (recur (+ i 1) (assoc docs k (strip-action a)) (str out sep (result-item k true "" (if exists 200 201))) failed)))))))))))

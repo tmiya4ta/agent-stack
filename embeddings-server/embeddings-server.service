@@ -1,0 +1,17 @@
+# systemd --user のユニット。install.sh が ~/.config/systemd/user/ に置く。
+#   systemctl --user status embeddings-server
+#   journalctl --user -u embeddings-server -f
+[Unit]
+Description=OpenAI-compatible embeddings server (clay + llama.cpp, gte-Qwen2-1.5B-instruct)
+After=network-online.target
+
+[Service]
+Type=simple
+# EMB_API_KEYS など。無ければ既定値で起動する（API キー無し = 認証しない）
+EnvironmentFile=-%h/.config/embeddings-server/env
+ExecStart=%h/.local/lib/embeddings-server/embeddings-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
