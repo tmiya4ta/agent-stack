@@ -86,6 +86,10 @@ Mule の場合は `deploy.mule: {target: ch2|rtf, env: Sandbox, properties: conf
 3. **各アプリに harness.yaml を付ける**（上の形。ポート・公開名・env の場所は各 README にある）。
 4. ~~networks/ に tmiya4ta/agent-networks を統合~~ **済（2026-09-23）**。中身だけを履歴なしでコピーした（旧リポジトリは削除する）。残り: yc の repos.clay の `default-url`（`https://github.com/tmiya4ta/agent-networks`）と
    config.clay の言及を agent-stack の `networks/` に向け替える（yc リポジトリ側の作業）。旧 GitHub リポジトリはユーザーが削除する。
+   2026-09-23: onboarding-employees のメンバー Mule アプリ 3 つを `a2a/it-provisioning-agent`、`a2a/office-concierge-agent`、
+   `mcp/employee-db-app` に出した（各 README に yc deploy file での単体デプロイ手順、harness.yaml 付き）。
+   network フォルダの `apps/` はそれらへのシンボリックリンク。network のビルドは exchange.json / agent-network.yaml / brokers しか
+   梱包しないので影響しない。
 5. ~~GitHub に push~~ **済（2026-09-23、git@github-tmiya4ta:tmiya4ta/agent-stack.git の main）**。CI の雛形はまだ。
 6. **yc に `harness list / build / publish / deploy` を足す**（まず runtime: host から）。これは yc リポジトリ側の作業。
 
