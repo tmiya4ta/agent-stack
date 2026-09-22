@@ -1,0 +1,62 @@
+{
+  "main": "agent-network.yaml",
+  "name": "onboarding-network{{-suffix}}",
+  "classifier": "agentic-network",
+  "organizationId": "{{business-group-id}}",
+  "descriptorVersion": "1.0.0",
+  "apiVersion": "v1",
+  "tags": [],
+  "groupId": "{{business-group-id}}",
+  "assetId": "onboarding-network{{-suffix}}",
+  "version": "0.0.1",
+  "dependencies": [],
+  "metadata": {
+    "variables": {
+      "it-provisioning-agent{{-suffix}}": {
+        "url": {
+          "description": "A2A endpoint of the IT Provisioning Agent (apps/it-provisioning-agent), scheme included",
+          "default": "{{it-provisioning-agent-url}}",
+          "secret": false
+        }
+      },
+      "office-concierge-agent{{-suffix}}": {
+        "url": {
+          "description": "A2A endpoint of the Office Concierge Agent (apps/office-concierge-agent), scheme included",
+          "default": "{{office-concierge-agent-url}}",
+          "secret": false
+        }
+      },
+      "employee-db-server{{-suffix}}": {
+        "url": {
+          "description": "Base URL of the Employee DB MCP Server (apps/employee-db-app), scheme included. The /mcp path is appended by the transport setting in agent-network.yaml",
+          "default": "{{employee-db-app-url}}",
+          "secret": false
+        }
+      },
+      "openai-llm{{-suffix}}": {
+        "url": {
+          "description": "Base URL of the OpenAI-compatible endpoint, scheme included, up to and including the version path (e.g. https://host/openai/v1)",
+          "default": "{{llm-base-url}}",
+          "secret": false
+        }
+      },
+      "openAI": {
+        "clientId": {
+          "description": "Client ID of the LLM endpoint (username when it uses Basic authentication)",
+          "default": "{{llm-client-id}}",
+          "secret": false
+        },
+        "clientSecret": {
+          "description": "Client secret of the LLM endpoint (password when it uses Basic authentication)",
+          "default": "{{llm-client-secret}}",
+          "secret": true
+        },
+        "apiKey": {
+          "description": "API key sent as the apiKey of the llm connection. For a proxy fronted by Basic authentication this is base64(clientId:clientSecret); for a plain OpenAI-compatible endpoint it is the raw key",
+          "default": "{{llm-api-key}}",
+          "secret": true
+        }
+      }
+    }
+  }
+}

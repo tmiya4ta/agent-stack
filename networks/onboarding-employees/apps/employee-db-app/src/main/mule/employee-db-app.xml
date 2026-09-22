@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:mcp="http://www.mulesoft.org/schema/mule/mcp"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/mcp http://www.mulesoft.org/schema/mule/mcp/current/mule-mcp.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+	<db:config name="SQLite_Database_Config" doc:name="Database Config" doc:id="03419145-ebf6-405c-a564-ae14d149fe4f" >
+		<db:generic-connection url="jdbc:sqlite:products.db" driverClassName="org.sqlite.JDBC" />
+	</db:config>
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="e11767f5-c2a8-46df-b10c-76807574b239" >
+		<http:listener-connection host="0.0.0.0" port="8081" />
+	</http:listener-config>
+	<mcp:server-config name="MCP_Server" doc:name="MCP Server" doc:id="2ca4ab28-7479-45a7-b4d9-8a74935239fa" serverName="Employee DB MCP" serverVersion="1.0.0" >
+		<mcp:streamable-http-server-connection listenerConfig="HTTP_Listener_config" />
+	</mcp:server-config>
+	<flow name="employee-db-mcpFlow" doc:id="45188e8e-046d-4e22-a6ea-aeb74b6586ca" >
+		<scheduler doc:name="Scheduler" doc:id="73fafeab-e03c-450f-87f7-9245124238ec" >
+			<scheduling-strategy >
+				<fixed-frequency frequency="10000" timeUnit="DAYS"/>
+			</scheduling-strategy>
+		</scheduler>
+		<db:execute-script doc:name="Execute script" doc:id="bcdf1f76-2cfd-47d7-b816-a5f89accd85f" config-ref="SQLite_Database_Config">
+			<db:sql ><![CDATA[DROP TABLE IF EXISTS employee;
+CREATE TABLE employee (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name   TEXT    NOT NULL,
+    email  TEXT    NOT NULL
+);
+
+INSERT INTO employee (name, email) VALUES
+('Taro Yamada', 'taro.yamada@example.com'),
+('Hanako Sato', 'hanako.sato@example.com'),
+('Jiro Suzuki', 'jiro.suzuki@example.com'),
+('Misaki Tanaka', 'misaki.tanaka@example.com'),
+('Ken Takahashi', 'ken.takahashi@example.com');]]></db:sql>
+		</db:execute-script>
+	</flow>
+	<flow name="employee-db-mcpFlow1" doc:id="233d425e-8248-4bce-8b36-20d8a61c9c90" >
+		<http:listener doc:name="Listener" doc:id="2595ba88-c946-4259-af40-e720ec278b20" config-ref="HTTP_Listener_config" path="/employee" allowedMethods="POST"/>
+		<flow-ref doc:name="Flow Reference" doc:id="11818d10-fb79-4ad1-ae26-2a2bfef5d686" name="employee-db-mcpSub_Flow"/>
+	</flow>
+	<flow name="employee-db-mcpFlow2" doc:id="92f6e835-187f-493c-a6b0-82fb09d92ed0" >
+		<mcp:tool-listener doc:name="MCP Server - Tool Listener" doc:id="43ab86c6-8d6e-4eb6-947e-7492d64eeb90" config-ref="MCP_Server" name="register-employee">
+			<mcp:description ><![CDATA[Inserts a new record into the employee table.
+Requires the employee's name and email address.]]></mcp:description>
+			<mcp:parameters-schema ><![CDATA[{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Employee name"
+    },
+    "email": {
+      "type": "string",
+      "description": "Email address"
+    }
+  },
+  "required": ["name", "email"]
+}]]></mcp:parameters-schema>
+			<mcp:responses >
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<logger level="INFO" doc:name="Logger" doc:id="52c7331d-c1c2-4823-9a51-7df76f1e9c82" message="#[payload]"/>
+		<flow-ref doc:name="Flow Reference" doc:id="0374c2df-c38f-4847-953e-ff4127991790" name="employee-db-mcpSub_Flow" />
+	</flow>
+	<sub-flow name="employee-db-mcpSub_Flow" doc:id="a167cd0e-93e9-4c96-8691-228a28154e88" >
+		<set-variable value="#[payload.name]" doc:name="Set Variable" doc:id="6edc7be5-8db6-4d26-bcc4-ec9288dc7bba" variableName="name"/>
+		<set-variable value="#[payload.email]" doc:name="Set Variable" doc:id="e3090729-55dd-4dae-95c5-b4ca99a80c06" variableName="email"/>
+		<db:insert doc:name="Insert" doc:id="79e9473f-1091-4321-ba2e-72497884cd1c" config-ref="SQLite_Database_Config">
+			<db:sql ><![CDATA[INSERT INTO employee (name, email)
+VALUES (:name, :email)]]></db:sql>
+			<db:input-parameters ><![CDATA[#[%dw 2.0
+output application/json
+---
+{
+    name: vars.name,
+    email: vars.email
+}]]]></db:input-parameters>
+		</db:insert>
+		<db:select doc:name="Select" doc:id="44afd5e5-fa69-497c-bfb7-117a89db0aa2" config-ref="SQLite_Database_Config">
+			<db:sql ><![CDATA[select seq from sqlite_sequence where name = 'employee';]]></db:sql>
+		</db:select>
+		<ee:transform doc:name="Transform Message" doc:id="dcf3a193-e1ee-459c-a830-dd55d9d7cebe" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+{
+    message: "Employee registered",
+    employeeId: payload[0].seq
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</sub-flow>
+	<flow name="employee-db-mcpFlow3" doc:id="40d096ce-a566-4931-bea3-928859c36e2a" >
+		<http:listener doc:name="Listener" doc:id="afee3a5c-6f0c-4cc4-a820-930781cba474" config-ref="HTTP_Listener_config" path="/employee" allowedMethods="GET"/>
+		<db:select doc:name="Select" doc:id="c01f63d5-a747-4fb4-8ef9-c415d11ba6b7" config-ref="SQLite_Database_Config">
+			<db:sql ><![CDATA[SELECT *
+FROM employee
+ORDER BY id]]></db:sql>
+		</db:select>
+		<ee:transform doc:name="Transform Message" doc:id="e94a1d65-acc7-44b3-ad13-e6037be6887d" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<flow name="employee-db-doc-flow" doc:id="b1c2d3e4-f5a6-7890-bcde-f01234567a01">
+		<http:listener doc:name="Doc" doc:id="b1c2d3e4-f5a6-7890-bcde-f01234567a02" config-ref="HTTP_Listener_config" path="/doc">
+			<http:response statusCode="200">
+				<http:headers><![CDATA[#[{'Content-Type': 'text/html; charset=UTF-8'}]]]></http:headers>
+			</http:response>
+		</http:listener>
+		<ee:transform doc:name="Return Doc HTML" doc:id="b1c2d3e4-f5a6-7890-bcde-f01234567a03">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output text/plain
+---
+readUrl("classpath://doc.html", "text/plain")]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+</mule>

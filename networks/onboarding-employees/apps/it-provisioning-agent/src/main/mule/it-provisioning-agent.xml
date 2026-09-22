@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="9d2ebab8-080a-41e9-9f80-c7b9d0f27b28" >
+		<http:listener-connection host="0.0.0.0" port="8081" />
+	</http:listener-config>
+	<a2a:server-config name="A2A_Server" doc:name="A2A Server" doc:id="c4ed95a0-0264-4f9b-85f5-ab2ce6b33cd9" >
+		<a2a:connection listenerConfig="HTTP_Listener_config" agentPath="/"/>
+		<a2a:card name="IT Provisioning Agent" url="${agent.url}" version="1.0.0" protocolVersion="0.3.0" iconUrl="https://raw.githubusercontent.com/MuleSoft-AI-Chain-Project/example-mule-apps/refs/heads/master/a2a-ail-demo/a2a-interaction-agent-app/src/main/resources/uiapp/assets/images/agentforceagent.png" documentationUrl="https://developer.salesforce.com/docs/einstein/genai/overview">
+			<a2a:description ><![CDATA[Provisions IT assets.
+Orders loaner laptops and arranges repairs. An employee ID is required for either request.]]></a2a:description>
+			<a2a:skills >
+				<a2a:agent-skill id="1" name="provision-pc" >
+					<a2a:description ><![CDATA[Sets up and ships a loaner laptop]]></a2a:description>
+					<a2a:tags >
+						<a2a:tag value="provisioning" />
+					</a2a:tags>
+					<a2a:examples>
+						<a2a:example value="Please arrange a loaner laptop for Ichiro Tanaka (employee ID: 12345)" />
+						<a2a:example value="Ichiro Tanaka's laptop (employee ID: 12345) is broken, please arrange a repair" />
+					</a2a:examples>
+				</a2a:agent-skill>
+			</a2a:skills>
+			<a2a:provider organization="Salesforce" url="https://www.salesforce.com" />
+		</a2a:card>
+	</a2a:server-config>
+	<http:request-config name="LLM_Proxy" doc:name="HTTP Request configuration" doc:id="a1e2b3c4-7777-8888-9999-aaaabbbbcccc" responseTimeout="${llm.responseTimeout}">
+		<http:request-connection host="${llm.proxy.host}" port="${llm.proxy.port}" protocol="${llm.proxy.protocol}" usePersistentConnections="true" maxConnections="${llm.maxConnections}" connectionIdleTimeout="${llm.connectionIdleTimeout}" />
+	</http:request-config>
+	<configuration-properties doc:name="Configuration properties" doc:id="b613feb4-e550-4426-8cc3-3ba49bb65e19" file="app.properties" />
+	<flow name="it-provisioning-agentFlow" doc:id="0f521b31-c8e8-4b71-bfd7-6af84b9e2ba0" >
+		<a2a:task-listener doc:name="Task Listener" doc:id="1f2514d0-7648-43da-8ff3-f654d226264a" config-ref="A2A_Server">
+		</a2a:task-listener>
+		<logger level="INFO" doc:name="Logger" doc:id="a3ebdcaf-e6b9-497d-ae06-bda43698f293" message="#[payload]"/>
+		<ee:transform doc:name="Transform Message" doc:id="8e679a4b-8fca-4cf6-a9bc-63b02a614abb" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/java
+---
+if (payload is String)
+  read(payload, "application/json")
+else
+  payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="b320677a-ee24-4883-ad45-6fdf5db97fea" message="start"/>
+		<ee:transform doc:name="Build LLM request" doc:id="b1c2d3e4-7777-8888-9999-aaaabbbbcccc">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var systemPrompt = "You are a mock AI agent for IT asset provisioning, used for testing. You never place a real order; you answer as if the arrangement had succeeded.
+The only identifier you can issue is the request number for a loaner laptop. The employee ID itself is issued by the employee database, not by you.
+You handle exactly two things: (a) ordering a loaner laptop, and (b) arranging a laptop repair.
+
+Decision order:
+1. For anything other than (a) or (b), decline in one or two lines saying it is not your responsibility, and do not ask for an employee ID.
+   Example: 'Issue an employee ID' -> 'Issuing and looking up employee IDs is handled by the employee database.'
+   Example: issuing an ID badge -> 'Issuing ID badges is handled by the office concierge.'
+2. For (a) and (b), if and only if the message contains no employee ID, ask for one in one or two lines. A name or an email address is not a substitute.
+3. Accept the request only when an employee ID is present, and answer in the format below.
+
+Format on acceptance (Markdown. Choose values that a real corporate IT team would produce; they may differ each time):
+Use '### 💻 Loaner laptop request accepted' for an order, and '### 🔧 Repair request accepted' for a repair.
+
+| Item | Value |
+|---|---|
+| Request number | e.g. LP-20260801-0042 |
+| Employee ID | |
+| Model and specs | vendor / model / CPU / memory / storage / OS |
+| Sourcing | from stock, or a new order (supplier and expected arrival). For a repair: how it is handled (vendor pickup repair, whether a replacement unit is available) |
+| Work performed | corporate image, asset management agent, disk encryption, initial account setup. For a repair: fault isolation and verification |
+| Handover | date and method (internal mail, or the IT service desk) |
+| Status | ✅ Accepted |
+
+**Note:** to request extra software or peripherals, or to ask about data preservation, reply with the request number.
+
+Do not write any preamble or pleasantries outside the table."
+---
+{
+  model: p('llm.model'),
+  "input": payload.message.parts[0].text,
+  instructions: systemPrompt,
+  max_output_tokens: p('llm.maxOutputTokens') as Number,
+  reasoning: {
+    effort: p('llm.reasoningEffort')
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<http:request doc:name="Call LLM proxy" doc:id="c1d2e3f4-7777-8888-9999-aaaabbbbcccc" method="POST" config-ref="LLM_Proxy" path="${llm.proxy.path}">
+			<http:headers><![CDATA[#[{
+  "Content-Type": "application/json",
+  "Authorization": "Bearer " ++ p('llm.apiKey')
+}]]]></http:headers>
+		</http:request>
+		<ee:transform doc:name="Extract response text" doc:id="d1e2f3a4-7777-8888-9999-aaaabbbbcccc">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+{
+  response: (payload.'output' filter ($.'type' == "message"))[0].content[0].text
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="253e85d1-215c-44a2-98d6-76dee6db5200" message="end"/>
+		<ee:transform doc:name="Transform Message" doc:id="767014c6-0aee-4d4d-8746-f06743d7a3e3" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+{
+  messageId: (payload.message.messageId default ("msg-" ++ (now() as String {format: "yyyyMMddHHmmss"}))),
+  contextId: payload.contextId default ("ctx-it-" ++ (now() as String {format: "yyyyMMdd"})),
+  role: "agent",
+  parts: [
+    { kind: "text", text: payload.response }
+  ],
+  kind: "message",
+  metadata: {}
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<flow name="it-provisioning-doc-flow" doc:id="f1a2b3c4-d5e6-7890-abcd-ef1234567801">
+		<http:listener doc:name="Doc" doc:id="f1a2b3c4-d5e6-7890-abcd-ef1234567802" config-ref="HTTP_Listener_config" path="/doc">
+			<http:response statusCode="200">
+				<http:headers><![CDATA[#[{'Content-Type': 'text/html; charset=UTF-8'}]]]></http:headers>
+			</http:response>
+		</http:listener>
+		<ee:transform doc:name="Return Doc HTML" doc:id="f1a2b3c4-d5e6-7890-abcd-ef1234567803">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output text/plain
+---
+readUrl("classpath://doc.html", "text/plain")]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+</mule>

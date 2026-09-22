@@ -77,18 +77,16 @@ Mule の場合は `deploy.mule: {target: ch2|rtf, env: Sandbox, properties: conf
 
 ## やること（順番に）
 
-1. **git init して最初のコミットを作る**。ルートに .gitignore（各アプリの build/、build-llama/、*.log、data/）を置く。
+1. ~~git init して最初のコミットを作る~~ **済**。
 2. **kind 別に移す**: `llm/chat-server`、`embedding/embeddings-server`、`vector/aisearch-server`。
    移したら各 build.sh / install.sh / README の相対パスを直す。特に
    **chat-server/build.sh の既定 `LLAMA_BUILD=$HERE/../embeddings-server/build-llama`** は壊れるので、
    `shared/llama/`（build スクリプト + ビルド成果物は ignore）に出して両方から使う。
    移した後に 3 つとも build.sh が通ることを確認する（サービスの入れ替えはユーザーに聞いてから）。
 3. **各アプリに harness.yaml を付ける**（上の形。ポート・公開名・env の場所は各 README にある）。
-4. **networks/ に tmiya4ta/agent-networks を統合**。ローカルは ~/mule/agent-networks（3 コミット、中身は onboarding-employees/ と README）。
-   履歴を残すなら `git subtree add --prefix=networks ~/mule/agent-networks main` など。どちらにするかはユーザーに聞く。
-   yc は repos.clay の `default-url` が `https://github.com/tmiya4ta/agent-networks` を指していて、config.clay にも言及がある。
-   統合後は yc 側で agent-stack の `networks/` を見るよう変える必要がある（yc の作業は別セッション／yc リポジトリで）。
-5. **GitHub に push**（tmiya4ta/agent-stack。作成と push はユーザーに確認してから）。CI の雛形を置く。
+4. ~~networks/ に tmiya4ta/agent-networks を統合~~ **済（2026-09-23）**。中身だけを履歴なしでコピーした（旧リポジトリは削除する）。残り: yc の repos.clay の `default-url`（`https://github.com/tmiya4ta/agent-networks`）と
+   config.clay の言及を agent-stack の `networks/` に向け替える（yc リポジトリ側の作業）。旧 GitHub リポジトリはユーザーが削除する。
+5. ~~GitHub に push~~ **済（2026-09-23、git@github-tmiya4ta:tmiya4ta/agent-stack.git の main）**。CI の雛形はまだ。
 6. **yc に `harness list / build / publish / deploy` を足す**（まず runtime: host から）。これは yc リポジトリ側の作業。
 
 ## 参考

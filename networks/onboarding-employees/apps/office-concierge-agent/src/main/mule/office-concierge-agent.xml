@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="14b5fd1d-ca89-415e-86f3-775ee7377c6c" >
+		<http:listener-connection host="0.0.0.0" port="8081" />
+	</http:listener-config>
+	<a2a:server-config name="A2A_Server" doc:name="A2A Server" doc:id="f8f8565b-8686-4286-9298-696eede76ca7" >
+		<a2a:connection listenerConfig="HTTP_Listener_config" agentPath="/"/>
+		<a2a:card name="Office Concierge Agent" url="${agent.url}" version="1.0.0" documentationUrl="https://developer.salesforce.com/docs/einstein/genai/overview" iconUrl="https://raw.githubusercontent.com/MuleSoft-AI-Chain-Project/example-mule-apps/refs/heads/master/a2a-ail-demo/a2a-interaction-agent-app/src/main/resources/uiapp/assets/images/agentforceagent.png" protocolVersion="0.3.0">
+			<a2a:description ><![CDATA[Handles office administration.
+Issues the ID badge that comes with a new hire's paperwork, and answers questions about office rules.
+An employee ID is required to issue a badge.]]></a2a:description>
+			<a2a:skills >
+				<a2a:agent-skill id="1" name="badge-request" >
+					<a2a:description ><![CDATA[Issues an employee ID badge.]]></a2a:description>
+					<a2a:tags >
+						<a2a:tag value="badge" />
+						<a2a:tag value="id-badge" />
+					</a2a:tags>
+					<a2a:examples>
+						<a2a:example value="Please issue an ID badge for Ichiro Tanaka (employee ID: 12345)" />
+						<a2a:example value="What are the waste sorting rules in the office?" />
+					</a2a:examples>
+				</a2a:agent-skill>
+			</a2a:skills>
+			<a2a:provider organization="Salesforce" url="https://www.salesforce.com"/>
+		</a2a:card>
+	</a2a:server-config>
+	<http:request-config name="LLM_Proxy" doc:name="HTTP Request configuration" doc:id="a1e2b3c4-1111-2222-3333-444455556666" responseTimeout="${llm.responseTimeout}">
+		<http:request-connection host="${llm.proxy.host}" port="${llm.proxy.port}" protocol="${llm.proxy.protocol}" usePersistentConnections="true" maxConnections="${llm.maxConnections}" connectionIdleTimeout="${llm.connectionIdleTimeout}" />
+	</http:request-config>
+	<configuration-properties doc:name="Configuration properties" doc:id="3e364052-5b74-4409-9e71-482a2470eecb" file="app.properties" />
+	<flow name="office-concierge-agentFlow" doc:id="5d9d3669-aed9-4e7b-ac21-21b444112d66" >
+		<a2a:task-listener doc:name="Task Listener" doc:id="594817fa-4f99-4eb7-b37a-cd8816f60f29" config-ref="A2A_Server"/>
+		<logger level="INFO" doc:name="Logger" doc:id="bdb602bf-6576-45b6-a615-85ddf932e73e" message="#[payload]"/>
+		<ee:transform doc:name="Transform Message" doc:id="42247368-9238-4e74-88e4-987ba074ef9d" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/java
+---
+if (payload is String)
+  read(payload, "application/json")
+else
+  payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="52bc9cd9-b2fb-46fe-b011-643c4e7f01c0" message="start"/>
+		<ee:transform doc:name="Build LLM request" doc:id="b1c2d3e4-1111-2222-3333-444455556666">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var systemPrompt = "You are a mock AI agent for office administration, used for testing. You never carry out a real issuance; you answer as if the arrangement had succeeded.
+The only identifier you can issue is the ID badge tracking number. The employee ID itself is issued by the employee database, not by you.
+You handle exactly two things: (a) issuing an ID badge, and (b) questions about office rules.
+
+Decision order:
+1. For anything other than (a) or (b), decline in one or two lines saying it is not your responsibility, and do not ask for an employee ID.
+   Example: 'Issue an employee ID' or 'What is my employee ID?' -> 'Issuing and looking up employee IDs is handled by the employee database.'
+   Example: ordering or repairing a laptop -> 'Arranging IT assets is outside my scope.'
+2. For (a), if and only if the message contains no employee ID, ask for one in one or two lines. A name or an email address is not a substitute.
+3. For (a), accept the request only when an employee ID is present, and answer in the format below.
+
+Format on acceptance (Markdown. Choose values that a real office administration team would produce; they may differ each time):
+### 🪪 ID badge request accepted
+
+| Item | Value |
+|---|---|
+| Tracking number | e.g. BC-2026-0042 |
+| Employee ID | |
+| Card type | full-time / contractor, etc. |
+| Access rights | the floors and areas it unlocks |
+| Valid until | |
+| Lead time | business days and how it is handed over (at the office administration desk, or at reception on the first day) |
+| Related steps | photo registration, access-log enrollment, employee directory update, etc. |
+| Status | ✅ Accepted |
+
+**Note:** one line on who to contact if it is lost and how reissuing works.
+
+Do not write any preamble or pleasantries outside the table.
+
+4. For (b), answer questions about office rules without an employee ID, in at most 5 practical lines. A table is not required."
+---
+{
+  model: p('llm.model'),
+  "input": payload.message.parts[0].text,
+  instructions: systemPrompt,
+  max_output_tokens: p('llm.maxOutputTokens') as Number,
+  reasoning: {
+    effort: p('llm.reasoningEffort')
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<http:request doc:name="Call LLM proxy" doc:id="c1d2e3f4-1111-2222-3333-444455556666" method="POST" config-ref="LLM_Proxy" path="${llm.proxy.path}">
+			<http:headers><![CDATA[#[{
+  "Content-Type": "application/json",
+  "Authorization": "Bearer " ++ p('llm.apiKey')
+}]]]></http:headers>
+		</http:request>
+		<ee:transform doc:name="Extract response text" doc:id="d1e2f3a4-1111-2222-3333-444455556666">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+{
+  response: (payload.'output' filter ($.'type' == "message"))[0].content[0].text
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="6b6d3ba5-845e-4fbf-99f2-cf6c2a44a548" message="end"/>
+		<ee:transform doc:name="Transform Message" doc:id="c2c9cd6b-1d7d-492b-b455-f3a5e15e0189" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+{
+  messageId: (payload.message.messageId default ("msg-" ++ (now() as String {format: "yyyyMMddHHmmss"}))),
+  contextId: payload.contextId default ("ctx-office-" ++ (now() as String {format: "yyyyMMdd"})),
+  role: "agent",
+  parts: [
+    { kind: "text", text: payload.response }
+  ],
+  kind: "message",
+  metadata: {}
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<flow name="office-concierge-doc-flow" doc:id="a1b2c3d4-e5f6-7890-abcd-ef1234567901">
+		<http:listener doc:name="Doc" doc:id="a1b2c3d4-e5f6-7890-abcd-ef1234567902" config-ref="HTTP_Listener_config" path="/doc">
+			<http:response statusCode="200">
+				<http:headers><![CDATA[#[{'Content-Type': 'text/html; charset=UTF-8'}]]]></http:headers>
+			</http:response>
+		</http:listener>
+		<ee:transform doc:name="Return Doc HTML" doc:id="a1b2c3d4-e5f6-7890-abcd-ef1234567903">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output text/plain
+---
+readUrl("classpath://doc.html", "text/plain")]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+</mule>

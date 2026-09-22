@@ -1,0 +1,180 @@
+agentNetwork: 2.0.0
+info:
+  label: Employee Onboarding Network
+  version: 1.0.0
+  description: Onboards a new employee end to end, coordinating employee database registration, IT provisioning and office concierge services.
+
+registry:
+  agents:
+    it-provisioning-agent{{-suffix}}:
+      info:
+        label: IT Provisioning Agent
+      metadata:
+        platform: MuleSoft
+        interfaces:
+          a2a_v03:
+            card:
+              name: IT Provisioning Agent
+              url: ${it-provisioning-agent{{-suffix}}.url}
+              protocolVersion: "0.3.0"
+              description: Provisions IT assets. Orders loaner laptops and arranges repairs. An employee ID is required for either request.
+              version: 1.0.0
+              capabilities:
+                pushNotifications: false
+              defaultInputModes:
+                - application/json
+                - text/plain
+              defaultOutputModes:
+                - application/json
+                - text/plain
+              skills:
+                - id: it-provisioning-agent-provision-pc
+                  name: IT Provisioning
+                  description: Sets up and ships a loaner laptop.
+                  tags:
+                    - provisioning
+                  inputModes:
+                    - application/json
+                    - text/plain
+                  outputModes:
+                    - application/json
+                    - text/plain
+
+    office-concierge-agent{{-suffix}}:
+      info:
+        label: Office Concierge Agent
+      metadata:
+        platform: MuleSoft
+        interfaces:
+          a2a_v03:
+            card:
+              name: Office Concierge Agent
+              url: ${office-concierge-agent{{-suffix}}.url}
+              protocolVersion: "0.3.0"
+              description: Handles office administration. Issues ID badges for new hires and answers questions about office rules. An employee ID is required to issue a badge.
+              version: 1.0.0
+              capabilities:
+                pushNotifications: false
+              defaultInputModes:
+                - application/json
+                - text/plain
+              defaultOutputModes:
+                - application/json
+                - text/plain
+              skills:
+                - id: office-concierge-agent-issue-badge
+                  name: Badge Request
+                  description: Issues an employee ID badge.
+                  tags:
+                    - badge
+                    - id-badge
+                  inputModes:
+                    - application/json
+                    - text/plain
+                  outputModes:
+                    - application/json
+                    - text/plain
+
+  mcps:
+    employee-db-server{{-suffix}}:
+      info:
+        label: Employee DB MCP Server
+        description: Employee database. Registers an employee from a name and an email address, and issues the employee ID.
+      metadata:
+        transport:
+          kind: streamableHttp
+          path: /mcp
+        tools:
+          - name: register-employee
+            description: |
+              Inserts a new record into the employee table.
+              Requires the employee's name and email address.
+            inputSchema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Employee name
+                email:
+                  type: string
+                  description: Email address
+              required:
+                - name
+                - email
+
+  llms:
+    openai-llm{{-suffix}}:
+      info:
+        label: OpenAI
+        description: OpenAI-compatible LLM provider. The endpoint comes from the openai-llm{{-suffix}}.url variable in exchange.json.
+      metadata:
+        platform: AzureOpenai
+        models:
+          - gpt-5-mini
+
+context:
+  connections:
+    it_provisioning_connection{{_suffix}}:
+      kind: a2a
+      ref:
+        name: it-provisioning-agent{{-suffix}}
+      url: ${it-provisioning-agent{{-suffix}}.url}
+
+    office_concierge_connection{{_suffix}}:
+      kind: a2a
+      ref:
+        name: office-concierge-agent{{-suffix}}
+      url: ${office-concierge-agent{{-suffix}}.url}
+
+    employee_db_connection{{_suffix}}:
+      kind: mcp
+      ref:
+        name: employee-db-server{{-suffix}}
+      url: ${employee-db-server{{-suffix}}.url}
+
+    openai_connection{{_suffix}}:
+      kind: llm
+      ref:
+        name: openai-llm{{-suffix}}
+      url: ${openai-llm{{-suffix}}.url}
+      authentication:
+        kind: apiKey
+        apiKey: ${openAI.apiKey}
+
+brokers:
+  onboarding-broker{{-suffix}}:
+    kind: AgentScript
+    implementation: ./brokers/broker1.agent
+    interfaces:
+      a2a:
+        card:
+          name: Employee Onboarding Broker{{-suffix}}
+          description: Onboards a new employee end to end, coordinating employee database registration, IT provisioning and office concierge services.
+          version: 1.0.0
+          capabilities:
+            streaming: false
+            pushNotifications: true
+          defaultInputModes:
+            - application/json
+            - text/plain
+          defaultOutputModes:
+            - application/json
+            - text/plain
+          skills:
+            - id: employee-onboarding
+              name: Complete Employee Onboarding Process
+              description: Orchestrates the full onboarding workflow for a new employee, including database registration, IT provisioning and office setup.
+              tags:
+                - onboarding
+                - employee
+                - workflow
+              examples:
+                - "Please start onboarding for new employee Taro Tanaka (tanaka.taro@example.com)"
+                - "Please process onboarding for Hanako Sato (sato.hanako@example.com)"
+                - "New employee onboarding: Jiro Yamada (yamada.jiro@example.com)"
+              inputModes:
+                - application/json
+                - text/plain
+              outputModes:
+                - application/json
+                - text/plain

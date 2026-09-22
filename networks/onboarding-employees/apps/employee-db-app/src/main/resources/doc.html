@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Employee DB — MCP Server Reference</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=IBM+Plex+Mono:wght@400;500&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#ffffff;--surf:#fafcfb;--bd:#e2e8e4;--bd2:#c8d8ce;
+  --ac:#1a7a4a;--acl:#edf7f2;--acm:rgba(26,122,74,.1);
+  --tx:#1c2b20;--txd:#6a897a;--txm:#2e4d38;
+  --red:#c0392b;
+  --disp:'DM Serif Display',Georgia,serif;
+  --mono:'IBM Plex Mono','Cascadia Code',monospace;
+  --body:system-ui,-apple-system,sans-serif;
+}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--tx);font-family:var(--body);font-size:14px;line-height:1.65;min-height:100vh}
+.wrap{max-width:880px;margin:0 auto;padding:0 28px}
+header{padding:60px 0 40px;border-bottom:2px solid var(--ac);margin-bottom:48px}
+.eyebrow{display:flex;align-items:center;gap:10px;margin-bottom:20px;opacity:0;animation:fi .5s ease .1s forwards}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ac)}
+.eyebrow span{font-family:var(--mono);font-size:10px;letter-spacing:3px;text-transform:uppercase;color:var(--txd)}
+h1{font-family:var(--disp);font-size:clamp(36px,6vw,62px);font-weight:400;color:var(--tx);line-height:1.06;opacity:0;animation:fi .5s ease .2s forwards}
+h1 em{font-style:italic;color:var(--ac)}
+.hdesc{margin-top:16px;font-size:14px;color:var(--txm);line-height:1.75;max-width:580px;opacity:0;animation:fi .5s ease .3s forwards}
+.meta{display:flex;gap:24px;margin-top:20px;flex-wrap:wrap;opacity:0;animation:fi .5s ease .4s forwards}
+.meta-item{font-family:var(--mono);font-size:11px;color:var(--txd);display:flex;align-items:center;gap:6px}
+.meta-item::before{content:'';width:6px;height:6px;border-radius:1px;background:var(--ac);display:block}
+section{margin-bottom:52px}
+h2{font-family:var(--disp);font-size:26px;font-weight:400;color:var(--tx);margin-bottom:22px;display:flex;align-items:baseline;gap:14px}
+h2 span{font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--txd);font-weight:400;text-transform:uppercase}
+.ep{border:1px solid var(--bd);border-radius:6px;margin-bottom:14px;overflow:hidden;background:var(--surf);transition:all .2s;opacity:0;animation:fi .45s ease forwards}
+.ep:hover{border-color:var(--ac);box-shadow:0 2px 16px rgba(26,122,74,.07)}
+.eph{display:flex;align-items:center;gap:12px;padding:13px 18px;border-bottom:1px solid var(--bd)}
+.mth{font-family:var(--mono);font-size:10px;font-weight:500;padding:3px 9px;border-radius:3px;min-width:46px;text-align:center;letter-spacing:.5px}
+.mth.get{background:#e8f5ee;color:#1a7a4a;border:1px solid #a8d4ba}
+.mth.post{background:#fef3e2;color:#9a5a0a;border:1px solid #f0cc88}
+.mth.mcp{background:var(--acl);color:var(--ac);border:1px solid var(--bd2);font-size:9px}
+.mth.doc{background:#f0f0ff;color:#4444aa;border:1px solid #b8b8ee;font-size:9px}
+.pth{font-family:var(--mono);font-size:13.5px;color:var(--tx);font-weight:500}
+.edesc{font-size:12px;color:var(--txd);margin-left:auto;font-family:var(--mono)}
+.epb{padding:18px 20px}
+.note{font-size:13px;color:var(--txm);line-height:1.75;margin-top:2px}
+.note strong{color:var(--ac)}
+.cb{background:var(--acl);border:1px solid var(--bd2);border-radius:4px;overflow:hidden;margin-top:13px}
+.cbl{display:flex;align-items:center;justify-content:space-between;padding:7px 13px;background:rgba(26,122,74,.06);border-bottom:1px solid var(--bd2);font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--txd);text-transform:uppercase}
+.cpbtn{background:none;border:1px solid var(--bd2);color:var(--txd);padding:2px 9px;font-family:var(--mono);font-size:10px;cursor:pointer;border-radius:3px;letter-spacing:1px;transition:all .15s}
+.cpbtn:hover{border-color:var(--ac);color:var(--ac)}
+.cpbtn.ok{border-color:var(--ac);color:var(--ac)}
+pre{padding:14px 16px;font-family:var(--mono);font-size:12px;line-height:1.75;overflow-x:auto;color:#2a4432}
+.k{color:#1a7a4a}.s{color:#2e5fa0}.n{color:#9a3010}.cm{color:#8aaa92}
+.schema-table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px;margin-top:14px}
+.schema-table th{text-align:left;padding:8px 12px;background:var(--acm);color:var(--ac);font-weight:500;letter-spacing:1px;text-transform:uppercase;font-size:10px;border-bottom:2px solid var(--bd2)}
+.schema-table td{padding:8px 12px;border-bottom:1px solid var(--bd);color:var(--txm)}
+.schema-table td:first-child{color:var(--ac);font-weight:500}
+.schema-table td.type{color:#2e5fa0}
+.schema-table td.req{color:var(--red);font-size:10px}
+footer{border-top:2px solid var(--bd);padding:24px 0 44px;font-family:var(--mono);font-size:11px;color:var(--txd);letter-spacing:1px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:8px}
+footer strong{color:var(--ac)}
+@keyframes fi{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow"><div class="dot"></div><span>MCP Server + REST API</span></div>
+    <h1>Employee DB<br><em>MCP Server</em></h1>
+    <p class="hdesc">Provides access to the employee database. Supports both the MCP Streamable HTTP protocol and a REST API. It is backed by SQLite and seeds five records at startup.</p>
+    <div class="meta">
+      <span class="meta-item">MCP Streamable HTTP</span>
+      <span class="meta-item">REST API</span>
+      <span class="meta-item">SQLite</span>
+      <span class="meta-item">● RUNNING</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Endpoints <span>REST</span></h2>
+
+    <div class="ep" style="animation-delay:.05s">
+      <div class="eph">
+        <span class="mth get">GET</span>
+        <span class="pth">/employee</span>
+        <span class="edesc">List employees</span>
+      </div>
+      <div class="epb">
+        <p class="note">Returns every employee record ordered by id. No parameters.</p>
+        <div class="cb" id="c1">
+          <div class="cbl"><span>Response 200</span><button class="cpbtn" onclick="doCopy('c1',this)">COPY</button></div>
+          <pre>[
+  { <span class="k">"id"</span>: <span class="n">1</span>, <span class="k">"name"</span>: <span class="s">"Taro Yamada"</span>, <span class="k">"email"</span>: <span class="s">"taro.yamada@example.com"</span> },
+  { <span class="k">"id"</span>: <span class="n">2</span>, <span class="k">"name"</span>: <span class="s">"Hanako Sato"</span>, <span class="k">"email"</span>: <span class="s">"hanako.sato@example.com"</span> },
+  <span class="cm">// ... 5 records in total (seeded at startup)</span>
+]</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="ep" style="animation-delay:.12s">
+      <div class="eph">
+        <span class="mth post">POST</span>
+        <span class="pth">/employee</span>
+        <span class="edesc">Add an employee</span>
+      </div>
+      <div class="epb">
+        <p class="note">Adds a new employee record and returns the issued <strong>employee ID</strong>.</p>
+        <div class="cb" id="c2">
+          <div class="cbl"><span>Request Body</span><button class="cpbtn" onclick="doCopy('c2',this)">COPY</button></div>
+          <pre>{ <span class="k">"name"</span>: <span class="s">"Ichiro Tanaka"</span>, <span class="k">"email"</span>: <span class="s">"ichiro.tanaka@example.com"</span> }</pre>
+        </div>
+        <div class="cb" id="c3">
+          <div class="cbl"><span>Response 200</span><button class="cpbtn" onclick="doCopy('c3',this)">COPY</button></div>
+          <pre>{ <span class="k">"message"</span>: <span class="s">"Employee registered"</span>, <span class="k">"employeeId"</span>: <span class="n">6</span> }</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>MCP Tool <span>Streamable HTTP</span></h2>
+
+    <div class="ep" style="animation-delay:.2s">
+      <div class="eph">
+        <span class="mth mcp">MCP</span>
+        <span class="pth">/mcp</span>
+        <span class="edesc">Streamable HTTP · register-employee</span>
+      </div>
+      <div class="epb">
+        <p class="note">The MCP Streamable HTTP endpoint. Registers an employee through the <strong>register-employee</strong> tool. The Agent Fabric broker calls this endpoint as an MCP action.</p>
+        <table class="schema-table">
+          <thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>name</td><td class="type">string</td><td class="req">required</td><td>Employee name</td></tr>
+            <tr><td>email</td><td class="type">string</td><td class="req">required</td><td>Email address</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Schema <span>SQLite</span></h2>
+    <div class="ep" style="animation-delay:.28s">
+      <div class="eph">
+        <span class="mth get" style="min-width:60px;font-size:9px">TABLE</span>
+        <span class="pth">employee</span>
+      </div>
+      <div class="epb">
+        <div class="cb" id="c4">
+          <div class="cbl"><span>DDL</span><button class="cpbtn" onclick="doCopy('c4',this)">COPY</button></div>
+          <pre>CREATE TABLE employee (
+  <span class="k">id</span>     INTEGER PRIMARY KEY AUTOINCREMENT,
+  <span class="k">name</span>   TEXT    NOT NULL,
+  <span class="k">email</span>  TEXT    NOT NULL
+);
+<span class="cm">-- Seeds five records at startup.
+-- The table is dropped and recreated on every restart, so it always returns to the seed data.</span></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <strong>Employee DB MCP Server</strong>
+    <span>v1.0.1 · MCP Streamable HTTP · MuleSoft Agent Fabric · CloudHub 2.0</span>
+  </footer>
+</div>
+<script>
+function doCopy(id, btn) {
+  var pre = document.getElementById(id).querySelector('pre');
+  navigator.clipboard.writeText(pre.innerText).then(function() {
+    btn.textContent = 'COPIED'; btn.classList.add('ok');
+    setTimeout(function(){ btn.textContent = 'COPY'; btn.classList.remove('ok'); }, 2000);
+  });
+}
+</script>
+</body>
+</html>

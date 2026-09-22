@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IT Provisioning Agent — API Reference</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;600;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080c12;--surf:#0d1321;--card:#111827;--bd:#1e3a5f;
+  --ac:#00bfff;--acg:rgba(0,191,255,.12);
+  --tx:#a8c4d4;--txb:#e2f0ff;--txd:#4a6a80;
+  --gn:#00ff9f;--am:#ffb347;
+  --mono:'Share Tech Mono','Cascadia Code',monospace;
+  --disp:'Barlow Condensed',sans-serif;
+}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--tx);font-family:var(--mono);min-height:100vh;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(0,191,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,191,255,.025) 1px,transparent 1px);background-size:48px 48px;pointer-events:none;z-index:0}
+.wrap{position:relative;z-index:1;max-width:860px;margin:0 auto;padding:0 24px}
+header{padding:56px 0 36px;border-bottom:1px solid var(--bd);margin-bottom:44px}
+.tag{font-size:11px;letter-spacing:3px;text-transform:uppercase;color:var(--ac);margin-bottom:14px;opacity:0;animation:fu .5s ease .1s forwards}
+h1{font-family:var(--disp);font-size:clamp(30px,6vw,54px);font-weight:700;color:var(--txb);line-height:1.08;opacity:0;animation:fu .5s ease .2s forwards}
+h1 em{color:var(--ac);font-style:normal}
+.hdesc{margin-top:14px;font-size:13px;color:var(--txd);line-height:1.75;max-width:540px;opacity:0;animation:fu .5s ease .3s forwards}
+.badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;opacity:0;animation:fu .5s ease .4s forwards}
+.badge{padding:3px 9px;border:1px solid var(--bd);border-radius:2px;font-size:10px;letter-spacing:1.2px;color:var(--txd)}
+.badge.ac{border-color:var(--ac);color:var(--ac)}
+.badge.gn{border-color:var(--gn);color:var(--gn)}
+section{margin-bottom:48px}
+h2{font-family:var(--disp);font-size:11px;font-weight:600;letter-spacing:3px;text-transform:uppercase;color:var(--ac);margin-bottom:20px;display:flex;align-items:center;gap:12px}
+h2::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--bd),transparent)}
+.ep{background:var(--card);border:1px solid var(--bd);border-radius:4px;margin-bottom:14px;overflow:hidden;transition:border-color .2s;opacity:0;animation:fu .45s ease forwards}
+.ep:hover{border-color:var(--ac)}
+.eph{display:flex;align-items:center;gap:12px;padding:13px 18px;background:rgba(0,191,255,.04);border-bottom:1px solid var(--bd)}
+.mth{font-size:10px;font-weight:700;letter-spacing:.8px;padding:3px 8px;border-radius:2px;min-width:42px;text-align:center}
+.mth.post{background:rgba(255,179,71,.12);color:var(--am);border:1px solid rgba(255,179,71,.28)}
+.mth.get{background:rgba(0,255,159,.08);color:var(--gn);border:1px solid rgba(0,255,159,.25)}
+.pth{font-size:14px;color:var(--txb);letter-spacing:.4px}
+.edesc{font-size:11px;color:var(--txd);margin-left:auto}
+.epb{padding:18px}
+.note{padding:11px 15px;background:var(--acg);border-left:2px solid var(--ac);font-size:12px;color:var(--txd);line-height:1.7;margin-top:10px}
+.note strong{color:var(--ac)}
+.cb{background:#050910;border:1px solid var(--bd);border-radius:3px;overflow:hidden;margin-top:12px}
+.cbl{display:flex;align-items:center;justify-content:space-between;padding:7px 13px;background:rgba(255,255,255,.02);border-bottom:1px solid var(--bd);font-size:10px;letter-spacing:2px;color:var(--txd);text-transform:uppercase}
+.cpbtn{background:none;border:1px solid var(--bd);color:var(--txd);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;border-radius:2px;letter-spacing:1px;transition:all .15s}
+.cpbtn:hover{border-color:var(--ac);color:var(--ac)}
+.cpbtn.ok{border-color:var(--gn);color:var(--gn)}
+pre{padding:15px;font-size:12px;line-height:1.75;overflow-x:auto;color:var(--tx)}
+.k{color:#79c0ff}.s{color:#a5d6ff}.n{color:var(--gn)}.cm{color:var(--txd)}
+footer{border-top:1px solid var(--bd);padding:22px 0 38px;font-size:10px;color:var(--txd);letter-spacing:1px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+@keyframes fu{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="tag">// API Reference</div>
+    <h1>IT Provisioning<br><em>Agent</em></h1>
+    <p class="hdesc">An agent service that provisions IT assets. It accepts loaner laptop orders and repair requests over the A2A 0.3.0 protocol. An employee ID is required.</p>
+    <div class="badges">
+      <span class="badge ac">A2A 0.3.0</span>
+      <span class="badge ac">JSON-RPC 2.0</span>
+      <span class="badge gn">● RUNNING</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Endpoints</h2>
+
+    <div class="ep" style="animation-delay:.05s">
+      <div class="eph">
+        <span class="mth post">POST</span>
+        <span class="pth">/</span>
+        <span class="edesc">A2A message handler</span>
+      </div>
+      <div class="epb">
+        <div class="note"><strong>message/send</strong> sends a message. For a request that includes an employee ID, it returns the result of the laptop order or repair arrangement as Markdown.</div>
+        <div class="cb" id="c1">
+          <div class="cbl"><span>Request</span><button class="cpbtn" onclick="doCopy('c1',this)">COPY</button></div>
+          <pre>{
+  <span class="k">"jsonrpc"</span>: <span class="s">"2.0"</span>,
+  <span class="k">"method"</span>:  <span class="s">"message/send"</span>,
+  <span class="k">"id"</span>:      <span class="s">"1"</span>,
+  <span class="k">"params"</span>: {
+    <span class="k">"message"</span>: {
+      <span class="k">"messageId"</span>: <span class="s">"msg-001"</span>,
+      <span class="k">"role"</span>:      <span class="s">"user"</span>,
+      <span class="k">"parts"</span>: [{
+        <span class="k">"kind"</span>: <span class="s">"text"</span>,
+        <span class="k">"text"</span>: <span class="s">"Please order a loaner laptop for employee ID 12345"</span>
+      }]
+    }
+  }
+}</pre>
+        </div>
+        <div class="cb" id="c2">
+          <div class="cbl"><span>Response 200</span><button class="cpbtn" onclick="doCopy('c2',this)">COPY</button></div>
+          <pre>{
+  <span class="k">"jsonrpc"</span>: <span class="s">"2.0"</span>,
+  <span class="k">"id"</span>: <span class="s">"1"</span>,
+  <span class="k">"result"</span>: {
+    <span class="k">"parts"</span>: [{
+      <span class="k">"kind"</span>: <span class="s">"text"</span>,
+      <span class="k">"text"</span>: <span class="s">"### 💻 Loaner laptop request accepted\n..."</span>
+    }],
+    <span class="k">"role"</span>: <span class="s">"agent"</span>
+  }
+}</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="ep" style="animation-delay:.15s">
+      <div class="eph">
+        <span class="mth get">GET</span>
+        <span class="pth">/.well-known/agent-card.json</span>
+        <span class="edesc">Agent Card</span>
+      </div>
+      <div class="epb">
+        <div class="note">A2A-compliant agent metadata: name, skills, protocol version and provider. No authentication required.</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Skills</h2>
+    <div class="ep" style="animation-delay:.25s">
+      <div class="eph">
+        <span class="mth post" style="min-width:52px">SKILL</span>
+        <span class="pth">provisioningPC</span>
+      </div>
+      <div class="epb">
+        <div class="note">
+          Supported operations: <strong>new loaner laptop order</strong>, <strong>laptop repair request</strong><br>
+          Required parameter: <strong>employee ID</strong> (a name or email address is not a substitute)<br>
+          Out of scope: badge issuance &rarr; Office Concierge Agent, employee ID lookup &rarr; Employee DB
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>IT Provisioning Agent v1.1.0</span>
+    <span>A2A Protocol 0.3.0 · MuleSoft Agent Fabric · CloudHub 2.0</span>
+  </footer>
+</div>
+<script>
+function doCopy(id, btn) {
+  var pre = document.getElementById(id).querySelector('pre');
+  navigator.clipboard.writeText(pre.innerText).then(function() {
+    btn.textContent = 'COPIED'; btn.classList.add('ok');
+    setTimeout(function(){ btn.textContent = 'COPY'; btn.classList.remove('ok'); }, 2000);
+  });
+}
+</script>
+</body>
+</html>

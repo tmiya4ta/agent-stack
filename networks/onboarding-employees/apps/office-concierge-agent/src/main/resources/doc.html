@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Office Concierge Agent — API Reference</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400;1,600&family=Libre+Baskerville:ital@0;1&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#faf8f5;--surf:#ffffff;--bd:#e8e0d5;--bd2:#d4c8b8;
+  --ac:#8b6c42;--acl:#f5efe6;
+  --tx:#3a3028;--txd:#9a8878;--txm:#5c4e40;
+  --serif:'Cormorant Garamond',Georgia,serif;
+  --body:'Libre Baskerville',Georgia,serif;
+  --mono:'Cascadia Code','Courier New',monospace;
+}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--tx);font-family:var(--body);font-size:15px;line-height:1.7;min-height:100vh}
+.wrap{max-width:820px;margin:0 auto;padding:0 32px}
+header{padding:64px 0 40px;border-bottom:1px solid var(--bd);margin-bottom:48px;position:relative}
+header::before{content:'';position:absolute;left:0;top:64px;bottom:0;width:2px;background:linear-gradient(180deg,var(--ac),transparent)}
+.tag{font-family:var(--mono);font-size:10px;letter-spacing:3px;text-transform:uppercase;color:var(--ac);margin-bottom:18px;opacity:0;animation:fi .6s ease .1s forwards}
+h1{font-family:var(--serif);font-size:clamp(34px,5.5vw,58px);font-weight:400;font-style:italic;color:var(--tx);line-height:1.12;opacity:0;animation:fi .6s ease .2s forwards}
+h1 strong{font-weight:600;font-style:normal;display:block;font-size:.68em;letter-spacing:1px;color:var(--txd);margin-bottom:4px}
+.hdesc{margin-top:18px;font-size:13.5px;color:var(--txm);line-height:1.8;max-width:520px;padding-left:20px;opacity:0;animation:fi .6s ease .3s forwards}
+.badges{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px;padding-left:20px;opacity:0;animation:fi .6s ease .4s forwards}
+.badge{padding:4px 12px;border:1px solid var(--bd2);border-radius:20px;font-family:var(--mono);font-size:10px;letter-spacing:1px;color:var(--txd)}
+.badge.ac{border-color:var(--ac);color:var(--ac)}
+section{margin-bottom:52px}
+h2{font-family:var(--serif);font-size:22px;font-style:italic;font-weight:400;color:var(--ac);margin-bottom:24px;display:flex;align-items:center;gap:16px}
+h2::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--bd),transparent)}
+.ep{border:1px solid var(--bd);border-radius:6px;margin-bottom:16px;overflow:hidden;background:var(--surf);transition:border-color .2s,box-shadow .2s;opacity:0;animation:fi .5s ease forwards}
+.ep:hover{border-color:var(--bd2);box-shadow:0 4px 20px rgba(139,108,66,.08)}
+.eph{display:flex;align-items:center;gap:12px;padding:14px 20px;background:var(--acl);border-bottom:1px solid var(--bd)}
+.mth{font-family:var(--mono);font-size:10px;letter-spacing:.8px;padding:3px 10px;border-radius:3px;min-width:44px;text-align:center}
+.mth.post{background:#fdf0e0;color:#a0622a;border:1px solid #e8c898}
+.mth.get{background:#eaf5ee;color:#3a7a52;border:1px solid #a8d4b5}
+.pth{font-family:var(--mono);font-size:13px;color:var(--tx)}
+.edesc{font-size:12px;color:var(--txd);margin-left:auto;font-family:var(--mono)}
+.epb{padding:20px 22px}
+.note{padding:13px 18px;background:var(--acl);border-left:2px solid var(--ac);font-size:13px;color:var(--txm);line-height:1.75;margin-top:12px;font-family:var(--body)}
+.note strong{color:var(--ac)}
+.cb{background:#f5f0e8;border:1px solid var(--bd);border-radius:4px;overflow:hidden;margin-top:14px}
+.cbl{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:rgba(139,108,66,.06);border-bottom:1px solid var(--bd);font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--txd);text-transform:uppercase}
+.cpbtn{background:none;border:1px solid var(--bd2);color:var(--txd);padding:2px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;border-radius:3px;letter-spacing:1px;transition:all .15s}
+.cpbtn:hover{border-color:var(--ac);color:var(--ac)}
+.cpbtn.ok{border-color:#3a7a52;color:#3a7a52}
+pre{padding:16px;font-family:var(--mono);font-size:12px;line-height:1.75;overflow-x:auto;color:#4a3c2e}
+.k{color:#8b6c42}.s{color:#5c7a3a}.cm{color:#b09880}
+footer{border-top:1px solid var(--bd);padding:24px 0 44px;font-family:var(--mono);font-size:10px;color:var(--txd);letter-spacing:1px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:8px}
+footer em{font-family:var(--serif);font-size:12px;font-style:italic;color:var(--ac);letter-spacing:0}
+@keyframes fi{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="tag">// API Reference</div>
+    <h1><strong>Office Concierge</strong>Agent</h1>
+    <p class="hdesc">An agent service that handles office administration. It issues ID badges and answers questions about office rules. An employee ID is required to issue a badge.</p>
+    <div class="badges">
+      <span class="badge ac">A2A 0.3.0</span>
+      <span class="badge ac">JSON-RPC 2.0</span>
+      <span class="badge">● RUNNING</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Endpoints</h2>
+
+    <div class="ep" style="animation-delay:.05s">
+      <div class="eph">
+        <span class="mth post">POST</span>
+        <span class="pth">/</span>
+        <span class="edesc">A2A message handler</span>
+      </div>
+      <div class="epb">
+        <div class="note"><strong>message/send</strong> sends a message. It handles badge requests that include an employee ID, as well as questions about office rules.</div>
+        <div class="cb" id="c1">
+          <div class="cbl"><span>Request &mdash; badge issuance</span><button class="cpbtn" onclick="doCopy('c1',this)">COPY</button></div>
+          <pre>{
+  <span class="k">"jsonrpc"</span>: <span class="s">"2.0"</span>,
+  <span class="k">"method"</span>:  <span class="s">"message/send"</span>,
+  <span class="k">"id"</span>:      <span class="s">"1"</span>,
+  <span class="k">"params"</span>: {
+    <span class="k">"message"</span>: {
+      <span class="k">"messageId"</span>: <span class="s">"msg-001"</span>,
+      <span class="k">"role"</span>:      <span class="s">"user"</span>,
+      <span class="k">"parts"</span>: [{
+        <span class="k">"kind"</span>: <span class="s">"text"</span>,
+        <span class="k">"text"</span>: <span class="s">"Please issue an ID badge for employee ID 12345"</span>
+      }]
+    }
+  }
+}</pre>
+        </div>
+        <div class="cb" id="c2">
+          <div class="cbl"><span>Response 200</span><button class="cpbtn" onclick="doCopy('c2',this)">COPY</button></div>
+          <pre>{
+  <span class="k">"jsonrpc"</span>: <span class="s">"2.0"</span>,
+  <span class="k">"id"</span>: <span class="s">"1"</span>,
+  <span class="k">"result"</span>: {
+    <span class="k">"parts"</span>: [{
+      <span class="k">"kind"</span>: <span class="s">"text"</span>,
+      <span class="k">"text"</span>: <span class="s">"### 🪪 ID badge request accepted\n..."</span>
+    }],
+    <span class="k">"role"</span>: <span class="s">"agent"</span>
+  }
+}</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="ep" style="animation-delay:.15s">
+      <div class="eph">
+        <span class="mth get">GET</span>
+        <span class="pth">/.well-known/agent-card.json</span>
+        <span class="edesc">Agent Card</span>
+      </div>
+      <div class="epb">
+        <div class="note">A2A-compliant agent metadata: agent name, skills, protocol version and provider. No authentication required.</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Skills</h2>
+    <div class="ep" style="animation-delay:.25s">
+      <div class="eph">
+        <span class="mth post" style="min-width:50px;font-size:9px">SKILL</span>
+        <span class="pth">badge-request</span>
+      </div>
+      <div class="epb">
+        <div class="note">
+          Supported operations: <strong>ID badge issuance</strong>, <strong>questions about office rules</strong><br>
+          Issuing a badge requires an <strong>employee ID</strong> (a name or email address is not a substitute)<br>
+          Out of scope: loaner laptops &rarr; IT Provisioning Agent, employee ID lookup &rarr; Employee DB
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <em>Office Concierge Agent</em>
+    <span>v1.1.0 · A2A 0.3.0 · MuleSoft Agent Fabric · CloudHub 2.0</span>
+  </footer>
+</div>
+<script>
+function doCopy(id, btn) {
+  var pre = document.getElementById(id).querySelector('pre');
+  navigator.clipboard.writeText(pre.innerText).then(function() {
+    btn.textContent = 'COPIED'; btn.classList.add('ok');
+    setTimeout(function(){ btn.textContent = 'COPY'; btn.classList.remove('ok'); }, 2000);
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,312 @@
+# @dialect: AGENTFABRIC=1.0
+#
+# New Employee Onboarding Broker
+#
+#   trigger
+#     +-> subagent  intake          Extract name/email from request and validate (LLM, no actions)
+#        +-> router intakeRouter    Check if required information is complete
+#             + Incomplete -> echo rejectIncompleteRequest   TASK_STATE_FAILED (specify missing fields)
+#             + Complete   -> orchestrator onboard
+#                +-> router resultRouter               Branch based on success/failure of each step
+#                     + All success     -> generator successReport -> echo successArtifact -> echo successStatus
+#                     + Partial failure -> generator partialReport -> echo partialArtifact -> echo partialStatus
+#                     + All failed      -> generator failureReport -> echo failureStatus (TASK_STATE_FAILED)
+#
+# Design Principles:
+#   - Since there is no exception mechanism, failures are recorded in the orchestrator's structured output
+#     and routed deterministically via the router.
+#   - "Partial success" is treated as a distinct path. In practice, this is the most error-prone scenario;
+#     silently treating it as success would leave unprovisioned PCs or ID badges unattended.
+#   - Report generation is delegated to the generator (one LLM call), keeping the orchestrator
+#     focused solely on orchestration.
+#   - The employee ID is returned as a machine-readable artifact so downstream systems can reference it.
+#
+# Implementation Constraints (verified by lint):
+#   - router `when` conditions cannot compare against boolean literals; use string comparisons.
+#   - TASK_STATE_INPUT_REQUIRED is not accepted as a terminal state; insufficient information
+#     must be returned as TASK_STATE_FAILED with explicit mention of missing fields.
+#   - @variables require prior declaration and are therefore not used; each branch has its own response node.
+
+system:
+  instructions: "You are a precise and careful assistant responsible for onboarding new employees. You never fill gaps with guesses, and you report only what you have actually confirmed."
+
+config:
+  agent_name: "Employee Onboarding Broker{{-suffix}}"
+  default_llm: @llm.openai_llm
+
+llm:
+  openai_llm:
+    target: "llm://openai_connection{{_suffix}}"
+    kind: "OpenAI"
+    model: "gpt-5-mini"
+
+actions:
+  register_employee:
+    target: "mcp://employee_db_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "register-employee"
+
+  it_provisioning_agent:
+    target: "a2a://it_provisioning_connection{{_suffix}}"
+    kind: "a2a:send_message"
+
+  office_concierge_agent:
+    target: "a2a://office_concierge_connection{{_suffix}}"
+    kind: "a2a:send_message"
+
+trigger employeeOnboardingTrigger:
+  kind: "a2a"
+  target: "brokers://onboarding-broker{{-suffix}}/a2a"
+  on_message: ->
+    transition to @subagent.intake
+
+# -------------------------------------------------------------
+# 1. Intake: Extract and Validate Required Information
+# -------------------------------------------------------------
+subagent intake:
+  label: "Intake"
+  description: "Extract the new employee's name and email address from the request and determine whether processing can begin"
+  system:
+    instructions: |
+      You validate the incoming request.
+      Extract the new employee's name and email address from the request text.
+
+      Rules:
+      - Set ready to "true" only when both the name and the email address are stated explicitly.
+      - If either is missing, or if you would have to guess, set ready to "false" and
+        describe what is missing in missingInfo.
+      - Confirm that the email address is well formed (it contains an at sign).
+      - Never invent a value. Anything that is not written down is missing.
+  reasoning:
+    instructions: ->
+      | Validate the following request: {!@request.payload.message.parts[0].text}
+    outputs:
+      properties:
+        ready:
+          type: "string"
+          description: "\"true\" if onboarding can begin, \"false\" if information is insufficient"
+        employeeName:
+          type: "string"
+          description: "Extracted name of the new employee. Empty string if not found"
+        employeeEmail:
+          type: "string"
+          description: "Extracted email address. Empty string if not found"
+        missingInfo:
+          type: "string"
+          description: "Description of missing information. Empty string if everything is provided"
+    max_number_of_loops: 3
+    max_consecutive_errors: 2
+    task_timeout_secs: 60
+  on_exit: ->
+    transition to @router.intakeRouter
+
+router intakeRouter:
+  label: "Input Check"
+  routes:
+    - target: @orchestrator.onboard
+      when: @subagent.intake.output.ready == "true"
+      label: "Information is complete"
+  otherwise:
+    target: @echo.rejectIncompleteRequest
+
+echo rejectIncompleteRequest:
+  label: "Request Rejected - Incomplete Information"
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_FAILED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("Onboarding could not be started. Missing information: " + @subagent.intake.output.missingInfo + " Please resubmit your request with the new employee's name and email address.")
+    ]
+  })
+
+# -------------------------------------------------------------
+# 2. Main Processing: 3-Step Orchestration
+# -------------------------------------------------------------
+orchestrator onboard:
+  label: "Onboarding Execution"
+  description: "Execute employee registration, PC provisioning, and ID badge issuance in sequence, and return the results of each step in structured form"
+  system:
+    instructions: |
+      You are the agent broker that runs the onboarding process for a new employee.
+      Execute the following steps in order.
+
+      1. register_employee - register the employee in the employee database
+         (name and email address -> an employee ID is issued)
+      2. it_provisioning - arrange a loaner laptop (always use the issued employee ID)
+      3. office_concierge - arrange an ID badge (always use the issued employee ID)
+
+      Hard constraints:
+      - Always carry the result of each step forward, in particular the employee ID.
+      - If no employee ID was issued, do not run the remaining steps.
+      - Never run the same step twice. These operations are not idempotent, so a duplicate
+        registration or a duplicate order is a real-world incident.
+      - If an external agent fails or returns an error, do not keep retrying. Record that
+        step as failed and move on.
+      - Never invent a result. Record only what actually came back.
+
+      Output:
+      - Put the issued employee ID in employeeId (empty string if none was issued).
+      - Set registrationStatus / provisioningStatus / badgeStatus to "success" or "failed".
+      - Set overallStatus to "success" when all three succeeded, "partial" when at least one
+        succeeded and the rest failed, and "failed" when all of them failed.
+      - Summarize in details what each step actually returned (request numbers, tracking
+        numbers, delivery dates, failure reasons).
+  reasoning:
+    instructions: ->
+      | Run the onboarding for the new employee "{!@subagent.intake.output.employeeName}" ({!@subagent.intake.output.employeeEmail}).
+    actions:
+      register_employee: @actions.register_employee
+      it_provisioning: @actions.it_provisioning_agent
+      office_concierge: @actions.office_concierge_agent
+    outputs:
+      properties:
+        employeeId:
+          type: "string"
+          description: "Issued employee ID. Empty string if not issued"
+        registrationStatus:
+          type: "string"
+          description: "Result of employee database registration: success or failed"
+        provisioningStatus:
+          type: "string"
+          description: "Result of loaner PC arrangement: success or failed"
+        badgeStatus:
+          type: "string"
+          description: "Result of ID badge issuance: success or failed"
+        overallStatus:
+          type: "string"
+          description: "Overall result: success / partial / failed"
+        details:
+          type: "string"
+          description: "Information actually obtained at each step (request number, tracking number, failure reason, etc.)"
+    max_number_of_loops: 12
+    max_consecutive_errors: 3
+    task_timeout_secs: 300
+  on_exit: ->
+    transition to @router.resultRouter
+
+router resultRouter:
+  label: "Result Routing"
+  routes:
+    - target: @generator.successReport
+      when: @orchestrator.onboard.output.overallStatus == "success"
+      label: "All steps succeeded"
+    - target: @generator.partialReport
+      when: @orchestrator.onboard.output.overallStatus == "partial"
+      label: "Partial failure"
+  otherwise:
+    target: @generator.failureReport
+
+# -------------------------------------------------------------
+# 3. Report Generation (one LLM call, separated from orchestration)
+# -------------------------------------------------------------
+generator successReport:
+  label: "Generate Completion Report"
+  description: "Generate a report message when all steps have succeeded"
+  prompt: ->
+    | Summarize the following onboarding results into a concise completion report for the requester.
+      Be sure to include the employee ID, use bullet points, within 5 lines. No preamble or pleasantries.
+      Employee ID: {!@orchestrator.onboard.output.employeeId}
+      Details: {!@orchestrator.onboard.output.details}
+  on_exit: ->
+    transition to @echo.successArtifact
+
+generator partialReport:
+  label: "Generate Partial Completion Report"
+  description: "Generate a report message when some steps have failed"
+  prompt: ->
+    | Summarize the following onboarding results into a report for the requester.
+      Clearly separate completed items from incomplete items, and provide a one-line description of the required action for incomplete items.
+      Use bullet points, within 7 lines, no preamble.
+      Employee ID: {!@orchestrator.onboard.output.employeeId}
+      Employee DB Registration: {!@orchestrator.onboard.output.registrationStatus}
+      Loaner PC Arrangement: {!@orchestrator.onboard.output.provisioningStatus}
+      ID Badge Issuance: {!@orchestrator.onboard.output.badgeStatus}
+      Details: {!@orchestrator.onboard.output.details}
+  on_exit: ->
+    transition to @echo.partialArtifact
+
+generator failureReport:
+  label: "Generate Failure Report"
+  description: "Generate a report message when processing did not complete"
+  prompt: ->
+    | The following onboarding process did not complete.
+      Summarize what failed and what action the requester should take next, concisely within 4 lines.
+      Do not supplement causes with assumptions.
+      Details: {!@orchestrator.onboard.output.details}
+  on_exit: ->
+    transition to @echo.failureStatus
+
+# -------------------------------------------------------------
+# 4. Response (artifact -> task state)
+# -------------------------------------------------------------
+echo successArtifact:
+  label: "Return Artifact (Completed)"
+  kind: "a2a:artifact_update_event"
+  # Chat tools render the artifact text as the main body,
+  # so the first part is the human-readable report and the second is machine-readable structured data.
+  artifact: a2a.artifact({
+    artifactId: uuid(),
+    name: "onboarding-result",
+    description: "Result of the onboarding process. Includes the employee ID referenced by downstream systems.",
+    parts: [
+      a2a.textPart(@generator.successReport.output),
+      a2a.dataPart({ data: @orchestrator.onboard.output })
+    ],
+    metadata: {}
+  })
+  append: False
+  lastChunk: True
+  on_exit: ->
+    transition to @echo.successStatus
+
+echo successStatus:
+  label: "Completion Response"
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart(@generator.successReport.output)
+    ]
+  })
+
+echo partialArtifact:
+  label: "Return Artifact (Partially Incomplete)"
+  kind: "a2a:artifact_update_event"
+  artifact: a2a.artifact({
+    artifactId: uuid(),
+    name: "onboarding-result",
+    description: "Result of the onboarding process. Follow-up required as some items are incomplete.",
+    parts: [
+      a2a.textPart(@generator.partialReport.output),
+      a2a.dataPart({ data: @orchestrator.onboard.output })
+    ],
+    metadata: {}
+  })
+  append: False
+  lastChunk: True
+  on_exit: ->
+    transition to @echo.partialStatus
+
+echo partialStatus:
+  label: "Partial Completion Response"
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart(@generator.partialReport.output)
+    ]
+  })
+
+echo failureStatus:
+  label: "Failure Response"
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_FAILED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart(@generator.failureReport.output)
+    ]
+  })

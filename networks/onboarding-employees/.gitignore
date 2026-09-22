@@ -1,0 +1,10 @@
+target/
+.apivcs/
+.designer.json
+.exchange.xml
+.exchange_modules_tmp/
+.tmp/
+.settings/
+.project
+.classpath
+*.db
