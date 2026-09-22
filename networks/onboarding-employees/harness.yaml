@@ -1,0 +1,7 @@
+name: onboarding-employees
+kind: network
+runtime: agent-network
+members:
+  it-provisioning-agent-url: it-provisioning-agent
+  office-concierge-agent-url: office-concierge-agent
+  employee-db-app-url: employee-db-app
