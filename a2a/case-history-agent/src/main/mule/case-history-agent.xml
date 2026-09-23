@@ -49,6 +49,9 @@ else
   payload]]></ee:set-payload>
 			</ee:message>
 		</ee:transform>
+		<!-- Continue the caller's conversation: reuse the contextId it sent, or start a new one.
+		     Saved here because the payload is replaced by the LLM response further down. -->
+		<set-variable variableName="a2aContextId" value="#[payload.message.contextId default uuid()]" doc:name="Keep contextId" />
 		<logger level="INFO" doc:name="Logger" doc:id="b320677a-ee24-4883-ad45-6fdf5db97fea" message="start"/>
 		<ee:transform doc:name="Build LLM request" doc:id="b1c2d3e4-7777-8888-9999-aaaabbbbcccc">
 			<ee:message>
@@ -109,8 +112,8 @@ output application/java
 output application/json
 ---
 {
-  messageId: (payload.message.messageId default ("msg-" ++ (now() as String {format: "yyyyMMddHHmmss"}))),
-  contextId: payload.contextId default ("ctx-ch-" ++ (now() as String {format: "yyyyMMdd"})),
+  messageId: uuid(),
+  contextId: vars.a2aContextId,
   role: "agent",
   parts: [
     { kind: "text", text: payload.response }
