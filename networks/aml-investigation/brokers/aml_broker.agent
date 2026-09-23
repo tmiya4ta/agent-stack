@@ -22,6 +22,7 @@
 #     +-> subagent classify            step "awaiting_decision" -> route "decide" + decision
 #        +-> router mainRouter
 #             + decide          -> executor recordDecision (record-decision, no LLM) -> echo decisionRecorded
+#             + ask_cases       -> orchestrator followupCases (case history A2A, same conversation) -> echo caseAnswer
 #             + ask_decision    -> echo askDecision
 #             + already_decided -> echo alreadyDecided
 #
@@ -109,7 +110,10 @@ subagent classify:
          アラート ID が無い場合（「一覧」「どんなアラートがある？」など、または ID の書き忘れ）は route_key = "list_alerts"。
          未対応だけを見たいと書かれていれば statusFilter = "未対応"（クローズ・届出検討・保留も同様）、それ以外は空文字。
          ★ ID が無くても、あなたは質問しない。route_key = "list_alerts" を返すだけで、一覧の提示は後段が行う。
-      3. step が "awaiting_decision" の場合: メッセージを担当者の判断として分類する。
+      3. step が "awaiting_decision" の場合:
+         メッセージが過去事例・類似事例についての質問（「CASE-2025-031 の決め手は？」「似た事例をもう少し」など）なら
+         route_key = "ask_cases"、question にその質問をそのまま入れ、alertId には状態の alertId を入れる。
+         それ以外は、メッセージを担当者の判断として分類する。
          - クローズ・問題なし・対応不要・閉じる → decision = "close", decisionLabel = "クローズ"
          - 届出・届け出・疑わしい・エスカレーション → decision = "file_str", decisionLabel = "届出検討"
          - 保留・追加確認・確認中・待ち → decision = "hold", decisionLabel = "保留（追加確認）"
@@ -124,7 +128,7 @@ subagent classify:
     instructions: ->
       | 担当者のメッセージ: {!@request.payload.message.parts[0].text}
       | contextId: {!@request.payload.message.contextId}
-      | get_case を呼んだら、route_key / alertId / statusFilter / decision / decisionLabel / note の構造化出力だけを返すこと。
+      | get_case を呼んだら、route_key / alertId / statusFilter / decision / decisionLabel / note / question の構造化出力だけを返すこと。
       | 説明文・手順の要約・「〜を求める必要があります」のような判断の説明を書いてはいけない。
     actions:
       get_case: @actions.get_case
@@ -138,6 +142,7 @@ subagent classify:
             - "list_alerts"
             - "decide"
             - "ask_decision"
+            - "ask_cases"
             - "already_decided"
         alertId:
           type: "string"
@@ -154,6 +159,9 @@ subagent classify:
         note:
           type: "string"
           description: "The analyst's reason as written, or empty"
+        question:
+          type: "string"
+          description: "The analyst's question about past cases, or empty"
     max_number_of_loops: 4
     max_consecutive_errors: 2
     task_timeout_secs: 40
@@ -175,6 +183,9 @@ router mainRouter:
     - target: @echo.askDecision
       when: @subagent.classify.output.route_key == "ask_decision"
       label: "Ask for a clear decision"
+    - target: @orchestrator.followupCases
+      when: @subagent.classify.output.route_key == "ask_cases"
+      label: "Ask the case history agent again"
     - target: @echo.alreadyDecided
       when: @subagent.classify.output.route_key == "already_decided"
       label: "Already decided"
@@ -401,6 +412,42 @@ echo alertList:
     messageId: uuid(),
     parts: [
       a2a.textPart("### 📋 アラート一覧\n\n" + @subagent.listAlerts.output.table + "\n\n調べたいアラートの ID を送ってください（例: アラート ALT-0915 を調べて）。")
+    ]
+  })
+
+orchestrator followupCases:
+  label: "Follow-up on Past Cases"
+  description: "Passes the analyst's question about past cases to the case history agent, in the same conversation as the investigation."
+  system:
+    instructions: |
+      case_history を 1 回だけ呼び、担当者の質問をそのまま送る。
+      送る文の先頭に「アラート <alertId> の調査の続きです。」と付ける。
+      返ってきた回答をそのまま answer に入れる。回答を要約・追記しない。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。answer の構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | alertId: {!@subagent.classify.output.alertId}
+      | 担当者の質問: {!@subagent.classify.output.question}
+    actions:
+      case_history: @actions.case_history
+    outputs:
+      properties:
+        answer:
+          type: "string"
+          description: "The case history agent's answer, verbatim"
+    max_number_of_loops: 3
+    max_consecutive_errors: 2
+    task_timeout_secs: 60
+  on_exit: ->
+    transition to @echo.caseAnswer
+
+echo caseAnswer:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("### 📚 過去事例について\n\n" + @orchestrator.followupCases.output.answer + "\n\n---\n**判断をこの会話に返信してください:** 「クローズ」「届出検討」「保留」のいずれかと、その理由。")
     ]
   })
 

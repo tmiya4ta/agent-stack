@@ -1,12 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:os="http://www.mulesoft.org/schema/mule/os"
 	xmlns:http="http://www.mulesoft.org/schema/mule/http"
 	xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
 http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
 http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
-http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
 	<global-property name="http.port" value="8081" />
+	<!-- What each A2A call carried in and out (ids only), for GET /debug/a2a-log.
+	     In memory, last 50 calls, kept for 2 hours. -->
+	<os:object-store name="A2A_Call_Log" persistent="false" maxEntries="50" entryTtl="2" entryTtlUnit="HOURS" />
 	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="9d2ebab8-080a-41e9-9f80-c7b9d0f27b28" >
 		<http:listener-connection host="0.0.0.0" port="${http.port}" />
 	</http:listener-config>
@@ -52,6 +56,21 @@ else
 		<!-- Continue the caller's conversation: reuse the contextId it sent, or start a new one.
 		     Saved here because the payload is replaced by the LLM response further down. -->
 		<set-variable variableName="a2aContextId" value="#[payload.message.contextId default uuid()]" doc:name="Keep contextId" />
+		<!-- Every reply is a new task in that conversation. -->
+		<set-variable variableName="a2aTaskId" value="#[uuid()]" doc:name="New taskId" />
+		<set-variable variableName="a2aIn" doc:name="What came in" value="#[%dw 2.0
+output application/java
+---
+{
+  receivedAt: now() as String {format: &quot;yyyy-MM-dd'T'HH:mm:ss.SSSXXX&quot;},
+  paramsKeys: keysOf(payload default {}) map ($ as String),
+  messageKeys: keysOf(payload.message default {}) map ($ as String),
+  contextId: payload.message.contextId,
+  taskId: payload.message.taskId,
+  referenceTaskIds: payload.message.referenceTaskIds,
+  messageId: payload.message.messageId,
+  text: ((payload.message.parts[0].text default '')[0 to 79]) default (payload.message.parts[0].text default '')
+}]" />
 		<logger level="INFO" doc:name="Logger" doc:id="b320677a-ee24-4883-ad45-6fdf5db97fea" message="start"/>
 		<ee:transform doc:name="Build LLM request" doc:id="b1c2d3e4-7777-8888-9999-aaaabbbbcccc">
 			<ee:message>
@@ -63,6 +82,7 @@ var systemPrompt = "あなたは銀行のマネロン対策部門で、過去の
 厳守:
 - 一覧にない事例を作ってはいけません。事例番号・判断・理由は一覧の記載どおりに書きます。
 - 似ている事例が 1 件もなければ「類似する過去事例は見つかりませんでした」とだけ答えます。
+- 特定の事例番号についての追加の質問（「CASE-2025-031 の判断の決め手は？」など）には、一覧の記載の範囲で、表ではなく 2〜4 文で答えます。一覧に無いことは「記録にありません」と答えます。
 - 前置きや挨拶は書かず、1 行目から表を始めます。
 
 形式:
@@ -106,23 +126,55 @@ output application/java
 			</ee:message>
 		</ee:transform>
 		<logger level="INFO" doc:name="Logger" doc:id="253e85d1-215c-44a2-98d6-76dee6db5200" message="end"/>
+		<os:store doc:name="Log the call" objectStore="A2A_Call_Log" key="#[(now() as Number {unit: 'milliseconds'}) as String ++ '-' ++ vars.a2aTaskId]">
+			<os:value><![CDATA[#[output application/json --- { in: vars.a2aIn, out: { contextId: vars.a2aContextId, taskId: vars.a2aTaskId } }]]]></os:value>
+		</os:store>
 		<ee:transform doc:name="Transform Message" doc:id="767014c6-0aee-4d4d-8746-f06743d7a3e3" >
 			<ee:message >
 				<ee:set-payload ><![CDATA[%dw 2.0
 output application/json
 ---
 {
-  messageId: uuid(),
+  kind: "task",
+  id: vars.a2aTaskId,
   contextId: vars.a2aContextId,
-  role: "agent",
-  parts: [
-    { kind: "text", text: payload.response }
+  status: {
+    state: "completed",
+    timestamp: now() as String {format: "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"},
+    message: {
+      kind: "message",
+      role: "agent",
+      messageId: uuid(),
+      taskId: vars.a2aTaskId,
+      contextId: vars.a2aContextId,
+      parts: [ { kind: "text", text: payload.response } ]
+    }
+  },
+  artifacts: [
+    {
+      artifactId: uuid(),
+      name: "similar-cases",
+      parts: [ { kind: "text", text: payload.response } ]
+    }
   ],
-  kind: "message",
   metadata: {}
 }]]></ee:set-payload>
 			</ee:message>
 		</ee:transform>
 	</flow>
 
+	<flow name="a2a-call-log">
+		<http:listener doc:name="GET /debug/a2a-log" config-ref="HTTP_Listener_config" path="/debug/a2a-log" allowedMethods="GET" />
+		<os:retrieve-all doc:name="All logged calls" objectStore="A2A_Call_Log" />
+		<ee:transform doc:name="Oldest first">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+(payload pluck ((v, k) -> { key: k as String, call: read(v as String, "application/json") }))
+  orderBy $.key
+  map $.call]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
 </mule>

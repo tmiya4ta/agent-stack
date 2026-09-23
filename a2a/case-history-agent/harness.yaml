@@ -1,7 +1,7 @@
 name: case-history-agent
 kind: a2a
 runtime: mule
-version: 1.0.1
+version: 1.0.2
 build: mvn -B clean package -DskipTests
 artifact: target/*-mule-application.jar
 endpoint: /
