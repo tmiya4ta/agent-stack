@@ -166,7 +166,7 @@ context:
         name: screening-server{{-suffix}}
       url: ${screening-server{{-suffix}}.url}
 
-    openai_connection{{_suffix}}:
+    aml_openai_connection{{_suffix}}:
       kind: llm
       ref:
         name: aml-openai-llm{{-suffix}}

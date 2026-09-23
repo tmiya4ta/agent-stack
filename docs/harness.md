@@ -42,6 +42,12 @@ The pom `artifactId` must not equal any asset id a network publishes (the `regis
 asset with the same id (`CreateExchangeAsset Unexpected error`, 500). Mule apps therefore end
 in `-app` (`it-provisioning-agent-app`), while the deployment name stays the harness `name`.
 
+The same goes for the networks themselves. Asset ids in `registry` and the connection keys in
+`context.connections` must not repeat across networks deployed to one environment: a connection
+becomes an API instance named after its key, and a second network with an `openai_connection`
+fails with `409 ... already exists in your organization`. Prefix them with the network
+(`aml_openai_connection`, `aml-openai-llm`).
+
 ## runtime: agent-network
 
 ```yaml
