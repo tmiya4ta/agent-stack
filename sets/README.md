@@ -6,6 +6,7 @@ Named selections of units provisioned together with one command. Each folder hol
 | Set | What it brings up |
 |---|---|
 | [onboarding-demo](onboarding-demo/) | The employee onboarding network and its three member apps |
+| [finance-demo](finance-demo/) | AML alert investigation: the network, two MCP servers and one A2A agent (fictitious bank data) |
 
 ```bash
 yc harness deploy <org> <env> onboarding-demo [suffix=<s>] [use-existing=<profile>:<bg>/<env>]

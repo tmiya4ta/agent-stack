@@ -1,0 +1,52 @@
+{
+  "main": "agent-network.yaml",
+  "name": "aml-investigation-network{{-suffix}}",
+  "classifier": "agentic-network",
+  "organizationId": "{{business-group-id}}",
+  "descriptorVersion": "1.0.0",
+  "apiVersion": "v1",
+  "tags": [],
+  "groupId": "{{business-group-id}}",
+  "assetId": "aml-investigation-network{{-suffix}}",
+  "version": "0.0.1",
+  "dependencies": [],
+  "metadata": {
+    "variables": {
+      "case-history-agent{{-suffix}}": {
+        "url": {
+          "description": "A2A endpoint of the Case History Agent (agent-stack a2a/case-history-agent), scheme included",
+          "default": "{{case-history-agent-url}}",
+          "secret": false
+        }
+      },
+      "core-banking-server{{-suffix}}": {
+        "url": {
+          "description": "Base URL of the Core Banking MCP Server (agent-stack mcp/core-banking-mcp), scheme included. /mcp is appended by the transport setting",
+          "default": "{{core-banking-mcp-url}}",
+          "secret": false
+        }
+      },
+      "screening-server{{-suffix}}": {
+        "url": {
+          "description": "Base URL of the Screening MCP Server (agent-stack mcp/screening-mcp), scheme included. /mcp is appended by the transport setting",
+          "default": "{{screening-mcp-url}}",
+          "secret": false
+        }
+      },
+      "aml-openai-llm{{-suffix}}": {
+        "url": {
+          "description": "Base URL of the OpenAI-compatible endpoint, scheme included, up to and including the version path (e.g. https://host/openai/v1)",
+          "default": "{{llm-base-url}}",
+          "secret": false
+        }
+      },
+      "openAI": {
+        "apiKey": {
+          "description": "API key of the LLM endpoint. For a proxy fronted by Basic authentication this is base64(clientId:clientSecret)",
+          "default": "{{llm-api-key}}",
+          "secret": true
+        }
+      }
+    }
+  }
+}

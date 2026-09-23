@@ -1,0 +1,15 @@
+name: case-history-agent
+kind: a2a
+runtime: mule
+version: 1.0.0
+build: mvn -B package -DskipTests
+artifact: target/*-mule-application.jar
+endpoint: /
+deploy:
+  mule:
+    target: ch2
+    properties:
+      agent.url: ${self.url}
+      llm.proxy.host: ${var:llm-host}
+    secure:
+      llm.apiKey: ${var:llm-api-key}

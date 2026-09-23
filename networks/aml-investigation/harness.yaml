@@ -1,0 +1,7 @@
+name: aml-investigation
+kind: network
+runtime: agent-network
+members:
+  case-history-agent-url: case-history-agent
+  core-banking-mcp-url: core-banking-mcp
+  screening-mcp-url: screening-mcp

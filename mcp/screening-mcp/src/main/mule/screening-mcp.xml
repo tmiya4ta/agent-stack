@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:mcp="http://www.mulesoft.org/schema/mule/mcp"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/mcp http://www.mulesoft.org/schema/mule/mcp/current/mule-mcp.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+	<!-- Fictitious screening data for the AML alert investigation demo: watch lists
+	     (sanctions, PEPs, the bank's own list) and news articles. Every entry is made up.
+	     Names are compared after dropping spaces, case, 株式会社 and anything in
+	     parentheses; a partial match is reported as such, with the birth dates compared,
+	     so the analyst can tell a namesake from a real hit. -->
+	<global-property name="http.port" value="8081" />
+	<db:config name="Screening_DB" doc:name="Database Config">
+		<db:generic-connection url="jdbc:sqlite:screening.db" driverClassName="org.sqlite.JDBC" />
+	</db:config>
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config">
+		<http:listener-connection host="0.0.0.0" port="${http.port}" />
+	</http:listener-config>
+	<mcp:server-config name="MCP_Server" doc:name="MCP Server" serverName="Screening MCP" serverVersion="1.0.0">
+		<mcp:streamable-http-server-connection listenerConfig="HTTP_Listener_config" />
+	</mcp:server-config>
+
+	<flow name="seed-on-start">
+		<scheduler doc:name="Once at start">
+			<scheduling-strategy>
+				<fixed-frequency frequency="10000" timeUnit="DAYS" />
+			</scheduling-strategy>
+		</scheduler>
+		<db:execute-script doc:name="Seed" config-ref="Screening_DB" file="seed.sql" />
+		<logger level="INFO" message="screening data seeded" />
+	</flow>
+
+	<flow name="screen-name">
+		<mcp:tool-listener doc:name="screen-name" config-ref="MCP_Server" name="screen-name">
+			<mcp:description><![CDATA[Screens a person or company name against the watch lists (sanctions, foreign PEPs and the
+bank's own list of counterparties to watch). Each hit says which list, whether the name matched
+exactly or only partially, and whether the birth date matches (true / false / "unknown").
+A partial match with a different birth date is usually a different person. Returns an empty
+hits list when nothing matches.]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "description": "Person or company name" },
+    "birthDate": { "type": "string", "description": "YYYY-MM-DD, for a person, if known" }
+  },
+  "required": ["name"]
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<set-variable variableName="req" value="#[payload]" />
+		<db:select config-ref="Screening_DB">
+			<db:sql><![CDATA[SELECT * FROM watchlist]]></db:sql>
+		</db:select>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+fun key(s) = upper(((s default '') replace /[（(][^）)]*[）)]/ with '') replace /株式会社|\s|　/ with '')
+var k = key(vars.req.name)
+var bd = vars.req.birthDate default ''
+---
+{
+  screened: vars.req.name,
+  hits: (payload filter (k != '' and ($.name_key == k or (k contains $.name_key) or ($.name_key contains k)))) map {
+    list: $.list_name, entityType: $.entity_type, listedName: $.name, country: $.country,
+    reason: $.reason, listedOn: $.listed_on,
+    match: if ($.name_key == k) "exact" else "partial",
+    listedBirthDate: $.birth_date,
+    birthDateMatch: if ($.birth_date == null or bd == '') "unknown" else ($.birth_date == bd)
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<flow name="search-news">
+		<mcp:tool-listener doc:name="search-news" config-ref="MCP_Server" name="search-news">
+			<mcp:description><![CDATA[Searches news articles that mention a person or company name. Returns date, source,
+title and body for each. An article about someone with the same name is not necessarily about
+this customer: compare age, address and occupation before drawing any conclusion.]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string", "description": "Person or company name" }
+  },
+  "required": ["name"]
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<set-variable variableName="req" value="#[payload]" />
+		<db:select config-ref="Screening_DB">
+			<db:sql><![CDATA[SELECT * FROM news ORDER BY published_on DESC]]></db:sql>
+		</db:select>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+fun key(s) = upper(((s default '') replace /[（(][^）)]*[）)]/ with '') replace /株式会社|\s|　/ with '')
+var k = key(vars.req.name)
+---
+{
+  searched: vars.req.name,
+  articles: (payload filter (k != '' and ($.names default '') != '' and ((k contains $.names) or ($.names contains k)))) map {
+    publishedOn: $.published_on, source: $.source, title: $.title, body: $.body
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+</mule>

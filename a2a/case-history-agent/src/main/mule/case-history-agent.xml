@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+	<global-property name="http.port" value="8081" />
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="9d2ebab8-080a-41e9-9f80-c7b9d0f27b28" >
+		<http:listener-connection host="0.0.0.0" port="${http.port}" />
+	</http:listener-config>
+	<a2a:server-config name="A2A_Server" doc:name="A2A Server" doc:id="c4ed95a0-0264-4f9b-85f5-ab2ce6b33cd9" >
+		<a2a:connection listenerConfig="HTTP_Listener_config" agentPath="/"/>
+		<a2a:card name="Case History Agent" url="${agent.url}" version="1.0.0" protocolVersion="0.3.0">
+			<a2a:description ><![CDATA[Finds past AML investigations similar to a new alert and reports how they were decided and why.
+Answers only from the bank's recorded cases; never invents one.]]></a2a:description>
+			<a2a:skills >
+				<a2a:agent-skill id="1" name="find-similar-cases" >
+					<a2a:description ><![CDATA[Given a description of an alert (pattern, amounts, counterparties, customer profile), returns up to three similar past cases with their decisions]]></a2a:description>
+					<a2a:tags >
+						<a2a:tag value="aml" />
+						<a2a:tag value="case-history" />
+					</a2a:tags>
+					<a2a:examples>
+						<a2a:example value="9 日間に 50 万円未満の現金入金が 8 回、その翌日に香港の法人へ 385 万円の海外送金。似た過去事例は？" />
+					</a2a:examples>
+				</a2a:agent-skill>
+			</a2a:skills>
+			<a2a:provider organization="agent-stack demo" url="https://github.com/tmiya4ta/agent-stack" />
+		</a2a:card>
+	</a2a:server-config>
+	<http:request-config name="LLM_Proxy" doc:name="HTTP Request configuration" doc:id="a1e2b3c4-7777-8888-9999-aaaabbbbcccc" responseTimeout="${llm.responseTimeout}">
+		<http:request-connection host="${llm.proxy.host}" port="${llm.proxy.port}" protocol="${llm.proxy.protocol}" usePersistentConnections="true" maxConnections="${llm.maxConnections}" connectionIdleTimeout="${llm.connectionIdleTimeout}" />
+	</http:request-config>
+	<configuration-properties doc:name="Configuration properties" doc:id="b613feb4-e550-4426-8cc3-3ba49bb65e19" file="app.properties" />
+	<flow name="case-history-agentFlow" doc:id="0f521b31-c8e8-4b71-bfd7-6af84b9e2ba0" >
+		<a2a:task-listener doc:name="Task Listener" doc:id="1f2514d0-7648-43da-8ff3-f654d226264a" config-ref="A2A_Server">
+		</a2a:task-listener>
+		<logger level="INFO" doc:name="Logger" doc:id="a3ebdcaf-e6b9-497d-ae06-bda43698f293" message="#[payload]"/>
+		<ee:transform doc:name="Transform Message" doc:id="8e679a4b-8fca-4cf6-a9bc-63b02a614abb" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/java
+---
+if (payload is String)
+  read(payload, "application/json")
+else
+  payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="b320677a-ee24-4883-ad45-6fdf5db97fea" message="start"/>
+		<ee:transform doc:name="Build LLM request" doc:id="b1c2d3e4-7777-8888-9999-aaaabbbbcccc">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var systemPrompt = "あなたは銀行のマネロン対策部門で、過去の調査記録を検索する担当です。
+依頼文にあるアラートの内容（取引のパターン、金額、相手先、顧客の属性）と似ている過去事例を、下の「過去事例一覧」の中から最大 3 件選び、似ている順に並べて答えてください。
+
+厳守:
+- 一覧にない事例を作ってはいけません。事例番号・判断・理由は一覧の記載どおりに書きます。
+- 似ている事例が 1 件もなければ「類似する過去事例は見つかりませんでした」とだけ答えます。
+- 前置きや挨拶は書かず、1 行目から表を始めます。
+
+形式:
+| 事例番号 | 概要 | 判断 | 判断の理由 | 今回との共通点 |
+|---|---|---|---|---|
+
+過去事例一覧（すべて架空）:
+- CASE-2025-012 | 会社員の口座に 1 件 200 万円の入金。勤務先からの決算賞与で、前年も同時期に同程度の入金 | クローズ | 入金元が給与振込元と同じで、金額・時期とも例年どおり
+- CASE-2025-031 | 飲食店経営者の口座に 10 日間で 50 万円未満の現金入金が 9 回（計 430 万円）、翌日に香港の貿易会社へ 420 万円を送金 | 届出 | 基準額を避けた分割入金と見られ、送金目的の説明（仕入）に裏付けとなる請求書がなかった
+- CASE-2025-047 | 開設 1 か月の口座に不動産会社から 1,500 万円の入金 | クローズ | 売買契約書と登記簿で物件売却代金と確認できた
+- CASE-2025-058 | 顧客と同姓同名の人物が詐欺容疑で逮捕されたとの報道がヒット | クローズ | 報道の人物と生年月日・住所・職業が一致せず、別人と判断
+- CASE-2026-004 | 飲食店の口座で現金入金が前月比 2 倍に増加 | クローズ | 年末の繁忙期で、売上台帳の現金売上と金額が一致した
+- CASE-2026-019 | 開設直後の口座に第三者から 300 万円が入金され、同日中に全額が複数口座へ出金 | 届出 | 口座の譲渡・売買が疑われ、本人と連絡が取れなかった
+- CASE-2026-022 | 開設 2 か月の口座に 800 万円の入金、報道で同姓同名の人物がヒット | 保留（追加確認） | 入金元の確認書類を依頼中で、報道の人物との同一性も未確認だった"
+---
+{
+  model: p('llm.model'),
+  "input": payload.message.parts[0].text,
+  instructions: systemPrompt,
+  max_output_tokens: p('llm.maxOutputTokens') as Number,
+  reasoning: {
+    effort: p('llm.reasoningEffort')
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<http:request doc:name="Call LLM proxy" doc:id="c1d2e3f4-7777-8888-9999-aaaabbbbcccc" method="POST" config-ref="LLM_Proxy" path="${llm.proxy.path}">
+			<http:headers><![CDATA[#[{
+  "Content-Type": "application/json",
+  "Authorization": "Bearer " ++ p('llm.apiKey')
+}]]]></http:headers>
+		</http:request>
+		<ee:transform doc:name="Extract response text" doc:id="d1e2f3a4-7777-8888-9999-aaaabbbbcccc">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+{
+  response: (payload.'output' filter ($.'type' == "message"))[0].content[0].text
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="253e85d1-215c-44a2-98d6-76dee6db5200" message="end"/>
+		<ee:transform doc:name="Transform Message" doc:id="767014c6-0aee-4d4d-8746-f06743d7a3e3" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+{
+  messageId: (payload.message.messageId default ("msg-" ++ (now() as String {format: "yyyyMMddHHmmss"}))),
+  contextId: payload.contextId default ("ctx-ch-" ++ (now() as String {format: "yyyyMMdd"})),
+  role: "agent",
+  parts: [
+    { kind: "text", text: payload.response }
+  ],
+  kind: "message",
+  metadata: {}
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+</mule>

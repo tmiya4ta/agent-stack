@@ -1,0 +1,9 @@
+name: finance-demo
+kind: set
+runtime: set
+units:
+  - aml-investigation
+defaults:
+  target: ps:rootps
+  gateway: ft1
+  profile: onboarding-employees

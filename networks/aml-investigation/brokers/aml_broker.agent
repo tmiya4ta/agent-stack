@@ -1,0 +1,384 @@
+# @dialect: AGENTFABRIC=1.1
+#
+# AML Alert Investigation Broker
+#
+# Two turns in one conversation (same contextId). The agent gathers and drafts; the analyst decides.
+#
+#   turn 1  "アラート ALT-0915 を調べて"
+#   trigger
+#     +-> subagent classify            get-case(contextId) -> step "new" -> route "investigate"
+#        +-> router mainRouter
+#             + investigate   -> orchestrator investigate   alert, customer, transactions, screening,
+#             |                     |                       news, similar past cases; save-case(awaiting_decision)
+#             |                     +-> router foundRouter
+#             |                          + not found -> echo alertNotFound (FAILED)
+#             |                          + found     -> generator draftMemo -> echo memoArtifact -> echo memoStatus
+#             + ask_alert      -> echo askAlert
+#
+#   turn 2  "届出検討で。分割入金が明白"
+#   trigger
+#     +-> subagent classify            step "awaiting_decision" -> route "decide" + decision
+#        +-> router mainRouter
+#             + decide          -> executor recordDecision (record-decision, no LLM) -> echo decisionRecorded
+#             + ask_decision    -> echo askDecision
+#             + already_decided -> echo alreadyDecided
+#
+# Design notes:
+#   - The recommendation in the memo is a draft. Only the analyst's reply decides, and the decision
+#     is written by an executor, so no LLM sits between the analyst and the record.
+#   - Progress lives in the Core Banking MCP keyed by contextId; @variables do not survive a turn.
+#   - Nodes that call tools never talk to the human (a question from an orchestrator ends the task
+#     early); every question to the human is its own echo.
+#   - A source that could not be reached is listed as a gap in the memo instead of being skipped.
+
+system:
+  instructions: "あなたは銀行のマネロン対策部門の調査補助です。確認できた事実だけを扱い、推測で埋めません。最終判断は必ず担当者が行います。"
+
+config:
+  agent_name: "AML Alert Investigation Broker{{-suffix}}"
+  default_llm: @llm.openai_llm
+
+llm:
+  openai_llm:
+    target: "llm://openai_connection{{_suffix}}"
+    kind: "OpenAI"
+    model: "gpt-5-mini"
+
+actions:
+  get_case:
+    target: "mcp://core_banking_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "get-case"
+
+  save_case:
+    target: "mcp://core_banking_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "save-case"
+
+  record_decision:
+    target: "mcp://core_banking_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "record-decision"
+
+  get_alert:
+    target: "mcp://core_banking_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "get-alert"
+
+  list_transactions:
+    target: "mcp://core_banking_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "list-transactions"
+
+  screen_name:
+    target: "mcp://screening_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "screen-name"
+
+  search_news:
+    target: "mcp://screening_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "search-news"
+
+  case_history:
+    target: "a2a://case_history_connection{{_suffix}}"
+    kind: "a2a:send_message"
+
+trigger amlTrigger:
+  kind: "a2a"
+  target: "brokers://aml-investigation-broker{{-suffix}}/a2a"
+  on_message: ->
+    transition to @subagent.classify
+
+# -------------------------------------------------------------
+# 1. Where is this conversation, and what did the human say?
+# -------------------------------------------------------------
+subagent classify:
+  label: "Classify Turn"
+  description: "Reads the investigation state of this conversation and classifies the analyst's message."
+  system:
+    instructions: |
+      あなたは受付担当です。手順:
+      1. 必ず get_case ツールで、渡された contextId の状態を取得する。
+      2. step が "new"（状態が無い）の場合:
+         メッセージからアラート ID を取り出す。「ALT-」に続く 4 桁、または単独の 4 桁の数字がアラート ID。
+         alertId は必ず "ALT-0915" の形に正規化する。
+         見つかれば route_key = "investigate"、見つからなければ route_key = "ask_alert"。
+      3. step が "awaiting_decision" の場合: メッセージを担当者の判断として分類する。
+         - クローズ・問題なし・対応不要・閉じる → decision = "close", decisionLabel = "クローズ"
+         - 届出・届け出・疑わしい・エスカレーション → decision = "file_str", decisionLabel = "届出検討"
+         - 保留・追加確認・確認中・待ち → decision = "hold", decisionLabel = "保留（追加確認）"
+         どれか 1 つに決まれば route_key = "decide"。決まらない・複数に当てはまる場合は route_key = "ask_decision"。
+         note には、担当者が書いた理由をそのまま入れる（無ければ空文字）。
+         alertId には状態の alertId を入れる。
+      4. step が "decided" の場合: route_key = "already_decided"、alertId には状態の alertId を入れる。
+      5. 使わない項目は空文字にする。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。質問文・確認文・実況を出力すると処理が中断されます。
+         どんな場合も構造化出力だけを返してください。聞き返しは後段の別ノードが行います。
+  reasoning:
+    instructions: ->
+      | 担当者のメッセージ: {!@request.payload.message.parts[0].text}
+      | contextId: {!@request.payload.message.contextId}
+    actions:
+      get_case: @actions.get_case
+    outputs:
+      properties:
+        route_key:
+          type: "string"
+          description: "Next route"
+          enum:
+            - "investigate"
+            - "ask_alert"
+            - "decide"
+            - "ask_decision"
+            - "already_decided"
+        alertId:
+          type: "string"
+          description: "Normalized alert ID such as ALT-0915, or empty"
+        decision:
+          type: "string"
+          description: "close, file_str or hold when route_key is decide; otherwise empty"
+        decisionLabel:
+          type: "string"
+          description: "Japanese label of the decision, or empty"
+        note:
+          type: "string"
+          description: "The analyst's reason as written, or empty"
+    max_number_of_loops: 4
+    max_consecutive_errors: 2
+    task_timeout_secs: 40
+  on_exit: ->
+    transition to @router.mainRouter
+
+router mainRouter:
+  description: "Branches on the classified route."
+  routes:
+    - target: @orchestrator.investigate
+      when: @subagent.classify.output.route_key == "investigate"
+      label: "Investigate"
+    - target: @echo.askAlert
+      when: @subagent.classify.output.route_key == "ask_alert"
+      label: "Ask for the alert ID"
+    - target: @executor.recordDecision
+      when: @subagent.classify.output.route_key == "decide"
+      label: "Record the decision"
+    - target: @echo.askDecision
+      when: @subagent.classify.output.route_key == "ask_decision"
+      label: "Ask for a clear decision"
+    - target: @echo.alreadyDecided
+      when: @subagent.classify.output.route_key == "already_decided"
+      label: "Already decided"
+  otherwise:
+    target: @echo.classifyFailed
+
+# -------------------------------------------------------------
+# 2. Investigate: gather everything, recommend, save the state
+# -------------------------------------------------------------
+orchestrator investigate:
+  label: "Investigate Alert"
+  description: "Gathers the alert, customer profile, transactions, screening and news hits and similar past cases, then saves the state."
+  system:
+    instructions: |
+      あなたはマネロン疑いアラートの一次調査を行います。手順（すべて実行する）:
+      1. get_alert で alertId のアラートを取得する。found が false なら found = "false" として、以降は何もせず返す。
+      2. list_transactions でその口座の取引を取得する。
+      3. screen_name で顧客名（生年月日付き）を照合する。海外送金や大口の相手先があれば、その名前も照合する。
+      4. search_news で顧客名を検索する。海外送金の相手先があれば、その名前も検索する。
+      5. case_history に、アラートの内容・取引のパターン・顧客の属性を日本語で 3〜4 文にまとめて送り、似た過去事例を聞く。
+      6. 集めた材料から推奨を 1 つ決める:
+         - 顧客の属性（職業・勤務先・申告年収・取引目的）や過去の取引から説明がつく → "close"
+         - 基準額を避けたような分割、急な海外送金、要注意リストとの完全一致など、説明のつかない点が重なる → "file_str"
+         - 同姓同名の報道やリストの部分一致など、本人かどうか・資金の出どころの確認が必要 → "hold"
+         推奨は下書きであり、最終判断は担当者が行う。
+      7. save_case で contextId, alertId, step = "awaiting_decision", recommendation を保存する。
+      出力:
+      - facts: 顧客の属性、アラートの内容、注目すべき取引（日付・金額・相手先・経路）を箇条書きで。数値は取得したものをそのまま使う。
+      - screening: リスト照合と報道検索の結果。部分一致なら生年月日などが一致するかを必ず書く。
+      - similarCases: case_history の回答をそのまま入れる。
+      - gaps: ツールが失敗した・応答しなかったものを列挙する（無ければ "なし"）。失敗しても調査は続ける。
+      - reasoning: 推奨の根拠を 2〜4 文で。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。質問文・確認文・実況を出力すると処理が中断されます。
+         どんな場合も構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | contextId: {!@request.payload.message.contextId}
+      | alertId: {!@subagent.classify.output.alertId}
+    actions:
+      get_alert: @actions.get_alert
+      list_transactions: @actions.list_transactions
+      screen_name: @actions.screen_name
+      search_news: @actions.search_news
+      case_history: @actions.case_history
+      save_case: @actions.save_case
+    outputs:
+      properties:
+        found:
+          type: "string"
+          description: "\"true\" when the alert exists, otherwise \"false\""
+        alertId:
+          type: "string"
+          description: "The alert ID"
+        customerName:
+          type: "string"
+          description: "Customer name"
+        recommendation:
+          type: "string"
+          description: "close, file_str or hold"
+          enum:
+            - "close"
+            - "file_str"
+            - "hold"
+        facts:
+          type: "string"
+          description: "Customer profile, alert and notable transactions"
+        screening:
+          type: "string"
+          description: "Watch-list and news results"
+        similarCases:
+          type: "string"
+          description: "Similar past cases as returned by the case history agent"
+        gaps:
+          type: "string"
+          description: "Sources that could not be reached, or なし"
+        reasoning:
+          type: "string"
+          description: "Why this recommendation"
+    max_number_of_loops: 14
+    max_consecutive_errors: 3
+    task_timeout_secs: 180
+  on_exit: ->
+    transition to @router.foundRouter
+
+router foundRouter:
+  description: "Stops when the alert does not exist."
+  routes:
+    - target: @echo.alertNotFound
+      when: @orchestrator.investigate.output.found == "false"
+      label: "Alert not found"
+  otherwise:
+    target: @generator.draftMemo
+
+generator draftMemo:
+  system:
+    instructions: "あなたはマネロン対策部門の調査補助です。担当者が読む調査メモの下書きを Markdown で書きます。確認できた事実だけを使い、材料にない事実を足しません。前置き・実況は書きません。"
+  prompt: ->
+    | 次の材料から調査メモの下書きを作ってください。1 行目は「### 🔎 調査メモ（下書き）: <アラート ID> <顧客名>」とします。
+    | 見出しは順に「アラートの内容」「顧客の属性」「注目すべき取引」「リスト照合・報道」「類似する過去事例」「確認できなかった材料」「推奨（下書き）」。
+    | 「注目すべき取引」は表（日付 / 種類 / 金額 / 相手先・経路）にします。
+    | 「推奨（下書き）」には、推奨（close は「クローズ」、file_str は「届出検討」、hold は「保留（追加確認）」と書く）と根拠を書きます。
+    | 最後に次の 2 行を必ずそのまま付けます:
+    | ---
+    | **判断をこの会話に返信してください:** 「クローズ」「届出検討」「保留」のいずれかと、その理由。
+    |
+    | アラート ID: {!@orchestrator.investigate.output.alertId}
+    | 顧客名: {!@orchestrator.investigate.output.customerName}
+    | 事実: {!@orchestrator.investigate.output.facts}
+    | リスト照合・報道: {!@orchestrator.investigate.output.screening}
+    | 類似する過去事例: {!@orchestrator.investigate.output.similarCases}
+    | 確認できなかった材料: {!@orchestrator.investigate.output.gaps}
+    | 推奨: {!@orchestrator.investigate.output.recommendation}
+    | 根拠: {!@orchestrator.investigate.output.reasoning}
+  on_exit: ->
+    transition to @echo.memoArtifact
+
+echo memoArtifact:
+  label: "Investigation memo"
+  kind: "a2a:artifact_update_event"
+  artifact: a2a.artifact({
+    artifactId: uuid(),
+    name: "aml-investigation-memo",
+    description: "Draft investigation memo. The analyst decides.",
+    parts: [
+      a2a.textPart(@generator.draftMemo.output),
+      a2a.dataPart({ data: @orchestrator.investigate.output })
+    ],
+    metadata: {}
+  })
+  append: False
+  lastChunk: True
+  on_exit: ->
+    transition to @echo.memoStatus
+
+echo memoStatus:
+  label: "Memo ready, awaiting the analyst"
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart(@generator.draftMemo.output)
+    ]
+  })
+
+echo alertNotFound:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_FAILED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("アラート " + @subagent.classify.output.alertId + " は見つかりませんでした。アラート ID を確かめてください。")
+    ]
+  })
+
+# -------------------------------------------------------------
+# 3. The analyst's decision: recorded without an LLM in between
+# -------------------------------------------------------------
+executor recordDecision:
+  description: "Records the analyst's decision in the core banking system."
+  do: ->
+    run @actions.record_decision
+      with contextId = @request.payload.message.contextId
+      with decision = @subagent.classify.output.decision
+      with note = @subagent.classify.output.note
+  on_exit: ->
+    transition to @echo.decisionRecorded
+
+echo decisionRecorded:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("✅ アラート " + @subagent.classify.output.alertId + " の判断「" + @subagent.classify.output.decisionLabel + "」を記録しました。理由: " + @subagent.classify.output.note)
+    ]
+  })
+
+echo askAlert:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("調査するアラート ID を教えてください（例: ALT-0915）。")
+    ]
+  })
+
+echo askDecision:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("判断を「クローズ」「届出検討」「保留」のいずれか 1 つで、理由を添えて返信してください。")
+    ]
+  })
+
+echo alreadyDecided:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("この会話のアラート " + @subagent.classify.output.alertId + " は判断済みです。別のアラートは新しい会話で依頼してください。")
+    ]
+  })
+
+echo classifyFailed:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_FAILED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("依頼の内容を判定できませんでした。アラート ID（例: ALT-0915）を添えてもう一度送ってください。")
+    ]
+  })

@@ -1,0 +1,208 @@
+agentNetwork: 2.0.0
+info:
+  label: AML Alert Investigation Network
+  version: 1.0.0
+  description: Investigates a transaction-monitoring alert, drafts the investigation memo for an analyst, and records the analyst's decision.
+
+registry:
+  agents:
+    case-history-agent{{-suffix}}:
+      info:
+        label: Case History Agent
+      metadata:
+        platform: MuleSoft
+        interfaces:
+          a2a_v03:
+            card:
+              name: Case History Agent
+              url: ${case-history-agent{{-suffix}}.url}
+              protocolVersion: "0.3.0"
+              description: Finds past AML investigations similar to a new alert and reports how they were decided and why. Answers only from recorded cases.
+              version: 1.0.0
+              capabilities:
+                pushNotifications: false
+              defaultInputModes:
+                - text/plain
+              defaultOutputModes:
+                - text/plain
+              skills:
+                - id: find-similar-cases
+                  name: Find similar cases
+                  description: Returns up to three similar past cases with their decisions.
+                  tags:
+                    - aml
+                  inputModes:
+                    - text/plain
+                  outputModes:
+                    - text/plain
+
+  mcps:
+    core-banking-server{{-suffix}}:
+      info:
+        label: Core Banking MCP Server
+        description: Alerts, accounts, customer profiles and transactions, plus the investigation state of each conversation and the analyst's decisions.
+      metadata:
+        transport:
+          kind: streamableHttp
+          path: /mcp
+        tools:
+          - name: get-alert
+            description: Returns an alert with its account and customer profile.
+            inputSchema:
+              type: object
+              properties:
+                alertId:
+                  type: string
+              required:
+                - alertId
+          - name: list-transactions
+            description: Lists the transactions of an account, oldest first.
+            inputSchema:
+              type: object
+              properties:
+                accountId:
+                  type: string
+              required:
+                - accountId
+          - name: get-case
+            description: Returns the investigation state of a conversation.
+            inputSchema:
+              type: object
+              properties:
+                contextId:
+                  type: string
+              required:
+                - contextId
+          - name: save-case
+            description: Saves the investigation state of a conversation.
+            inputSchema:
+              type: object
+              properties:
+                contextId:
+                  type: string
+                alertId:
+                  type: string
+                step:
+                  type: string
+                recommendation:
+                  type: string
+              required:
+                - contextId
+                - alertId
+                - step
+                - recommendation
+          - name: record-decision
+            description: Records the analyst's decision and closes the case.
+            inputSchema:
+              type: object
+              properties:
+                contextId:
+                  type: string
+                decision:
+                  type: string
+                note:
+                  type: string
+              required:
+                - contextId
+                - decision
+
+    screening-server{{-suffix}}:
+      info:
+        label: Screening MCP Server
+        description: Watch-list screening (sanctions, PEPs, the bank's own list) and news search.
+      metadata:
+        transport:
+          kind: streamableHttp
+          path: /mcp
+        tools:
+          - name: screen-name
+            description: Screens a person or company name against the watch lists.
+            inputSchema:
+              type: object
+              properties:
+                name:
+                  type: string
+                birthDate:
+                  type: string
+              required:
+                - name
+          - name: search-news
+            description: Searches news articles that mention a name.
+            inputSchema:
+              type: object
+              properties:
+                name:
+                  type: string
+              required:
+                - name
+
+  llms:
+    aml-openai-llm{{-suffix}}:
+      info:
+        label: OpenAI
+        description: OpenAI-compatible LLM provider. The endpoint comes from the aml-openai-llm{{-suffix}}.url variable in exchange.json.
+      metadata:
+        platform: AzureOpenai
+        models:
+          - gpt-5-mini
+
+context:
+  connections:
+    case_history_connection{{_suffix}}:
+      kind: a2a
+      ref:
+        name: case-history-agent{{-suffix}}
+      url: ${case-history-agent{{-suffix}}.url}
+
+    core_banking_connection{{_suffix}}:
+      kind: mcp
+      ref:
+        name: core-banking-server{{-suffix}}
+      url: ${core-banking-server{{-suffix}}.url}
+
+    screening_connection{{_suffix}}:
+      kind: mcp
+      ref:
+        name: screening-server{{-suffix}}
+      url: ${screening-server{{-suffix}}.url}
+
+    openai_connection{{_suffix}}:
+      kind: llm
+      ref:
+        name: aml-openai-llm{{-suffix}}
+      url: ${aml-openai-llm{{-suffix}}.url}
+      authentication:
+        kind: apiKey
+        apiKey: ${openAI.apiKey}
+
+brokers:
+  aml-investigation-broker{{-suffix}}:
+    kind: AgentScript
+    implementation: ./brokers/aml_broker.agent
+    interfaces:
+      a2a:
+        card:
+          name: AML Alert Investigation Broker{{-suffix}}
+          description: Investigates a transaction-monitoring alert and drafts the memo; an analyst then decides whether to close it, consider a suspicious transaction report, or hold it.
+          version: 1.0.0
+          capabilities:
+            streaming: false
+            pushNotifications: true
+          defaultInputModes:
+            - text/plain
+          defaultOutputModes:
+            - text/plain
+          skills:
+            - id: aml-alert-investigation
+              name: Investigate an AML alert
+              description: Gathers the customer profile, transactions, screening and news hits and similar past cases for an alert, drafts the investigation memo, and records the analyst's decision in a follow-up message.
+              tags:
+                - aml
+                - investigation
+              examples:
+                - "アラート ALT-0915 を調べてください"
+                - "ALT-0922 の調査メモを作って"
+              inputModes:
+                - text/plain
+              outputModes:
+                - text/plain

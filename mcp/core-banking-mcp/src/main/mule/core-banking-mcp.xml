@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:mcp="http://www.mulesoft.org/schema/mule/mcp"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/mcp http://www.mulesoft.org/schema/mule/mcp/current/mule-mcp.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+	<!-- Fictitious core banking data for the AML alert investigation demo.
+	     Every name, company and figure here is made up. The tables are recreated
+	     on every start, so a restart resets the demo. -->
+	<global-property name="http.port" value="8081" />
+	<db:config name="Core_Banking_DB" doc:name="Database Config">
+		<db:generic-connection url="jdbc:sqlite:core-banking.db" driverClassName="org.sqlite.JDBC" />
+	</db:config>
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config">
+		<http:listener-connection host="0.0.0.0" port="${http.port}" />
+	</http:listener-config>
+	<mcp:server-config name="MCP_Server" doc:name="MCP Server" serverName="Core Banking MCP" serverVersion="1.0.0">
+		<mcp:streamable-http-server-connection listenerConfig="HTTP_Listener_config" />
+	</mcp:server-config>
+
+	<flow name="seed-on-start">
+		<scheduler doc:name="Once at start">
+			<scheduling-strategy>
+				<fixed-frequency frequency="10000" timeUnit="DAYS" />
+			</scheduling-strategy>
+		</scheduler>
+		<db:execute-script doc:name="Seed" config-ref="Core_Banking_DB" file="seed.sql" />
+		<logger level="INFO" message="core banking data seeded" />
+	</flow>
+
+	<flow name="get-alert">
+		<mcp:tool-listener doc:name="get-alert" config-ref="MCP_Server" name="get-alert">
+			<mcp:description><![CDATA[Returns a transaction-monitoring alert together with the account and the customer profile
+(occupation, employer, declared annual income, stated purpose of the account, risk rating,
+customer since). alertId looks like ALT-0915; "0915" is accepted too.
+Returns {"found": false} when there is no such alert.]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "alertId": { "type": "string", "description": "Alert ID, e.g. ALT-0915" }
+  },
+  "required": ["alertId"]
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<set-variable variableName="alertId" value="#[%dw 2.0
+var id = upper(trim(payload.alertId default ''))
+---
+if (id startsWith 'ALT-') id else 'ALT-' ++ id]" />
+		<db:select config-ref="Core_Banking_DB">
+			<db:sql><![CDATA[SELECT a.alert_id, a.raised_on, a.rule, a.detail, a.status,
+       ac.account_id, ac.branch, ac.type AS account_type, ac.opened_on,
+       c.customer_id, c.name, c.name_kana, c.birth_date, c.address, c.occupation, c.employer,
+       c.declared_income, c.purpose, c.risk_rating, c.customer_since
+FROM alert a JOIN account ac ON ac.account_id = a.account_id
+JOIN customer c ON c.customer_id = ac.customer_id
+WHERE a.alert_id = :id]]></db:sql>
+			<db:input-parameters><![CDATA[#[{ id: vars.alertId }]]]></db:input-parameters>
+		</db:select>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+var r = payload[0]
+---
+if (r == null) { found: false, alertId: vars.alertId }
+else {
+  found: true,
+  alert: { alertId: r.alert_id, raisedOn: r.raised_on, rule: r.rule, detail: r.detail, status: r.status },
+  account: { accountId: r.account_id, branch: r.branch, "type": r.account_type, openedOn: r.opened_on },
+  customer: {
+    customerId: r.customer_id, name: r.name, nameKana: r.name_kana, birthDate: r.birth_date,
+    address: r.address, occupation: r.occupation, employer: r.employer,
+    declaredAnnualIncomeJpy: r.declared_income, accountPurpose: r.purpose,
+    riskRating: r.risk_rating, customerSince: r.customer_since
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<flow name="list-transactions">
+		<mcp:tool-listener doc:name="list-transactions" config-ref="MCP_Server" name="list-transactions">
+			<mcp:description><![CDATA[Lists the transactions of an account, oldest first: date, kind (振込入金 / 現金入金 /
+振込出金 / 海外送金 / 口座振替), amount in JPY, counterparty and channel (ATM location or branch).]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "accountId": { "type": "string", "description": "Account ID, e.g. 1002-0002" }
+  },
+  "required": ["accountId"]
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<db:select config-ref="Core_Banking_DB">
+			<db:sql><![CDATA[SELECT txn_date, kind, amount, counterparty, channel, memo
+FROM txn WHERE account_id = :id ORDER BY txn_date, id]]></db:sql>
+			<db:input-parameters><![CDATA[#[{ id: trim(payload.accountId default '') }]]]></db:input-parameters>
+		</db:select>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+---
+{
+  count: sizeOf(payload),
+  transactions: payload map {
+    date: $.txn_date, kind: $.kind, amountJpy: $.amount,
+    counterparty: $.counterparty, channel: $.channel, memo: $.memo
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<flow name="get-case">
+		<mcp:tool-listener doc:name="get-case" config-ref="MCP_Server" name="get-case">
+			<mcp:description><![CDATA[Returns the investigation state kept for a conversation (contextId): which alert it is about,
+its step ("awaiting_decision" after the draft memo was shown, "decided" once the analyst decided)
+and the recommendation. Returns {"found": false, "step": "new"} for a conversation that has none.]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "contextId": { "type": "string", "description": "A2A contextId of the conversation" }
+  },
+  "required": ["contextId"]
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<db:select config-ref="Core_Banking_DB">
+			<db:sql><![CDATA[SELECT * FROM aml_case WHERE context_id = :id]]></db:sql>
+			<db:input-parameters><![CDATA[#[{ id: payload.contextId default '' }]]]></db:input-parameters>
+		</db:select>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+var r = payload[0]
+---
+if (r == null) { found: false, step: "new" }
+else {
+  found: true, alertId: r.alert_id, step: r.step, recommendation: r.recommendation,
+  decision: r.decision, note: r.note, decisionId: r.decision_id, updatedAt: r.updated_at
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<flow name="save-case">
+		<mcp:tool-listener doc:name="save-case" config-ref="MCP_Server" name="save-case">
+			<mcp:description><![CDATA[Saves the investigation state for a conversation after the draft memo is prepared.
+step is "awaiting_decision"; recommendation is one of "close", "file_str" or "hold".]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "contextId": { "type": "string" },
+    "alertId": { "type": "string" },
+    "step": { "type": "string", "enum": ["awaiting_decision"] },
+    "recommendation": { "type": "string", "enum": ["close", "file_str", "hold"] }
+  },
+  "required": ["contextId", "alertId", "step", "recommendation"]
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<db:insert config-ref="Core_Banking_DB">
+			<db:sql><![CDATA[INSERT OR REPLACE INTO aml_case (context_id, alert_id, step, recommendation, updated_at)
+VALUES (:ctx, :alert, :step, :rec, datetime('now'))]]></db:sql>
+			<db:input-parameters><![CDATA[#[{
+  ctx: payload.contextId, alert: upper(payload.alertId default ''),
+  step: payload.step, rec: payload.recommendation
+}]]]></db:input-parameters>
+		</db:insert>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+---
+{ saved: true }]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<flow name="record-decision">
+		<mcp:tool-listener doc:name="record-decision" config-ref="MCP_Server" name="record-decision">
+			<mcp:description><![CDATA[Records the analyst's decision on the alert of this conversation and closes the case.
+decision is "close" (no further action), "file_str" (escalate for a suspicious transaction
+report) or "hold" (keep open pending more information). Returns the decision ID.]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "contextId": { "type": "string" },
+    "decision": { "type": "string", "enum": ["close", "file_str", "hold"] },
+    "note": { "type": "string", "description": "The analyst's reason, as written" }
+  },
+  "required": ["contextId", "decision"]
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<set-variable variableName="decisionId" value="#['DEC-' ++ (now() as String {format: 'yyyyMMddHHmmss'})]" />
+		<set-variable variableName="req" value="#[payload]" />
+		<db:update config-ref="Core_Banking_DB">
+			<db:sql><![CDATA[UPDATE aml_case SET step = 'decided', decision = :decision, note = :note,
+decision_id = :did, updated_at = datetime('now') WHERE context_id = :ctx]]></db:sql>
+			<db:input-parameters><![CDATA[#[{
+  ctx: vars.req.contextId, decision: vars.req.decision,
+  note: vars.req.note default '', did: vars.decisionId
+}]]]></db:input-parameters>
+		</db:update>
+		<set-variable variableName="updated" value="#[payload.affectedRows default 0]" />
+		<db:update config-ref="Core_Banking_DB">
+			<db:sql><![CDATA[UPDATE alert SET status = :status
+WHERE alert_id = (SELECT alert_id FROM aml_case WHERE context_id = :ctx)]]></db:sql>
+			<db:input-parameters><![CDATA[#[{
+  ctx: vars.req.contextId,
+  status: vars.req.decision match {
+    case "close" -> "クローズ"
+    case "file_str" -> "届出検討"
+    else -> "保留"
+  }
+}]]]></db:input-parameters>
+		</db:update>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+---
+if (vars.updated > 0) { recorded: true, decisionId: vars.decisionId, decision: vars.req.decision }
+else { recorded: false, reason: "no investigation is open for this contextId" }]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+</mule>
