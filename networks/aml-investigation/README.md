@@ -59,6 +59,32 @@ Design notes, expanded in the header of `brokers/aml_broker.agent`:
   ends the task early. Every question to the human is its own `echo`.
 - A source that fails is listed under 「確認できなかった材料」 instead of silently disappearing.
 
+## Measured (T1 / Sandbox, gpt-5-mini, 2026-09-23)
+
+| | Time | Recommendation |
+|---|---|---|
+| ALT-0901 turn 1 | 47 s | クローズ |
+| ALT-0915 turn 1 | 41 s | 届出検討 |
+| ALT-0922 turn 1 | 47–72 s | 保留（追加確認） |
+| decision turn | 10–12 s | recorded with a decision ID |
+
+### Pitfalls met on the way
+
+- **Every tool call is an LLM round trip.** The first version called seven tools one by one and
+  the gateway answered 504. The backends now return bundles (`get-alert` includes the
+  transactions, `check-parties` screens several names), state is saved by an executor, and the
+  LLM runs with `reasoning_effort: "LOW"` (the enum is upper case).
+- **Keep the orchestrator's structured output short.** Asking it to copy every transaction made
+  the turn fail with `An internal error occurred while processing your request.`
+- **A tool whose input schema nests objects in an array fails the broker's tool validation**
+  (`A tool service failed validation.`, within a second, on every node). `check-parties` takes an
+  array of strings instead. The broker checks the tools when it starts, so restart it after a
+  member gains a tool.
+- **Connection keys and registry names are per environment, not per network.** A second
+  `openai_connection` fails with 409; everything here is prefixed `aml_`.
+- **Examples in a prompt become facts.** An example of "usual activity" in the orchestrator's
+  instructions showed up in a memo for a customer who has no such history.
+
 ## Deploying
 
 ```bash
