@@ -3,11 +3,11 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<groupId>com.mycompany</groupId>
-	<artifactId>office-concierge-agent</artifactId>
+	<artifactId>office-concierge-agent-app</artifactId>
 	<version>1.7.8</version>
 	<packaging>mule-application</packaging>
 
-	<name>office-concierge-agent</name>
+	<name>office-concierge-agent-app</name>
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

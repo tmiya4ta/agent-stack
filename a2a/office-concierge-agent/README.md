@@ -28,10 +28,10 @@ Defaults are in `src/main/resources/app.properties`. Pass these at deploy time i
 ## Build and deploy
 
 ```bash
-mvn -B package -DskipTests      # target/office-concierge-agent-1.7.8-mule-application.jar
+mvn -B package -DskipTests      # target/office-concierge-agent-app-1.7.8-mule-application.jar
 
-yc deploy file <org> Sandbox <business-group-id> office-concierge-agent 1.7.8 \
-  target/office-concierge-agent-1.7.8-mule-application.jar target=ch2:<cluster> \
+yc deploy file <org> Sandbox <business-group-id> office-concierge-agent-app 1.7.8 \
+  target/office-concierge-agent-app-1.7.8-mule-application.jar target=ch2:<cluster> name=office-concierge-agent \
   +agent.url=https://<app-host> +llm.proxy.host=<llm-host> +secure:llm.apiKey=<key>
 ```
 

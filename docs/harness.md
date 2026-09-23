@@ -37,6 +37,11 @@ deploy:
 The Exchange coordinates come from `pom.xml` (`artifactId`, `version`); the groupId is the
 Business Group being deployed into, not the pom's placeholder `com.mycompany`.
 
+The pom `artifactId` must not equal any asset id a network publishes (the `registry` names in
+`agent-network.yaml`). Both land in the same Business Group, and Exchange refuses a second
+asset with the same id (`CreateExchangeAsset Unexpected error`, 500). Mule apps therefore end
+in `-app` (`it-provisioning-agent-app`), while the deployment name stays the harness `name`.
+
 ## runtime: agent-network
 
 ```yaml
