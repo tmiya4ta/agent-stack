@@ -90,7 +90,11 @@ Mule の場合は `deploy.mule: {target: ch2|rtf, env: Sandbox, properties: conf
    `mcp/employee-db-app` に出した（各 README に yc deploy file での単体デプロイ手順、harness.yaml 付き）。
    network フォルダからは README の相対リンクで参照する（Windows でも使うのでシンボリックリンクは置かない）。
 5. ~~GitHub に push~~ **済（2026-09-23、git@github-tmiya4ta:tmiya4ta/agent-stack.git の main）**。CI の雛形はまだ。
-6. **yc に `harness list / build / publish / deploy` を足す**（まず runtime: host から）。これは yc リポジトリ側の作業。
+6. yc の harness 対応: **runtime: mule と agent-network は済（2026-09-23、yc セッションが実装）**。
+   `yc harness list` / `yc harness deploy <org> <env> <name> target=ps:rootps gateway=ft1 [profile=] [suffix=]`、TUI は D → unit → target → gateway。
+   約束ごとは docs/harness.md。T1/Sandbox/rootps で onboarding-employees を通しで確認済み（broker は
+   https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/onboarding-broker/）。枠を空けるため inventory 系 7 アプリを STOPPED にしてある。
+   残り: runtime: host（clay の 3 サーバ、手順 2・3 の後）、api/ の最初の単位。
 
 ## 参考
 
