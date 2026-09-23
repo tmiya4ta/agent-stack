@@ -77,9 +77,10 @@ timestamp                 context_id  user_id (= sha256(sub))   state
   実行環境のソースが非公開なので**推測**。記録の形と振る舞いは上のとおり。
 - 以前の実測（別のデモ）では、`user-context-propagation` を外している間に作られた会話は、
   あとで戻しても誰でも続きを送れた。`__default__` で保存されるためと考えられる。
-- **`agent-network project deploy`（yc の network デプロイも同様）を再実行すると、手で足した
-  ingress ポリシーは消える。** 再デプロイのたびに `jwt-validation` と `userIdExpression` を
-  貼り直す必要がある。
+- **手で足した ingress ポリシーは、network を再デプロイすると消える。** 代わりに
+  agent-network.yaml の `brokers.<id>.interfaces.a2a.policies.inbound` に書けば毎回付く
+  （`networks/aml-investigation/agent-network.yaml` がその形。公式プラグイン 1.3.0 と、
+  2026-09-23 以降の yc の両方で確認）。
 - broker から下流（MCP / A2A）への contextId は下流が採番し、利用者とは結び付かない
   （`tool-context-store` に別に保存される。次の節）。
 

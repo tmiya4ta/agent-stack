@@ -88,6 +88,15 @@ Design notes, expanded in the header of `brokers/aml_broker.agent`:
 - **Examples in a prompt become facts.** An example of "usual activity" in the orchestrator's
   instructions showed up in a memo for a customer who has no such history.
 
+## Who may continue a conversation
+
+The broker's ingress is declared in `agent-network.yaml` (`interfaces.a2a.policies.inbound`):
+`jwt-validation` (HS256, secret variable `jwt.hs256Secret`, filled from the yc profile's
+`jwt-hs256-secret`) and `user-context-propagation` with `#[authentication.properties.claims.sub]`.
+A call without a JWT gets `400 JWT Token is required.`; continuing someone else's `contextId`
+gets `The operation is not permitted.`. See
+[docs/broker-context-ownership.md](../../docs/broker-context-ownership.md).
+
 ## Deploying
 
 ```bash
