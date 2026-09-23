@@ -126,14 +126,8 @@ Use this to check a customer and the counterparties of their notable transaction
   "properties": {
     "parties": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": { "type": "string", "description": "Person or company name" },
-          "birthDate": { "type": "string", "description": "YYYY-MM-DD, for a person, if known" }
-        },
-        "required": ["name"]
-      }
+      "items": { "type": "string" },
+      "description": "Names to check. Write a person as \"name (YYYY-MM-DD)\" when the birth date is known, e.g. \"黒田 隆 (1974-11-02)\"; a company as its name."
     }
   },
   "required": ["parties"]
@@ -159,11 +153,11 @@ var news = payload
 ---
 {
   parties: (vars.req.parties default []) map ((p) -> do {
-    var k = key(p.name)
-    var bd = p.birthDate default ''
+    var k = key(p)
+    var bd = (p match /.*?(\d{4}-\d{2}-\d{2}).*/) [1] default ''
     ---
     {
-      name: p.name,
+      name: p,
       watchlistHits: (vars.watchlist filter (k != '' and ($.name_key == k or (k contains $.name_key) or ($.name_key contains k)))) map {
         list: $.list_name, entityType: $.entity_type, listedName: $.name, country: $.country,
         reason: $.reason, listedOn: $.listed_on,
