@@ -1,0 +1,12 @@
+name: address-change-agent
+kind: a2a
+runtime: mule
+version: 1.0.0
+build: mvn -B clean package -DskipTests
+artifact: target/*-mule-application.jar
+endpoint: /
+deploy:
+  mule:
+    target: ch2
+    properties:
+      agent.url: ${self.url}

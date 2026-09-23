@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:a2a="http://www.mulesoft.org/schema/mule/a2a" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/a2a http://www.mulesoft.org/schema/mule/a2a/current/mule-a2a.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+	<!-- Change-of-address intake for a (fictitious) bank, done by one A2A agent with no LLM.
+	     It asks for what is missing (task state input-required) until it has the account
+	     number, the new address and the moving date, then issues a receipt (completed).
+	     "キャンセル" cancels the task. Built to watch how the A2A connector 1.1.1 assigns and
+	     stores contextId / taskId: /debug/ids and /debug/store show them. -->
+	<global-property name="http.port" value="8081" />
+	<global-property name="agent.url" value="http://localhost:8081" />
+
+	<http:listener-config name="HTTP_Listener_config">
+		<http:listener-connection host="0.0.0.0" port="${http.port}" />
+	</http:listener-config>
+
+	<!-- Where the connector keeps its tasks and contexts. In memory, so /debug/store can read it. -->
+	<os:object-store name="A2A_Task_Repository" persistent="false" maxEntries="500" entryTtl="6" entryTtlUnit="HOURS" />
+	<!-- The fields collected so far, per taskId. -->
+	<os:object-store name="Intake_State" persistent="false" maxEntries="500" entryTtl="6" entryTtlUnit="HOURS" />
+	<!-- What each call carried in and out. -->
+	<os:object-store name="Call_Log" persistent="false" maxEntries="100" entryTtl="6" entryTtlUnit="HOURS" />
+
+	<a2a:server-config name="A2A_Server">
+		<a2a:connection listenerConfig="HTTP_Listener_config" agentPath="/" />
+		<a2a:agent-card>
+			<a2a:json><![CDATA[{
+  "protocolVersion": "0.3.0",
+  "name": "Address Change Intake Agent",
+  "description": "Takes a customer's change of address for a bank account. Asks for the account number, the new address and the moving date until all three are given, then issues a receipt number. Say キャンセル to cancel.",
+  "url": "${agent.url}",
+  "version": "1.0.0",
+  "preferredTransport": "JSONRPC",
+  "capabilities": { "streaming": false, "pushNotifications": false, "stateTransitionHistory": true },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain", "application/json"],
+  "skills": [
+    {
+      "id": "address-change",
+      "name": "住所変更の受付",
+      "description": "口座番号・新しい住所・転居日をそろえて住所変更を受け付け、受付番号を返す。足りない項目は聞き返す。",
+      "tags": ["banking", "address-change", "intake"],
+      "examples": [
+        "住所変更をお願いします",
+        "口座 1002-0002、新住所は 東京都板橋区大山町1-2-3、10月1日に引っ越します"
+      ]
+    }
+  ]
+}]]></a2a:json>
+		</a2a:agent-card>
+		<!-- Keep tasks (and their message history) in our own store instead of the default
+		     persistent _a2a-taskRepository-<config> store (1-day TTL). -->
+		<a2a:history taskHistoryEnabled="true" defaultMaxHistoryLength="20" taskRepositoryObjectStore="A2A_Task_Repository" />
+	</a2a:server-config>
+
+	<flow name="address-change-task">
+		<a2a:task-listener config-ref="A2A_Server">
+			<a2a:response>
+				<a2a:response>#[vars.taskJson]</a2a:response>
+			</a2a:response>
+		</a2a:task-listener>
+		<ee:transform doc:name="What came in">
+			<ee:variables>
+				<ee:set-variable variableName="req"><![CDATA[%dw 2.0
+output application/java
+var p = if (payload is String) read(payload, "application/json") else payload
+var parts = p.message.parts default []
+var texts = (parts filter ((x) -> (x.kind default x."type" default "") == "text")) map ((x) -> x.text default "")
+---
+{
+  jsonRpcMethod: attributes.jsonRpcMethod,
+  attrTaskId: attributes.taskId,
+  attrContextId: attributes.contextId,
+  msgTaskId: p.message.taskId,
+  msgContextId: p.message.contextId,
+  referenceTaskIds: p.message.referenceTaskIds,
+  messageId: p.message.messageId,
+  text: texts joinBy "\n"
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<!-- The connector has already decided these: the client's ids when sent, otherwise new ones. -->
+		<set-variable variableName="taskId" value="#[vars.req.attrTaskId default uuid()]" />
+		<set-variable variableName="contextId" value="#[vars.req.attrContextId default vars.req.msgContextId default uuid()]" />
+		<os:retrieve doc:name="Fields so far" objectStore="Intake_State" key="#[vars.taskId]" target="collected">
+			<os:default-value><![CDATA[#[output application/json --- {}]]]></os:default-value>
+		</os:retrieve>
+		<ee:transform doc:name="Take what this message gives">
+			<ee:variables>
+				<ee:set-variable variableName="intake"><![CDATA[%dw 2.0
+output application/java
+var prev = if (vars.collected is String) read(vars.collected, "application/json") else (vars.collected default {})
+var t = vars.req.text default ""
+var acct = (t match /.*?(\d{4})-?(\d{4}).*/)
+var addr = (t match /.*?((東京都|北海道|京都府|大阪府|\S{2,3}県)[^\s、。,，]+).*/)
+var ymd = (t match /.*?(\d{4})[-\/年](\d{1,2})[-\/月](\d{1,2}).*/)
+var md = (t match /.*?(\d{1,2})月(\d{1,2})日.*/)
+fun pad(s) = if (sizeOf(s as String) == 1) "0" ++ s else s
+var date =
+  if (!isEmpty(ymd)) ymd[1] ++ "-" ++ pad(ymd[2]) ++ "-" ++ pad(ymd[3])
+  else if (!isEmpty(md)) "2026-" ++ pad(md[1]) ++ "-" ++ pad(md[2])
+  else null
+var merged = prev ++ {
+  (accountNumber: acct[1] ++ "-" ++ acct[2]) if (!isEmpty(acct)),
+  (newAddress: addr[1]) if (!isEmpty(addr)),
+  (movingDate: date) if (date != null)
+}
+var fields = { accountNumber: merged.accountNumber, newAddress: merged.newAddress, movingDate: merged.movingDate }
+---
+{
+  fields: fields,
+  missing: [
+    ("口座番号（例: 1002-0002）") if (fields.accountNumber == null),
+    ("新しい住所（都道府県から）") if (fields.newAddress == null),
+    ("転居日（例: 10月1日）") if (fields.movingDate == null)
+  ],
+  cancel: (t contains "キャンセル") or (t contains "取り消")
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<choice doc:name="Next state">
+			<when expression="#[vars.intake.cancel]">
+				<set-variable variableName="state" value="canceled" />
+				<set-variable variableName="reply" value="住所変更の受付を取り消しました。" />
+				<os:remove objectStore="Intake_State" key="#[vars.taskId]" />
+			</when>
+			<when expression="#[!isEmpty(vars.intake.missing)]">
+				<set-variable variableName="state" value="input-required" />
+				<set-variable variableName="reply" value="#[%dw 2.0
+output text/plain
+var got = vars.intake.fields filterObject ((v) -> v != null)
+---
+(if (isEmpty(got)) '住所変更を承ります。' else ('受け付けた内容: ' ++ ((got pluck ((v, k) -> (k as String) ++ '=' ++ v)) joinBy ', ') ++ '。'))
+  ++ ' 次を教えてください: ' ++ (vars.intake.missing joinBy '、')]" />
+				<os:store objectStore="Intake_State" key="#[vars.taskId]">
+					<os:value><![CDATA[#[output application/json --- vars.intake.fields filterObject ((v) -> v != null)]]]></os:value>
+				</os:store>
+			</when>
+			<otherwise>
+				<set-variable variableName="state" value="completed" />
+				<set-variable variableName="receipt" value="#['ADR-' ++ (now() as String {format: 'yyyyMMdd'}) ++ '-' ++ upper(vars.taskId[0 to 5])]" />
+				<set-variable variableName="reply" value="#['住所変更を受け付けました。受付番号 ' ++ vars.receipt ++ '（口座 ' ++ vars.intake.fields.accountNumber ++ '、新住所 ' ++ vars.intake.fields.newAddress ++ '、転居日 ' ++ vars.intake.fields.movingDate ++ '）。']" />
+				<os:remove objectStore="Intake_State" key="#[vars.taskId]" />
+			</otherwise>
+		</choice>
+		<ee:transform doc:name="A2A task">
+			<ee:variables>
+				<ee:set-variable variableName="taskJson"><![CDATA[%dw 2.0
+output application/json
+var ts = now() as String {format: "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"}
+---
+{
+  kind: "task",
+  id: vars.taskId,
+  contextId: vars.contextId,
+  status: {
+    state: vars.state,
+    timestamp: ts,
+    message: {
+      kind: "message",
+      role: "agent",
+      messageId: uuid(),
+      taskId: vars.taskId,
+      contextId: vars.contextId,
+      parts: [ { kind: "text", text: vars.reply } ]
+    }
+  },
+  artifacts: if (vars.state == "completed") [
+    {
+      artifactId: uuid(),
+      name: "address-change-receipt",
+      parts: [
+        { kind: "data", data: { receiptNumber: vars.receipt } ++ vars.intake.fields }
+      ]
+    }
+  ] else [],
+  metadata: {}
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<os:store doc:name="Log the call" objectStore="Call_Log" key="#[(now() as Number {unit: 'milliseconds'}) as String ++ '-' ++ uuid()[0 to 7]]">
+			<os:value><![CDATA[#[output application/json --- { in: vars.req, out: { taskId: vars.taskId, contextId: vars.contextId, state: vars.state } }]]]></os:value>
+		</os:store>
+	</flow>
+
+	<!-- tasks/get, tasks/cancel and the other methods without a listener of their own are refused
+	     ("Authorization listener required", -32005) unless this flow exists. Finishing without an
+	     error authorizes the call; this demo lets every call through and only records it. -->
+	<flow name="authorize-other-methods">
+		<a2a:authorization-listener config-ref="A2A_Server" />
+		<os:store doc:name="Log the call" objectStore="Call_Log" key="#[(now() as Number {unit: 'milliseconds'}) as String ++ '-' ++ uuid()[0 to 7]]">
+			<os:value><![CDATA[#[output application/json --- { in: { jsonRpcMethod: attributes.jsonRpcMethod, attrTaskId: attributes.taskId, attrContextId: attributes.contextId }, out: { authorized: true } }]]]></os:value>
+		</os:store>
+	</flow>
+
+	<flow name="debug-ids">
+		<http:listener config-ref="HTTP_Listener_config" path="/debug/ids" allowedMethods="GET" />
+		<os:retrieve-all objectStore="Call_Log" />
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+(payload pluck ((v, k) -> { key: k as String, call: read(v as String, "application/json") })) orderBy $.key map $.call]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+
+	<!-- The connector's own task repository, as stored. -->
+	<flow name="debug-store">
+		<http:listener config-ref="HTTP_Listener_config" path="/debug/store" allowedMethods="GET" />
+		<os:retrieve-all objectStore="A2A_Task_Repository" />
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+import try, orElse from dw::Runtime
+fun show(v) = v match {
+  case s is String -> (try(() -> read(s, "application/json")) orElse s)
+  else -> (try(() -> write(v, "application/json") then read($, "application/json")) orElse (v as String default "?"))
+}
+---
+(payload pluck ((v, k) -> { key: k as String, value: show(v) })) orderBy $.key]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+</mule>
