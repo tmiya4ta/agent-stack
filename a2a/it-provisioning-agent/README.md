@@ -11,6 +11,7 @@ ordinary Mule app and is built and deployed on its own.
 | Path | What |
 |---|---|
 | `/` | A2A JSON-RPC endpoint (`agentPath="/"`) |
+| `/.well-known/agent-card.json` | Agent card; its `url` is `${agent.url}` |
 | `/doc` | Reference page |
 
 ## Properties
