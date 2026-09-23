@@ -115,6 +115,7 @@ subagent classify:
     instructions: ->
       | 担当者のメッセージ: {!@request.payload.message.parts[0].text}
       | contextId: {!@request.payload.message.contextId}
+      | get_case を呼んだら、route_key / alertId / decision / decisionLabel / note の構造化出力だけを返すこと。説明文や手順の要約を書いてはいけない。
     actions:
       get_case: @actions.get_case
     outputs:
@@ -188,11 +189,12 @@ orchestrator investigate:
          - 同姓同名の報道やリストの部分一致など、本人かどうか・資金の出どころの確認が必要 → "hold"
          推奨は下書きであり、最終判断は担当者が行う。
       出力:
-      - facts: 顧客の属性、アラートの内容、注目すべき取引を箇条書きで。注目すべき取引は 1 件ずつ
-        「YYYY-MM-DD / 種類 / 金額 / 相手先または経路（ATM の場所・支店）」の形で、get_alert の transactions から
-        そのまま書き写す（まとめない・省略しない）。比較のため、アラート前の平常時の取引も 2〜3 件入れる。
+      - facts: 顧客の属性とアラートの内容を 3〜5 行で。
+      - notableTransactions: アラートに関係する取引を 1 行 1 件、最大 10 件。
+        形式は「YYYY-MM-DD / 種類 / 金額 / 相手先または経路」。get_alert の transactions の値をそのまま使う。
+        最後に 1 行だけ、平常時の取引の様子（例: 月 4 回ほどのカード売上入金 15 万円前後）を書く。
       - screening: リスト照合と報道の結果。部分一致なら生年月日などが一致するかを必ず書く。
-      - similarCases: case_history の回答をそのまま入れる。
+      - similarCases: case_history の回答から、1 事例 1 行（事例番号 / 判断 / 今回との共通点を 1 文）で最大 3 行。
       - gaps: ツールが失敗した・応答しなかったものを列挙する（無ければ "なし"）。失敗しても調査は続ける。
       - reasoning: 推奨の根拠を 2〜4 文で。
       ★★ 最重要: あなたは人間に話しかけてはいけません。質問文・確認文・実況を出力すると処理が中断されます。
@@ -225,7 +227,10 @@ orchestrator investigate:
             - "hold"
         facts:
           type: "string"
-          description: "Customer profile, alert and notable transactions"
+          description: "Customer profile and the alert, 3 to 5 lines"
+        notableTransactions:
+          type: "string"
+          description: "Up to 10 related transactions, one per line, plus one line on the usual activity"
         screening:
           type: "string"
           description: "Watch-list and news results"
@@ -279,6 +284,7 @@ generator draftMemo:
     | アラート ID: {!@orchestrator.investigate.output.alertId}
     | 顧客名: {!@orchestrator.investigate.output.customerName}
     | 事実: {!@orchestrator.investigate.output.facts}
+    | 注目すべき取引: {!@orchestrator.investigate.output.notableTransactions}
     | リスト照合・報道: {!@orchestrator.investigate.output.screening}
     | 類似する過去事例: {!@orchestrator.investigate.output.similarCases}
     | 確認できなかった材料: {!@orchestrator.investigate.output.gaps}

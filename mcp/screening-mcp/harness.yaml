@@ -2,7 +2,7 @@ name: screening-mcp
 kind: mcp
 runtime: mule
 version: 1.0.2
-build: mvn -B package -DskipTests
+build: mvn -B clean package -DskipTests
 artifact: target/*-mule-application.jar
 endpoint: ""
 deploy:

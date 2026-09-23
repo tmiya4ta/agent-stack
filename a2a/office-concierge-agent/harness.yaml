@@ -2,7 +2,7 @@ name: office-concierge-agent
 kind: a2a
 runtime: mule
 version: 1.7.8
-build: mvn -B package -DskipTests
+build: mvn -B clean package -DskipTests
 artifact: target/*-mule-application.jar
 endpoint: /
 deploy:
