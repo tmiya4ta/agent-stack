@@ -40,11 +40,12 @@ turn 2  analyst: "届出検討。基準額を避けた分割入金で、送金�
 trigger
  └→ subagent classify         get-case(contextId): new / awaiting_decision / decided
      └→ router mainRouter
-          ├ investigate     → orchestrator investigate  get-alert, list-transactions, screen-name,
-          │                      │                      search-news, case history (A2A), save-case
+          ├ investigate     → orchestrator investigate  get-alert (profile + transactions),
+          │                      │                      check-parties (watch lists + news), case history (A2A)
           │                      └→ router foundRouter
           │                           ├ not found → echo alertNotFound (FAILED)
-          │                           └ found     → generator draftMemo → echo memoArtifact → echo memoStatus
+          │                           └ found     → executor saveCase (save-case, no LLM)
+          │                                          → generator draftMemo → echo memoArtifact → echo memoStatus
           ├ ask_alert       → echo askAlert
           ├ decide          → executor recordDecision (record-decision) → echo decisionRecorded
           ├ ask_decision    → echo askDecision
