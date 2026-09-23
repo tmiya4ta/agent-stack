@@ -84,6 +84,21 @@ timestamp                 context_id  user_id (= sha256(sub))   state
 - broker から下流（MCP / A2A）への contextId は下流が採番し、利用者とは結び付かない
   （`tool-context-store` に別に保存される。次の節）。
 
+## taskId でも同じ照合がかかる（2026-09-24 実測）
+
+`task-store` のキーは taskId だが、**taskId を知っているだけでは他人のタスクを読めない**。
+hanako が作ったタスク（taskId `0c2a3f63…`）を taro の JWT で `GetTask`（A2A 1.0、`{"id": "<taskId>"}`。
+`taskId` という名前のパラメータは無く `-32602 Invalid params` になる）した:
+
+| 呼び出し | 結果 |
+|---|---|
+| taro が hanako の taskId を `GetTask` | `-32603 "The operation is not permitted."`（データ不返却） |
+| hanako が自分の taskId を `GetTask` | 成功。`status` と `history` が返る |
+
+Object Store のキーが taskId であることと、taskId を知っている人が読めることは別で、
+broker は `GetTask` でも「タスクの `user_id` と呼び出し元の `user_id` が一致するか」を照合している。
+contextId 経由の会話乗っ取り防止と同じ仕組みが、taskId 経由の読み取りにも一貫してかかっている。
+
 ## broker → 下流 A2A エージェントの contextId / taskId
 
 同じ日に、下流の `case-history-agent` に受信した ID を記録させ（`GET /debug/a2a-log`）、
