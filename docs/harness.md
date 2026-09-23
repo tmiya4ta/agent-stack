@@ -11,8 +11,8 @@ units use to refer to it and the default deployment name.
 
 ```yaml
 name: it-provisioning-agent     # unique in the repository
-kind: a2a                       # llm | embedding | vector | mcp | a2a | api | network
-runtime: mule                   # mule | host | agent-network
+kind: a2a                       # llm | embedding | vector | mcp | a2a | api | network | set
+runtime: mule                   # mule | host | agent-network | set
 version: 1.7.8                  # informational; for mule the pom <version> wins
 ```
 
@@ -58,6 +58,55 @@ The project itself (`exchange.json`, `agent-network.yaml`, `brokers/`) sits next
 Tokens not listed under `members` (`{{llm-base-url}}`, `{{llm-api-key}}`, …) come from a yc
 variables profile. `{{business-group-id}}` is the Business Group deployed into, and
 `{{-suffix}}` / `{{_suffix}}` are the deployment suffix (empty for a plain deployment).
+
+## runtime: set
+
+A set is a named selection of units provisioned together — for example everything a finance
+demo needs. It lives under `sets/<name>/harness.yaml` and holds no code of its own.
+
+```yaml
+name: onboarding-demo
+kind: set
+runtime: set
+units:                        # harness names; a network brings its members along
+  - onboarding-employees
+defaults:                     # used when the deploy command does not say otherwise
+  target: ps:rootps
+  gateway: ft1
+  profile: onboarding-employees   # yc variables profile
+  suffix: ""
+use-existing:                 # do not deploy these; find them and use their URLs
+  - from: tm:T1/Sandbox       # <yc login profile>:<business group>/<environment>
+    units: [employee-db-app]  # omit to use whatever matching unit is found there
+```
+
+The Business Group and environment a set is deployed **into** are not part of the set; they
+are given on the command line (`yc harness deploy <org> <env> <set>`), so one set can be
+provisioned into several environments.
+
+Deploying a set:
+
+1. Expand `units`: every network adds its `members`. A unit reached twice is deployed once.
+2. For each `use-existing` entry, log in with its profile and list that environment's
+   applications (not agent networks). A unit matches an application whose name is the unit
+   name (plus the suffix, if one is given) **or** whose Exchange reference is the unit's pom
+   `artifactId`. The match must be running and have a public URL — another Business Group or
+   private space cannot be reached over an internal URL.
+3. Deploy the remaining non-network units and read their public URLs (known as soon as the
+   deployment exists).
+4. Fill every network's member tokens with the found or deployed URL plus the member's
+   `endpoint`, then build, publish and deploy the networks.
+
+Nothing found by a scan is written back into the repository. URLs are looked up again on
+every deploy, so a re-run picks up an application that moved. A `use-existing` unit that is
+not found, not running or has no public URL stops the deploy with a list of what is missing;
+it is never deployed silently in its place.
+
+The command line can add or replace `use-existing`:
+`yc harness deploy T1 Sandbox onboarding-demo use-existing=tm:T1/Sandbox`.
+
+Tearing down a set (`yc harness down <org> <env> <set>`) removes what the set deployed into
+that environment — its networks and its own apps — and never touches a `use-existing` unit.
 
 ## runtime: host
 

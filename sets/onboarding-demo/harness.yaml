@@ -1,0 +1,9 @@
+name: onboarding-demo
+kind: set
+runtime: set
+units:
+  - onboarding-employees
+defaults:
+  target: ps:rootps
+  gateway: ft1
+  profile: onboarding-employees
