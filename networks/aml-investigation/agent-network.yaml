@@ -46,6 +46,13 @@ registry:
           kind: streamableHttp
           path: /mcp
         tools:
+          - name: list-alerts
+            description: Lists the alerts with their status and customer name.
+            inputSchema:
+              type: object
+              properties:
+                status:
+                  type: string
           - name: get-alert
             description: Returns an alert with its account, the customer profile and the account's transactions.
             inputSchema:

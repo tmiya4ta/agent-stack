@@ -20,6 +20,8 @@ reply and the record.
 ## The conversation
 
 ```
+any     analyst: "アラート一覧を見せて"  (or any message without an alert ID)
+        broker:  📋 table of alerts with status and customer, then "send the ID to investigate"
 turn 1  analyst: "アラート ALT-0915 を調べてください"
         broker:  🔎 調査メモ（下書き）— alert, customer profile, notable transactions (table),
                  screening and news, similar past cases, sources that could not be reached,
@@ -46,7 +48,7 @@ trigger
           │                           ├ not found → echo alertNotFound (FAILED)
           │                           └ found     → executor saveCase (save-case, no LLM)
           │                                          → generator draftMemo → echo memoArtifact → echo memoStatus
-          ├ ask_alert       → echo askAlert
+          ├ list_alerts     → subagent listAlerts (list-alerts) → echo alertList   (no alert ID: list, never ask)
           ├ decide          → executor recordDecision (record-decision) → echo decisionRecorded
           ├ ask_decision    → echo askDecision
           └ already_decided → echo alreadyDecided

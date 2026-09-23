@@ -14,7 +14,8 @@
 #             |                          + not found -> echo alertNotFound (FAILED)
 #             |                          + found     -> executor saveCase (awaiting_decision, no LLM)
 #             |                                           -> generator draftMemo -> echo memoArtifact -> echo memoStatus
-#             + ask_alert      -> echo askAlert
+#             + list_alerts    -> subagent listAlerts (list-alerts) -> echo alertList
+#                                 (no alert ID in the message: show the list instead of asking)
 #
 #   turn 2  "届出検討で。分割入金が明白"
 #   trigger
@@ -66,6 +67,11 @@ actions:
     kind: "mcp:tool"
     tool_name: "record-decision"
 
+  list_alerts:
+    target: "mcp://core_banking_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "list-alerts"
+
   get_alert:
     target: "mcp://core_banking_connection{{_suffix}}"
     kind: "mcp:tool"
@@ -99,7 +105,10 @@ subagent classify:
       2. step が "new"（状態が無い）の場合:
          メッセージからアラート ID を取り出す。「ALT-」に続く 4 桁、または単独の 4 桁の数字がアラート ID。
          alertId は必ず "ALT-0915" の形に正規化する。
-         見つかれば route_key = "investigate"、見つからなければ route_key = "ask_alert"。
+         見つかれば route_key = "investigate"。
+         アラート ID が無い場合（「一覧」「どんなアラートがある？」など、または ID の書き忘れ）は route_key = "list_alerts"。
+         未対応だけを見たいと書かれていれば statusFilter = "未対応"（クローズ・届出検討・保留も同様）、それ以外は空文字。
+         ★ ID が無くても、あなたは質問しない。route_key = "list_alerts" を返すだけで、一覧の提示は後段が行う。
       3. step が "awaiting_decision" の場合: メッセージを担当者の判断として分類する。
          - クローズ・問題なし・対応不要・閉じる → decision = "close", decisionLabel = "クローズ"
          - 届出・届け出・疑わしい・エスカレーション → decision = "file_str", decisionLabel = "届出検討"
@@ -115,7 +124,8 @@ subagent classify:
     instructions: ->
       | 担当者のメッセージ: {!@request.payload.message.parts[0].text}
       | contextId: {!@request.payload.message.contextId}
-      | get_case を呼んだら、route_key / alertId / decision / decisionLabel / note の構造化出力だけを返すこと。説明文や手順の要約を書いてはいけない。
+      | get_case を呼んだら、route_key / alertId / statusFilter / decision / decisionLabel / note の構造化出力だけを返すこと。
+      | 説明文・手順の要約・「〜を求める必要があります」のような判断の説明を書いてはいけない。
     actions:
       get_case: @actions.get_case
     outputs:
@@ -125,13 +135,16 @@ subagent classify:
           description: "Next route"
           enum:
             - "investigate"
-            - "ask_alert"
+            - "list_alerts"
             - "decide"
             - "ask_decision"
             - "already_decided"
         alertId:
           type: "string"
           description: "Normalized alert ID such as ALT-0915, or empty"
+        statusFilter:
+          type: "string"
+          description: "Status to list (未対応 / クローズ / 届出検討 / 保留), or empty for all"
         decision:
           type: "string"
           description: "close, file_str or hold when route_key is decide; otherwise empty"
@@ -153,9 +166,9 @@ router mainRouter:
     - target: @orchestrator.investigate
       when: @subagent.classify.output.route_key == "investigate"
       label: "Investigate"
-    - target: @echo.askAlert
-      when: @subagent.classify.output.route_key == "ask_alert"
-      label: "Ask for the alert ID"
+    - target: @subagent.listAlerts
+      when: @subagent.classify.output.route_key == "list_alerts"
+      label: "List the alerts"
     - target: @executor.recordDecision
       when: @subagent.classify.output.route_key == "decide"
       label: "Record the decision"
@@ -356,13 +369,38 @@ echo decisionRecorded:
     ]
   })
 
-echo askAlert:
+subagent listAlerts:
+  label: "List Alerts"
+  description: "Lists the alerts so the analyst can pick one."
+  system:
+    instructions: |
+      list_alerts を 1 回呼び、結果を Markdown の表にして table に入れる。
+      表の列は「アラート ID | 発生日 | 顧客 | ルール | 内容 | ステータス」。値はツールの結果をそのまま使い、並び順も変えない。
+      アラートが 0 件なら table に「該当するアラートはありません。」とだけ入れる。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。table の構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | status: {!@subagent.classify.output.statusFilter}
+    actions:
+      list_alerts: @actions.list_alerts
+    outputs:
+      properties:
+        table:
+          type: "string"
+          description: "The alerts as a Markdown table"
+    max_number_of_loops: 3
+    max_consecutive_errors: 2
+    task_timeout_secs: 40
+  on_exit: ->
+    transition to @echo.alertList
+
+echo alertList:
   kind: "a2a:status_update_event"
   state: "TASK_STATE_COMPLETED"
   message: a2a.message({
     messageId: uuid(),
     parts: [
-      a2a.textPart("調査するアラート ID を教えてください（例: ALT-0915）。")
+      a2a.textPart("### 📋 アラート一覧\n\n" + @subagent.listAlerts.output.table + "\n\n調べたいアラートの ID を送ってください（例: アラート ALT-0915 を調べて）。")
     ]
   })
 

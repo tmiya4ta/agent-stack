@@ -10,7 +10,8 @@ restart or redeploy resets the demo.
 
 | Tool | Input | Returns |
 |---|---|---|
-| `get-alert` | `alertId` (`ALT-0915` or `0915`) | the alert, its account and the customer profile, or `{"found": false}` |
+| `list-alerts` | optional `status` (未対応 / クローズ / 届出検討 / 保留) | the alerts, newest first, with status and customer name |
+| `get-alert` | `alertId` (`ALT-0915` or `0915`) | the alert, its account, the customer profile and the account's transactions, or `{"found": false}` |
 | `list-transactions` | `accountId` | the account's transactions, oldest first |
 | `get-case` | `contextId` | the investigation state of a conversation (`step`: `new` / `awaiting_decision` / `decided`) |
 | `save-case` | `contextId`, `alertId`, `step`, `recommendation` | saves the state after the memo is drafted |

@@ -253,4 +253,43 @@ else { recorded: false, reason: "no investigation is open for this contextId" }]
 			</ee:message>
 		</ee:transform>
 	</flow>
+
+	<flow name="list-alerts">
+		<mcp:tool-listener doc:name="list-alerts" config-ref="MCP_Server" name="list-alerts">
+			<mcp:description><![CDATA[Lists the transaction-monitoring alerts, newest first: alert ID, date raised, rule, a one-line
+detail, status (未対応 / クローズ / 届出検討 / 保留) and the customer's name. status filters by
+status; leave it empty for all alerts.]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "status": { "type": "string", "description": "Optional status filter, e.g. 未対応. Empty for all." }
+  }
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<db:select config-ref="Core_Banking_DB">
+			<db:sql><![CDATA[SELECT a.alert_id, a.raised_on, a.rule, a.detail, a.status, c.name
+FROM alert a JOIN account ac ON ac.account_id = a.account_id
+JOIN customer c ON c.customer_id = ac.customer_id
+WHERE (:status = '' OR a.status = :status)
+ORDER BY a.raised_on DESC, a.alert_id DESC]]></db:sql>
+			<db:input-parameters><![CDATA[#[{ status: trim(payload.status default '') }]]]></db:input-parameters>
+		</db:select>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+---
+{
+  count: sizeOf(payload),
+  alerts: payload map {
+    alertId: $.alert_id, raisedOn: $.raised_on, rule: $.rule, detail: $.detail,
+    status: $.status, customerName: $.name
+  }
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
 </mule>
