@@ -81,4 +81,29 @@ timestamp                 context_id  user_id (= sha256(sub))   state
   ingress ポリシーは消える。** 再デプロイのたびに `jwt-validation` と `userIdExpression` を
   貼り直す必要がある。
 - broker から下流（MCP / A2A）への contextId は下流が採番し、利用者とは結び付かない
-  （`tool-context-store` に別に保存される）。
+  （`tool-context-store` に別に保存される。次の節）。
+
+## broker → 下流 A2A エージェントの contextId / taskId
+
+同じ日に、下流の `case-history-agent` に受信した ID を記録させ（`GET /debug/a2a-log`）、
+1 つの broker 会話（contextId `cb8beda1…`）の中で 3 回呼ばせて確かめた。
+下流はタスク形式（`kind: "task"`、毎回新しい taskId）で返す。
+
+| 回 | broker → 下流 | 下流 → broker |
+|---|---|---|
+| 1（調査） | `contextId` なし、`referenceTaskIds` なし（message のキーは kind / messageId / parts / role だけ） | contextId `3f74ceca…`（下流が採番）、taskId `c6d6c03b…` |
+| 2（追加質問） | contextId `3f74ceca…`、`referenceTaskIds: ["c6d6c03b…"]`（1 回目の taskId） | 同じ contextId、taskId `c59fe266…` |
+| 3（追加質問） | contextId `3f74ceca…`、`referenceTaskIds: ["c59fe266…"]`（2 回目の taskId） | 同じ contextId、taskId `6a493503…` |
+
+- broker は下流への **contextId を自分で採番しない。初回は送らず**、下流が返した値を以後送り続ける。
+- `taskId` は送らない。代わりに **`referenceTaskIds` に直前の taskId を 1 つだけ**入れる。
+- 対応表は `<broker>-tool-context-store` のキー `<broker 側 contextId>:<接続名>-client` に 1 件だけあり、
+  値は `{"context_id": <下流の contextId>, "task_id": <直前の下流 taskId>, "task_state": ...}`。
+  3 回目の後は `task_id = 6a493503…`（最新）に上書きされていた。
+- 記録は A2A の接続だけ。MCP の接続には無い。
+- 下流が contextId を返さない（または毎回違う値を返す）と、鎖はつながらない。下流が
+  **メッセージ形式で返すと taskId が無い**ので、`task_id` は空文字で保存され、次の
+  `referenceTaskIds` も付かない（修正前の case-history-agent がそうだった）。
+- 下流 A2A エージェントを書くときは、**受け取った contextId があれば使い、無ければ採番して返す**。
+  以前の agent-stack の A2A アプリは日付ごとの固定値を返していたため、別の利用者・別の会話が
+  下流では同じ会話になっていた（2026-09-23 修正）。

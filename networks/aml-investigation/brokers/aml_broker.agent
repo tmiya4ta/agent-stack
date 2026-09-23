@@ -422,7 +422,9 @@ orchestrator followupCases:
     instructions: |
       case_history を 1 回だけ呼び、担当者の質問をそのまま送る。
       送る文の先頭に「アラート <alertId> の調査の続きです。」と付ける。
-      返ってきた回答をそのまま answer に入れる。回答を要約・追記しない。
+      返ってきた回答の本文（artifacts の text、無ければ status.message の text）だけを answer に入れる。
+      JSON や type / contents などの構造をそのまま入れてはいけない。本文を要約・追記しない。
+      「類似する過去事例は見つかりませんでした」のような回答も、その文だけを入れる。
       ★★ 最重要: あなたは人間に話しかけてはいけません。answer の構造化出力だけを返してください。
   reasoning:
     instructions: ->
