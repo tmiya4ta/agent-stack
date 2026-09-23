@@ -85,9 +85,10 @@ var texts = (parts filter ((x) -> (x.kind default x."type" default "") == "text"
 }]]></ee:set-variable>
 			</ee:variables>
 		</ee:transform>
-		<!-- The connector has already decided these: the client's ids when sent, otherwise new ones. -->
-		<set-variable variableName="taskId" value="#[vars.req.attrTaskId default uuid()]" />
-		<set-variable variableName="contextId" value="#[vars.req.attrContextId default vars.req.msgContextId default uuid()]" />
+		<!-- The connector has already decided these (the client's ids when sent, otherwise new ones)
+		     and rejects a reply whose id / contextId differ from them, so they are used as they are. -->
+		<set-variable variableName="taskId" value="#[vars.req.attrTaskId]" />
+		<set-variable variableName="contextId" value="#[vars.req.attrContextId]" />
 		<os:retrieve doc:name="Fields so far" objectStore="Intake_State" key="#[vars.taskId]" target="collected">
 			<os:default-value><![CDATA[#[output application/json --- {}]]]></os:default-value>
 		</os:retrieve>

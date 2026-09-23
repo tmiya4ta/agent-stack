@@ -10,7 +10,7 @@ Mule 4.11.3 で動かし、`/debug/ids`（受信した ID）と `/debug/store`�
 - **ID はコネクタが決める。** クライアントが `taskId` / `contextId` を送らなければ、フローが呼ばれる前に
   コネクタが新しく採番し、`attributes.taskId` / `attributes.contextId` に入れて渡す
   （メッセージ本体の `message.taskId` / `message.contextId` は空のまま）。
-  フローはこの 2 つをそのまま応答の Task（`id` / `contextId`）に使えばよい。
+  フローはこの 2 つをそのまま応答の Task（`id` / `contextId`）に使う（違う値を返すとエラー。後述）。
 - **同じ `taskId` を送ると同じタスクが続く**（`input-required` → `completed`）。
   **`contextId` だけ送ると、同じ会話の中の新しいタスク**になる。
 - **タスクの状態の検査もコネクタがする。** 次のものは、フローが呼ばれる前に JSON-RPC エラーで返る。
@@ -25,6 +25,23 @@ Mule 4.11.3 で動かし、`/debug/ids`（受信した ID）と `/debug/store`�
 - `tasks/get` と `tasks/cancel` は**コネクタが自分で答える**（task-listener のフローは呼ばれない）。
   ただし `<a2a:authorization-listener>` のフローが必要で、そのフローがエラーなく終われば許可になる。
   `tasks/cancel` の後、そのタスクへの送信は `-32004`。
+
+## フローが違う ID を返したら（2026-09-24、応答の ID をわざと差し替えて確認）
+
+**フローは contextId / taskId を作る必要がないし、作ってはいけない。** 応答の Task の `id` / `contextId` は、
+`attributes.taskId` / `attributes.contextId` と同じでなければならない。
+
+| 試したこと | クライアントへの応答 | 保存先 |
+|---|---|---|
+| 初回の応答で contextId を差し替え | HTTP 500 `-32603 Server error occured!`（ログ: `SendMessageHandler: Request and response task id or context id or both don't match.`） | `task-<コネクタの taskId>` が **`taskState: submitted`、task 本体は空**で残る。contextId はコネクタが採番したもの |
+| 続きの応答で contextId を差し替え | 同じ `-32603` | 前回の状態のまま（上書きされない） |
+| 初回の応答で taskId を差し替え | 同じ `-32603` | 差し替えた ID のタスクは作られない（その ID で続けると `-32001 task not found!`） |
+| 上のあと、コネクタの ID で続きを送る | 通る（`input-required`） | 通常どおり更新 |
+
+- **コネクタはフローを呼ぶ前にタスクを作る**（`taskState: submitted`、`context-<id>` も作る）。フローの応答で
+  ID が一致すれば、その Task で上書きする。
+- 応答の Task に A2A の型に無い項目（`xExtraField` など）を足すと、**クライアントへの応答からも保存先からも消える**
+  （コネクタが A2A の Task 型に読み込んでから扱うため）。
 
 ## 保存のしかた（タスク保存先）
 
