@@ -101,9 +101,9 @@ timestamp                 context_id  user_id (= sha256(sub))   state
   値は `{"context_id": <下流の contextId>, "task_id": <直前の下流 taskId>, "task_state": ...}`。
   3 回目の後は `task_id = 6a493503…`（最新）に上書きされていた。
 - 記録は A2A の接続だけ。MCP の接続には無い。
-- 下流が contextId を返さない（または毎回違う値を返す）と、鎖はつながらない。下流が
-  **メッセージ形式で返すと taskId が無い**ので、`task_id` は空文字で保存され、次の
-  `referenceTaskIds` も付かない（修正前の case-history-agent がそうだった）。
+- 下流が contextId を返さないと鎖は切れる（以前の HITL デモで実測）。下流が
+  **メッセージ形式で返すと taskId が無い**ので、`task_id` は空文字で保存される
+  （修正前の case-history-agent で確認）。その場合に次の `referenceTaskIds` がどうなるかは未確認。
 - 下流 A2A エージェントを書くときは、**受け取った contextId があれば使い、無ければ採番して返す**。
   以前の agent-stack の A2A アプリは日付ごとの固定値を返していたため、別の利用者・別の会話が
   下流では同じ会話になっていた（2026-09-23 修正）。
