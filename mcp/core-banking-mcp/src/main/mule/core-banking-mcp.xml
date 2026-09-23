@@ -36,8 +36,8 @@ http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/
 		<mcp:tool-listener doc:name="get-alert" config-ref="MCP_Server" name="get-alert">
 			<mcp:description><![CDATA[Returns a transaction-monitoring alert together with the account and the customer profile
 (occupation, employer, declared annual income, stated purpose of the account, risk rating,
-customer since). alertId looks like ALT-0915; "0915" is accepted too.
-Returns {"found": false} when there is no such alert.]]></mcp:description>
+customer since) and all the account's transactions, oldest first. alertId looks like ALT-0915;
+"0915" is accepted too. Returns {"found": false} when there is no such alert.]]></mcp:description>
 			<mcp:parameters-schema><![CDATA[{
   "type": "object",
   "properties": {
@@ -63,11 +63,17 @@ JOIN customer c ON c.customer_id = ac.customer_id
 WHERE a.alert_id = :id]]></db:sql>
 			<db:input-parameters><![CDATA[#[{ id: vars.alertId }]]]></db:input-parameters>
 		</db:select>
+		<set-variable variableName="row" value="#[payload[0]]" />
+		<db:select config-ref="Core_Banking_DB">
+			<db:sql><![CDATA[SELECT txn_date, kind, amount, counterparty, channel, memo
+FROM txn WHERE account_id = :id ORDER BY txn_date, id]]></db:sql>
+			<db:input-parameters><![CDATA[#[{ id: vars.row.account_id default '' }]]]></db:input-parameters>
+		</db:select>
 		<ee:transform>
 			<ee:message>
 				<ee:set-payload><![CDATA[%dw 2.0
 output application/json indent=false
-var r = payload[0]
+var r = vars.row
 ---
 if (r == null) { found: false, alertId: vars.alertId }
 else {
@@ -79,6 +85,10 @@ else {
     address: r.address, occupation: r.occupation, employer: r.employer,
     declaredAnnualIncomeJpy: r.declared_income, accountPurpose: r.purpose,
     riskRating: r.risk_rating, customerSince: r.customer_since
+  },
+  transactions: payload map {
+    date: $.txn_date, kind: $.kind, amountJpy: $.amount,
+    counterparty: $.counterparty, channel: $.channel, memo: $.memo
   }
 }]]></ee:set-payload>
 			</ee:message>

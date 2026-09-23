@@ -1,7 +1,7 @@
 name: core-banking-mcp
 kind: mcp
 runtime: mule
-version: 1.0.0
+version: 1.0.1
 build: mvn -B package -DskipTests
 artifact: target/*-mule-application.jar
 endpoint: ""

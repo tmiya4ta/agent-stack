@@ -115,4 +115,69 @@ var k = key(vars.req.name)
 			</ee:message>
 		</ee:transform>
 	</flow>
+
+	<flow name="check-parties">
+		<mcp:tool-listener doc:name="check-parties" config-ref="MCP_Server" name="check-parties">
+			<mcp:description><![CDATA[Screens several people or companies at once: for each party, the watch-list hits (as
+screen-name returns them) and the news articles that mention it (as search-news returns them).
+Use this to check a customer and the counterparties of their notable transactions in one call.]]></mcp:description>
+			<mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "parties": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "Person or company name" },
+          "birthDate": { "type": "string", "description": "YYYY-MM-DD, for a person, if known" }
+        },
+        "required": ["name"]
+      }
+    }
+  },
+  "required": ["parties"]
+}]]></mcp:parameters-schema>
+			<mcp:responses>
+				<mcp:text-tool-response-content text="#[payload.^raw]" />
+			</mcp:responses>
+		</mcp:tool-listener>
+		<set-variable variableName="req" value="#[payload]" />
+		<db:select config-ref="Screening_DB">
+			<db:sql><![CDATA[SELECT * FROM watchlist]]></db:sql>
+		</db:select>
+		<set-variable variableName="watchlist" value="#[payload]" />
+		<db:select config-ref="Screening_DB">
+			<db:sql><![CDATA[SELECT * FROM news ORDER BY published_on DESC]]></db:sql>
+		</db:select>
+		<ee:transform>
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json indent=false
+fun key(s) = upper(((s default '') replace /[（(][^）)]*[）)]/ with '') replace /株式会社|\s|　/ with '')
+var news = payload
+---
+{
+  parties: (vars.req.parties default []) map ((p) -> do {
+    var k = key(p.name)
+    var bd = p.birthDate default ''
+    ---
+    {
+      name: p.name,
+      watchlistHits: (vars.watchlist filter (k != '' and ($.name_key == k or (k contains $.name_key) or ($.name_key contains k)))) map {
+        list: $.list_name, entityType: $.entity_type, listedName: $.name, country: $.country,
+        reason: $.reason, listedOn: $.listed_on,
+        match: if ($.name_key == k) "exact" else "partial",
+        listedBirthDate: $.birth_date,
+        birthDateMatch: if ($.birth_date == null or bd == '') "unknown" else ($.birth_date == bd)
+      },
+      news: (news filter (k != '' and ($.names default '') != '' and ((k contains $.names) or ($.names contains k)))) map {
+        publishedOn: $.published_on, source: $.source, title: $.title, body: $.body
+      }
+    }
+  })
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
 </mule>

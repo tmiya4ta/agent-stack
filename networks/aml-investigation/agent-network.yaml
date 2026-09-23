@@ -47,7 +47,7 @@ registry:
           path: /mcp
         tools:
           - name: get-alert
-            description: Returns an alert with its account and customer profile.
+            description: Returns an alert with its account, the customer profile and the account's transactions.
             inputSchema:
               type: object
               properties:
@@ -135,6 +135,24 @@ registry:
                   type: string
               required:
                 - name
+          - name: check-parties
+            description: Screens several names at once against the watch lists and the news.
+            inputSchema:
+              type: object
+              properties:
+                parties:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      birthDate:
+                        type: string
+                    required:
+                      - name
+              required:
+                - parties
 
   llms:
     aml-openai-llm{{-suffix}}:

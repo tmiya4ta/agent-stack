@@ -8,11 +8,12 @@
 #   trigger
 #     +-> subagent classify            get-case(contextId) -> step "new" -> route "investigate"
 #        +-> router mainRouter
-#             + investigate   -> orchestrator investigate   alert, customer, transactions, screening,
-#             |                     |                       news, similar past cases; save-case(awaiting_decision)
+#             + investigate   -> orchestrator investigate   get-alert (profile + transactions), check-parties
+#             |                     |                       (watch lists + news), case history (A2A)
 #             |                     +-> router foundRouter
 #             |                          + not found -> echo alertNotFound (FAILED)
-#             |                          + found     -> generator draftMemo -> echo memoArtifact -> echo memoStatus
+#             |                          + found     -> executor saveCase (awaiting_decision, no LLM)
+#             |                                           -> generator draftMemo -> echo memoArtifact -> echo memoStatus
 #             + ask_alert      -> echo askAlert
 #
 #   turn 2  "届出検討で。分割入金が明白"
@@ -30,6 +31,10 @@
 #   - Nodes that call tools never talk to the human (a question from an orchestrator ends the task
 #     early); every question to the human is its own echo.
 #   - A source that could not be reached is listed as a gap in the memo instead of being skipped.
+#   - Latency: a turn has to finish before the gateway times out, and every tool round trip is an
+#     LLM call. The backends therefore return whole bundles (get-alert includes the transactions,
+#     check-parties screens several names at once), state is saved by an executor, and the LLM runs
+#     with reasoning_effort LOW.
 
 system:
   instructions: "あなたは銀行のマネロン対策部門の調査補助です。確認できた事実だけを扱い、推測で埋めません。最終判断は必ず担当者が行います。"
@@ -43,6 +48,7 @@ llm:
     target: "llm://aml_openai_connection{{_suffix}}"
     kind: "OpenAI"
     model: "gpt-5-mini"
+    reasoning_effort: "LOW"
 
 actions:
   get_case:
@@ -65,20 +71,10 @@ actions:
     kind: "mcp:tool"
     tool_name: "get-alert"
 
-  list_transactions:
-    target: "mcp://core_banking_connection{{_suffix}}"
-    kind: "mcp:tool"
-    tool_name: "list-transactions"
-
-  screen_name:
+  check_parties:
     target: "mcp://screening_connection{{_suffix}}"
     kind: "mcp:tool"
-    tool_name: "screen-name"
-
-  search_news:
-    target: "mcp://screening_connection{{_suffix}}"
-    kind: "mcp:tool"
-    tool_name: "search-news"
+    tool_name: "check-parties"
 
   case_history:
     target: "a2a://case_history_connection{{_suffix}}"
@@ -179,21 +175,20 @@ orchestrator investigate:
   description: "Gathers the alert, customer profile, transactions, screening and news hits and similar past cases, then saves the state."
   system:
     instructions: |
-      あなたはマネロン疑いアラートの一次調査を行います。手順（すべて実行する）:
-      1. get_alert で alertId のアラートを取得する。found が false なら found = "false" として、以降は何もせず返す。
-      2. list_transactions でその口座の取引を取得する。
-      3. screen_name で顧客名（生年月日付き）を照合する。海外送金や大口の相手先があれば、その名前も照合する。
-      4. search_news で顧客名を検索する。海外送金の相手先があれば、その名前も検索する。
-      5. case_history に、アラートの内容・取引のパターン・顧客の属性を日本語で 3〜4 文にまとめて送り、似た過去事例を聞く。
-      6. 集めた材料から推奨を 1 つ決める:
+      あなたはマネロン疑いアラートの一次調査を行います。ツール呼び出しは最小限にし、2 と 3 は同時に呼んでよい。
+      1. get_alert で alertId のアラートを取得する（顧客の属性と口座の全取引も返る）。
+         found が false なら found = "false" とし、他の項目は空文字にして、以降は何もせず返す。
+      2. check_parties を 1 回だけ呼ぶ。parties には顧客（name と birthDate）と、注目すべき取引の相手先
+         （海外送金の送金先、大口入金の入金元など。個人名・法人名だけ、最大 3 件）を入れる。
+      3. case_history に、アラートの内容・取引のパターン・顧客の属性を日本語で 3〜4 文にまとめて送り、似た過去事例を聞く。
+      4. 集めた材料から推奨を 1 つ決める:
          - 顧客の属性（職業・勤務先・申告年収・取引目的）や過去の取引から説明がつく → "close"
          - 基準額を避けたような分割、急な海外送金、要注意リストとの完全一致など、説明のつかない点が重なる → "file_str"
          - 同姓同名の報道やリストの部分一致など、本人かどうか・資金の出どころの確認が必要 → "hold"
          推奨は下書きであり、最終判断は担当者が行う。
-      7. save_case で contextId, alertId, step = "awaiting_decision", recommendation を保存する。
       出力:
       - facts: 顧客の属性、アラートの内容、注目すべき取引（日付・金額・相手先・経路）を箇条書きで。数値は取得したものをそのまま使う。
-      - screening: リスト照合と報道検索の結果。部分一致なら生年月日などが一致するかを必ず書く。
+      - screening: リスト照合と報道の結果。部分一致なら生年月日などが一致するかを必ず書く。
       - similarCases: case_history の回答をそのまま入れる。
       - gaps: ツールが失敗した・応答しなかったものを列挙する（無ければ "なし"）。失敗しても調査は続ける。
       - reasoning: 推奨の根拠を 2〜4 文で。
@@ -205,11 +200,8 @@ orchestrator investigate:
       | alertId: {!@subagent.classify.output.alertId}
     actions:
       get_alert: @actions.get_alert
-      list_transactions: @actions.list_transactions
-      screen_name: @actions.screen_name
-      search_news: @actions.search_news
+      check_parties: @actions.check_parties
       case_history: @actions.case_history
-      save_case: @actions.save_case
     outputs:
       properties:
         found:
@@ -243,9 +235,9 @@ orchestrator investigate:
         reasoning:
           type: "string"
           description: "Why this recommendation"
-    max_number_of_loops: 14
+    max_number_of_loops: 8
     max_consecutive_errors: 3
-    task_timeout_secs: 180
+    task_timeout_secs: 150
   on_exit: ->
     transition to @router.foundRouter
 
@@ -256,7 +248,18 @@ router foundRouter:
       when: @orchestrator.investigate.output.found == "false"
       label: "Alert not found"
   otherwise:
-    target: @generator.draftMemo
+    target: @executor.saveCase
+
+executor saveCase:
+  description: "Saves the investigation state so the analyst's reply is recognized as a decision."
+  do: ->
+    run @actions.save_case
+      with contextId = @request.payload.message.contextId
+      with alertId = @orchestrator.investigate.output.alertId
+      with step = "awaiting_decision"
+      with recommendation = @orchestrator.investigate.output.recommendation
+  on_exit: ->
+    transition to @generator.draftMemo
 
 generator draftMemo:
   system:
