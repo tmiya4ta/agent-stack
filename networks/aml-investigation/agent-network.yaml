@@ -165,6 +165,40 @@ registry:
           - gpt-5-mini
 
 context:
+  policies:
+    # Who is calling: a JWT (HS256, shared secret) whose sub claim becomes the conversation owner.
+    # The broker keeps sha256(sub) as each task's user_id and rejects a contextId owned by
+    # someone else ("The operation is not permitted.").
+    aml_jwt_validation{{_suffix}}:
+      ref:
+        name: jwt-validation
+        namespace: 68ef9520-24e9-4cf2-b2f5-620025690913
+      configuration:
+        jwtOrigin: httpBearerAuthenticationHeader
+        jwtExpression: "#[attributes.headers['jwt']]"
+        signingMethod: hmac
+        signingKeyLength: 256
+        jwtKeyOrigin: text
+        textKey: ${jwt.hs256Secret}
+        jwksUrl: "http://your-jwks-service.example:80/base/path"
+        jwksServiceTimeToLive: 60
+        jwksServiceConnectionTimeout: 10000
+        customKeyExpression: "#[authentication.properties['key_to_your_public_pem_certificate']]"
+        skipClientIdValidation: true
+        clientIdExpression: "#[vars.claimSet.client_id]"
+        validateAudClaim: false
+        mandatoryAudClaim: false
+        supportedAudiences: aud.example.com
+        mandatoryExpClaim: true
+        mandatoryNbfClaim: false
+        validateCustomClaim: false
+    aml_user_context{{_suffix}}:
+      ref:
+        name: user-context-propagation
+        namespace: 68ef9520-24e9-4cf2-b2f5-620025690913
+      configuration:
+        userIdExpression: "#[authentication.properties.claims.sub]"
+
   connections:
     case_history_connection{{_suffix}}:
       kind: a2a
@@ -199,6 +233,14 @@ brokers:
     implementation: ./brokers/aml_broker.agent
     interfaces:
       a2a:
+        # Added after the platform's agent card / tracing / header injection policies. Because
+        # user-context-propagation is listed here, the default one (client id) is not added.
+        policies:
+          inbound:
+            - ref:
+                name: aml_jwt_validation{{_suffix}}
+            - ref:
+                name: aml_user_context{{_suffix}}
         card:
           name: AML Alert Investigation Broker{{-suffix}}
           description: Investigates a transaction-monitoring alert and drafts the memo; an analyst then decides whether to close it, consider a suspicious transaction report, or hold it.

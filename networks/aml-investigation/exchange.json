@@ -9,7 +9,22 @@
   "groupId": "{{business-group-id}}",
   "assetId": "aml-investigation-network{{-suffix}}",
   "version": "0.0.1",
-  "dependencies": [],
+  "dependencies": [
+    {
+      "classifier": "policy",
+      "packaging": "zip",
+      "groupId": "68ef9520-24e9-4cf2-b2f5-620025690913",
+      "assetId": "jwt-validation",
+      "version": "0.11.1"
+    },
+    {
+      "classifier": "policy",
+      "packaging": "zip",
+      "groupId": "68ef9520-24e9-4cf2-b2f5-620025690913",
+      "assetId": "user-context-propagation",
+      "version": "1.0.0"
+    }
+  ],
   "metadata": {
     "variables": {
       "case-history-agent{{-suffix}}": {
@@ -44,6 +59,13 @@
         "apiKey": {
           "description": "API key of the LLM endpoint. For a proxy fronted by Basic authentication this is base64(clientId:clientSecret)",
           "default": "{{llm-api-key}}",
+          "secret": true
+        }
+      },
+      "jwt": {
+        "hs256Secret": {
+          "description": "Shared secret (HS256) that signs the callers' JWTs. The sub claim becomes the conversation owner",
+          "default": "{{jwt-hs256-secret}}",
           "secret": true
         }
       }
