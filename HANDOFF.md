@@ -94,7 +94,10 @@ Mule の場合は `deploy.mule: {target: ch2|rtf, env: Sandbox, properties: conf
    `yc harness list` / `yc harness deploy <org> <env> <name> target=ps:rootps gateway=ft1 [profile=] [suffix=]`、TUI は D → unit → target → gateway。
    約束ごとは docs/harness.md。T1/Sandbox/rootps で onboarding-employees を通しで確認済み（broker は
    https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/onboarding-broker/）。枠を空けるため inventory 系 7 アプリを STOPPED にしてある。
-   残り: runtime: host（clay の 3 サーバ、手順 2・3 の後）、api/ の最初の単位。
+   セット（sets/、runtime: set）と use-existing（別ログイン・別 BG/env の既存アプリを artifactId か名前で拾って参照）、
+   `yc harness down` も済。TUI は D/P メニューにセットが出て、確認画面で s=suffix u=use-existing p=profile、x で down。
+   記録は ~/.yc/harness-state.json。down はこの記録にあるものしか消せない（suffix なしの onboarding-network は記録前のデプロイ）。
+   yc は Mule 向けなので runtime: host（clay の 3 サーバ）は扱わない（2026-09-23 ユーザー判断）。残り: api/ の最初の単位、金融デモなどのセット。
 
 ## 参考
 
