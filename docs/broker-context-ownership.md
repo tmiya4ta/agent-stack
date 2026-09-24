@@ -84,6 +84,31 @@ timestamp                 context_id  user_id (= sha256(sub))   state
 - broker から下流（MCP / A2A）への contextId は下流が採番し、利用者とは結び付かない
   （`tool-context-store` に別に保存される。次の節）。
 
+## user-context-propagation が上流に送るもの（2026-09-24 実測）
+
+受け取ったヘッダをそのまま返すだけの Mule アプリを上流にして、Flex Gateway（ft1）に
+`jwt-validation`（order 1）→ `user-context-propagation`（order 2、`#[authentication.properties.claims.sub]`）
+を付けて呼んだ。
+
+| リクエスト | 上流が受け取った `x-ms-user-id` |
+|---|---|
+| hanako の JWT | `eb4950984bcc…`（= `sha256("hanako")`。生の `hanako` ではない） |
+| hanako の JWT ＋ 自分で `x-ms-user-id: taro` | `eb4950984bcc…`（**クライアントの値は上書き**） |
+| taro の JWT ＋ 自分で `x-ms-user-id: <hanako のハッシュ>` | `8ff52c91ed7d…`（= `sha256("taro")`。**なりすませない**） |
+| `sub` の無い JWT（式が解決しない） | **ヘッダなし** |
+| `sub` の無い JWT ＋ 自分で `x-ms-user-id: taro-spoof` | **ヘッダなし（クライアントの値を消す）** |
+| JWT なし | `jwt-validation` が 400 で止める（上流に届かない） |
+| **`user-context-propagation` を外して** hanako の JWT ＋ `x-ms-user-id: taro-spoof` | **`taro-spoof` がそのまま届く** |
+
+- このポリシーがすることは、**ヘッダ `x-ms-user-id` に「式の値の SHA-256（16 進 64 桁）」を入れる**こと。
+  クライアントが送った同名のヘッダは、上書きするか（値があるとき）消す（値が無いとき）。
+  ほかのヘッダは足さない（`authorization` はそのまま上流に届く）。
+- broker の `task-store` の `user_id` はこのヘッダの値と同じ。broker はハッシュし直さずにこの値を使っている。
+- ポリシーを外すと、クライアントが送った `x-ms-user-id` が素通りする。broker がそのとき
+  このヘッダを信じるかは未確認（ポリシーが無い間は `__default__` だった以前の実測は、ヘッダを送っていない）。
+  **broker の前から `user-context-propagation` を外さない**こと。
+- 付け替えの直後は、ゲートウェイの複製ごとに反映の時差があり、数十秒ほど古い設定の応答が混じった。
+
 ## taskId でも同じ照合がかかる（2026-09-24 実測）
 
 `task-store` のキーは taskId だが、**taskId を知っているだけでは他人のタスクを読めない**。
