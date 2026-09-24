@@ -98,9 +98,15 @@ Deploying a set:
    name (plus the suffix, if one is given) **or** whose Exchange reference is the unit's pom
    `artifactId`. The match must be running and have a public URL — another Business Group or
    private space cannot be reached over an internal URL.
-3. Deploy the remaining non-network units and read their public URLs (known as soon as the
+3. Check every value the deploy needs before anything is deployed: the `${var:…}` references
+   (properties and secure properties) of the Mule units to be deployed, and the tokens of
+   every network other than member URLs, `{{-suffix}}` / `{{_suffix}}` and
+   `{{business-group-id}}`. If any is missing — no variables file, no such profile, or no such
+   variable — the deploy stops and lists each missing name with the unit and property or token
+   that refers to it, plus the `yc config vars <profile> name=value …` line that sets them.
+4. Deploy the remaining non-network units and read their public URLs (known as soon as the
    deployment exists).
-4. Fill every network's member tokens with the found or deployed URL plus the member's
+5. Fill every network's member tokens with the found or deployed URL plus the member's
    `endpoint`, then build, publish and deploy the networks.
 
 Nothing found by a scan is written back into the repository. URLs are looked up again on
@@ -139,6 +145,18 @@ expose:
 | `${var:<name>}` | A value from the chosen yc variables profile |
 | anything else | Used literally |
 
-A reference that cannot be resolved stops the deploy; it is never sent as an empty string.
+A reference that cannot be resolved stops the deploy before anything is deployed; it is never
+sent as an empty string.
+
+Variables profiles live in `~/.yc/agentnet-vars.json` on the machine that runs yc (each PC needs
+its own; the file is not in this repository). Set them with
+`yc config vars <profile> <name>=<value> …`. `llm-host` may be left out: yc derives it from the
+host part of `llm-base-url`, and an explicit `llm-host` wins.
+
+The suffix and profile can be given on the command line (`suffix=<s>`, `profile=<name>`) or, in
+the TUI, on the deploy confirmation screen (`s` suffix, `p` cycle saved profiles, `P` type a
+profile name). The suffix is added to app names (`<unit>-<suffix>`), the network's
+`{{-suffix}}` / `{{_suffix}}` and the deploy record used by `down`; Mule Exchange assets keep
+the pom's GAV so the same jar is shared.
 
 Secrets are never written into this repository — only `${var:…}` references to them.
