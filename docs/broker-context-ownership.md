@@ -52,7 +52,10 @@
 - ストア: `<network アプリのデプロイ ID>-Object-Store`。network アプリと同じリージョン
   （rootps なら `object-store-ap-northeast-1`）。Object Store v2 の API で読める
   （`read:store` を持つ Connected App）。
-- パーティションは broker ごとに 6 つ（2026-09-24 に読んだとき。9-23 の時点では上の 3 つしか見ていない）。
+- パーティションは broker ごとに 6 つ。ただし `context-conversation-store` と 2 つの索引は、
+  **身元のわかる利用者（`user_id` が `__default__` 以外）のタスクが初めてできたときに作られる**。
+  9-23 09:37（JWT を付ける前）に一覧したときは 3 つだけだった。JWT を付けた後も、
+  `__default__` のタスク（11:44 のものなど）は会話・索引のどちらにも入らない。
   値はどれも `{"task_id", "context_id", "user_id", "timestamp", "payload_json"}` の形の JSON 文字列で、
   使わない欄は null（インデックスの 2 つだけは ID の配列）。
 
@@ -62,7 +65,7 @@
 | `<broker>-graph-state-store` | taskId | `task_id` と `timestamp` だけが入り、`payload_json` に実行状態（`execution.runtime` の今のノード、ノードごとの実行、変数、メッセージ、グラフ定義全体、`execution_history`、`turn_count`、`status`）。`context_id` / `user_id` は null |
 | `<broker>-context-conversation-store` | `conversation:<contextId>` | `context_id` / `user_id` と、`payload_json` = `{"v":1,"messages":[{role, content, task_id}…]}`（会話の全発言。user の文と、各ノードの構造化出力） |
 | `<broker>-task-store-ctx-index` | contextId | その会話の taskId の配列（持ち主のタスクだけ。他人の拒否された試行は入らない） |
-| `<broker>-task-store-user-index` | `user_id`（ハッシュ） | その利用者の taskId の配列 |
+| `<broker>-task-store-user-index` | `user_id`（ハッシュ） | その利用者の taskId の配列（拒否された試行も、送った側の分として入る） |
 | `<broker>-tool-context-store` | `<contextId>:<接続名>-client` | `payload_json` = 下流 A2A の `{"context_id", "task_id", "task_state"}` |
 
 上の実測のタスク記録（`task-store`、抜粋）:
