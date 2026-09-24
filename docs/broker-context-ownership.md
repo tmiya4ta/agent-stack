@@ -52,13 +52,18 @@
 - ストア: `<network アプリのデプロイ ID>-Object-Store`。network アプリと同じリージョン
   （rootps なら `object-store-ap-northeast-1`）。Object Store v2 の API で読める
   （`read:store` を持つ Connected App）。
-- パーティションは broker ごとに 3 つ。
+- パーティションは broker ごとに 6 つ（2026-09-24 に読んだとき。9-23 の時点では上の 3 つしか見ていない）。
+  値はどれも `{"task_id", "context_id", "user_id", "timestamp", "payload_json"}` の形の JSON 文字列で、
+  使わない欄は null（インデックスの 2 つだけは ID の配列）。
 
-| パーティション | キー | 中身 |
+| パーティション | キー | 値 |
 |---|---|---|
-| `<broker>-task-store` | タスク ID | `task_id` / `context_id` / `user_id` / `timestamp` / `payload_json`（A2A のタスク本体） |
-| `<broker>-graph-state-store` | タスク ID | 実行状態（今のノード、ノードごとの実行記録、グラフ定義） |
-| `<broker>-tool-context-store` | `<contextId>:<下流の接続名>-client` | 下流の A2A エージェントが返した contextId とタスクの状態 |
+| `<broker>-task-store` | taskId | `task_id` / `context_id` / `user_id`（= `x-ms-user-id`）/ `timestamp` / `payload_json`（A2A 1.0 の Task 本体。`status.state`、応答メッセージ、`history`） |
+| `<broker>-graph-state-store` | taskId | `task_id` と `timestamp` だけが入り、`payload_json` に実行状態（`execution.runtime` の今のノード、ノードごとの実行、変数、メッセージ、グラフ定義全体、`execution_history`、`turn_count`、`status`）。`context_id` / `user_id` は null |
+| `<broker>-context-conversation-store` | `conversation:<contextId>` | `context_id` / `user_id` と、`payload_json` = `{"v":1,"messages":[{role, content, task_id}…]}`（会話の全発言。user の文と、各ノードの構造化出力） |
+| `<broker>-task-store-ctx-index` | contextId | その会話の taskId の配列（持ち主のタスクだけ。他人の拒否された試行は入らない） |
+| `<broker>-task-store-user-index` | `user_id`（ハッシュ） | その利用者の taskId の配列 |
+| `<broker>-tool-context-store` | `<contextId>:<接続名>-client` | `payload_json` = 下流 A2A の `{"context_id", "task_id", "task_state"}` |
 
 上の実測のタスク記録（`task-store`、抜粋）:
 
