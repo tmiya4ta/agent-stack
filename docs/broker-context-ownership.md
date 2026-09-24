@@ -107,6 +107,18 @@ timestamp                 context_id  user_id (= sha256(sub))   state
 - ポリシーを外すと、クライアントが送った `x-ms-user-id` が素通りする。broker がそのとき
   このヘッダを信じるかは未確認（ポリシーが無い間は `__default__` だった以前の実測は、ヘッダを送っていない）。
   **broker の前から `user-context-propagation` を外さない**こと。
+- ポリシーの実装（Exchange の `user-context-propagation-flex` の WASM。ソースは配布されていないが
+  Rust の関数名が残っている）も読んだ。処理は **リクエストの入口の 1 か所だけ**
+  （`user_context_propagation_policy::request_filter`、応答側のフィルタは無い）で、順に
+  1. 前のポリシーが残した認証結果（Authentication）を読む（読むだけで書き換えない）
+  2. `userIdExpression` を評価する
+  3. 結果が空でない文字列なら、SHA-256 を 1 回かけて小文字の 16 進にし、`set_header("x-ms-user-id", …)`
+     （同名のヘッダがあれば置き換え）
+  4. 評価に失敗した・空文字・文字列でないときは、ログ（`User ID expression evaluation failed` など）を出して
+     `remove_header("x-ms-user-id")`
+
+  このほかに、プロパティ（`set_property`）・本文・ほかのヘッダ・外部呼び出しには触れていない。
+  つまり**このポリシーが上流に渡すものは `x-ms-user-id` ヘッダだけ**。
 - 付け替えの直後は、ゲートウェイの複製ごとに反映の時差があり、数十秒ほど古い設定の応答が混じった。
 
 ## taskId でも同じ照合がかかる（2026-09-24 実測）
