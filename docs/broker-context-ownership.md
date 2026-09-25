@@ -68,6 +68,22 @@
 | `<broker>-task-store-user-index` | `user_id`（ハッシュ） | その利用者の taskId の配列（拒否された試行も、送った側の分として入る） |
 | `<broker>-tool-context-store` | `<contextId>:<接続名>-client` | `payload_json` = 下流 A2A の `{"context_id", "task_id", "task_state"}` |
 
+### リクエストごとに何が書かれるか（2026-09-25、送るたびに全キーを読んで差分を取った）
+
+| 送信 | 書かれたもの |
+|---|---|
+| jiro が新しい会話（`SendMessage`、contextId なし） | 新規 5 件: `task-store` / `graph-state-store`（キーは taskId）、`conversation:<contextId>`、`ctx-index`（キー contextId）、`user-index`（キー `sha256("jiro")`、jiro 初回なのでこのとき作られる） |
+| jiro が同じ会話で続き（下流 A2A も呼ぶ） | 新規 3 件（新しい taskId の `task-store` / `graph-state-store`、`<contextId>:case_history-client`）、更新 3 件（会話に 4 発言を追記、`ctx-index` と `user-index` に taskId を追加） |
+| taro が jiro の contextId で送る（拒否） | `task-store` に taro の `user_id` で FAILED のタスク 1 件、taro の `user-index` に追加。**会話・`ctx-index`・`graph-state-store` には何も書かれない** |
+| `GetTask`（他人のも自分のも） | 書き込みなし |
+| JWT なし | ゲートウェイの 400 で止まり、書き込みなし |
+
+- Task の `history` にはそのタスクの user メッセージ 1 件だけが入る。会話全体は `context-conversation-store` にある
+  （user の文と、ノードごとの出力を assistant として保存）。
+- **`graph-state-store` の `context_variables.request.headers`（と `state_variables.request.headers`）に、
+  受け取った HTTP ヘッダがそのまま残る。`authorization: Bearer <JWT>` と `x-ms-user-id` も含む。**
+  ストアは暗号化されているが、読める人は有効期限内の JWT を再利用できる。
+
 上の実測のタスク記録（`task-store`、抜粋）:
 
 ```
