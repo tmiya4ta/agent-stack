@@ -20,9 +20,9 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
 
 | 公開名 (`.theorems.dev`) | 何か | 後ろ | 状態 |
 |---|---|---|---|
-| `llm.ornith.model` | llama-server + Ornith 1.5 35B (Q4_K_M)。OpenAI 互換 (`/v1/chat/completions`、`/v1/responses`)。モデル名 `ornith-1.5-35b` | 内蔵 GPU | 動いている (公開はまだ) |
+| `llm.ornith.model` | llama-server + Ornith 1.5 35B (Q4_K_M)。OpenAI 互換 (`/v1/chat/completions`、`/v1/responses`)。モデル名 `ornith-1.5-35b` | 内蔵 GPU | 動いている。HTTPRoute あり |
 | `embed.gte-qwen2.model` | llama-server + gte-Qwen2-1.5B-instruct (q8_0、1536 次元)。`/v1/embeddings`。モデル名 `gte-qwen2-1.5b` | 内蔵 GPU | 動いている (公開はまだ) |
-| `llm.openai.emu` | OpenAI の LLM の真似 (Responses API と Chat Completions) | `llm.ornith.model` | これから |
+| `llm.openai.emu` | OpenAI の LLM の真似 (Responses API と Chat Completions)。ソースは `emu/llm-openai-emu` | `llm.ornith.model` | 動いている。HTTPRoute あり |
 | `llm.gemini.emu` | Gemini の真似 (`generateContent`) | `llm.ornith.model` | これから |
 | `embed.openai.emu` | OpenAI の埋め込み (`/v1/embeddings`) | `embed.gte-qwen2.model` | これから |
 | `embed.ollama.emu` | Ollama の埋め込み (`/api/embeddings`、`/api/embed`) | `embed.gte-qwen2.model` | これから |
@@ -50,6 +50,12 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
   `qwen2.attention.causal = false` で決まる (`~/models/gguf` のファイルには入っている)。
 - Responses API (`/v1/responses`) は `text.format` の json_schema を無視して文章を返す (2026-10-11、イメージの digest は各 yaml)。
   Chat Completions の `response_format` (json_schema) は効く。broker は Responses API で構造化出力を使うので、`llm.openai.emu` で変換する。
+
+## 未解決: 共有 Gateway が 15 秒で切る
+
+共有 Gateway (cloud-provider-kind の Envoy) は、どの要求も 15 秒で 504 にする (Envoy の route timeout の既定値)。
+HTTPRoute の `timeouts` は受理されるが効かない (2026-10-12 に確認、config_dump にも出ない)。生成は 1 秒に約 24 トークンなので、
+15 秒を超える生成は公開名からは失敗する。インフラのセッションに直し方を相談中 (cloud-provider-kind の版を上げるか、AI の口だけ L4 にするか)。
 
 ## 確かめたこと (2026-10-11)
 

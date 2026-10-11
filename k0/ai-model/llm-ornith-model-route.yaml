@@ -1,4 +1,4 @@
-# llm.ornith.model.theorems.dev の公開。GPU の渡し方 (特権をやめる方法) が決まるまで適用しない。
+# llm.ornith.model.theorems.dev の公開 (llama-server の --api-key-file の鍵で守る)。
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

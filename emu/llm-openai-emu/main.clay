@@ -1,0 +1,165 @@
+;; llm.openai.emu.theorems.dev — OpenAI の LLM の API の真似。中身は k0 の llm.ornith.model (llama-server + Ornith 1.5 35B)。
+;;
+;;   GET  /                                   このサービスの説明 (認証なし)
+;;   GET  /health                             死活確認 (認証なし)
+;;   GET  /v1/models                          モデルの一覧
+;;   POST /v1/responses                       Responses API (Agent Network の broker が使う)
+;;   POST /v1/chat/completions                Chat Completions (Inference コネクタなど)
+;;   /v1 を付けない /models、/responses、/chat/completions も同じ。stream: true は SSE をそのまま流す。
+;;
+;; llama-server との違いを埋めるのはここだけ:
+;;   - Responses API の text.format (json_schema / json_object) を Chat Completions の response_format にして足す。
+;;     llama-server の /v1/responses は受けた本文をほぼそのまま Chat Completions に移すが、text を見ない (2026-10-11 の版)。
+;; 認証: Authorization: Bearer <API_KEY_FILE の鍵>。鍵が無ければ全部断る。llama-server へは UPSTREAM_KEY_FILE の鍵で行く。
+;; LOG_BODIES=1 なら、要求の本文をログ (標準エラー。溜めずにすぐ出る) に出す。broker が何を送るかを見るため。鍵はヘッダにだけあり、出さない。
+;;
+;; 環境変数: PORT (既定 8080)、UPSTREAM (既定 http://llm-ornith-model.ai-model.svc.cluster.local)、
+;;           API_KEY_FILE (既定 /secrets/self/api-key)、UPSTREAM_KEY_FILE (既定 /secrets/upstream/api-key)、
+;;           MODEL (説明に出すモデル名、既定 ornith-1.5-35b)、LOG_BODIES
+(ns llm-openai-emu
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]
+            [clay.http :as http]
+            [clay.httpmsg :as hm]))
+
+(defrecord Cfg [upstream: Str upstream-key: Str key: Str model: Str log-bodies: Bool])
+
+(defn env-or Str [name: Str dflt: Str]
+  (let [[v found] (getenv name)] (if (or (not found) (= (count v) 0)) dflt v)))
+
+(defn read-key Str [path: Str]
+  (let [[s e] (read-file path)] (if (not= e "") "" (str/trim s))))
+
+(defn jstr Str [s: Str]
+  (let [[j e] (json/stringify (->dyn s))] j))
+
+(defn log-line Int [line: Str] (do (eprintln line) 0))
+
+;; ---- 応答 ----
+
+(defn jresp hm/Response [status: Int body: Str]
+  (hm/response status [(hm/->Header "Content-Type" "application/json")] body false))
+
+;; OpenAI の誤りの形
+(defn err-resp hm/Response [status: Int msg: Str typ: Str code: Str]
+  (jresp status (str "{\"error\":{\"message\":" (jstr msg) ",\"type\":" (jstr typ) ",\"param\":null,\"code\":"
+                     (if (= code "") "null" (jstr code)) "}}")))
+
+(defn describe hm/Response [cfg: &Cfg]
+  (jresp 200 (str "{\"name\":\"llm.openai.emu.theorems.dev\","
+                  "\"what\":\"An emulation of OpenAI's LLM API (Responses API and Chat Completions) for Agent Fabric and Mule apps.\","
+                  "\"backend\":\"llm.ornith.model.theorems.dev (llama-server + Ornith 1.5 35B, local iGPU)\","
+                  "\"model\":" (jstr (:model cfg)) ","
+                  "\"endpoints\":[\"POST /v1/responses\",\"POST /v1/chat/completions\",\"GET /v1/models\"],"
+                  "\"auth\":\"Authorization: Bearer <key>\","
+                  "\"source\":\"agent-stack/emu/llm-openai-emu\"}")))
+
+;; ---- 要求 ----
+
+(defn path-of Str [uri: Str]
+  (let [q (str/index-of uri "?")] (if (< q 0) uri (subs uri 0 q))))
+
+;; /v1 を付けない形も受ける
+(defn api-path Str [p: Str]
+  (if (str/starts-with? p "/v1/") p (str "/v1" p)))
+
+(defn authorized? Bool [cfg: &Cfg req: &hm/Request]
+  (let [[a found] (hm/header-of (:headers req) "authorization")]
+    (and found (> (count (:key cfg)) 0) (= a (str "Bearer " (:key cfg))))))
+
+(defn stream? Bool [body: &Str]
+  (let [[d e] (json/parse body)]
+    (and (= e "") (dyn-map? d)
+         (let [s (get (dyn->map d) "stream" (->dyn false))] (and (dyn-bool? s) (dyn->bool s))))))
+
+;; Responses API の text.format を response_format にして足す (ほかはそのまま)
+(defn fix-responses Str [body: Str]
+  (let [[d e] (json/parse body)]
+    (if (or (not= e "") (not (dyn-map? d))) body
+      (let [m (dyn->map d)
+            t (get m "text" (nil->dyn))
+            f (if (dyn-map? t) (get (dyn->map t) "format" (nil->dyn)) (nil->dyn))]
+        (if (not (dyn-map? f)) body
+          (let [fm (dyn->map f)
+                tv (get fm "type" (->dyn ""))
+                ty (if (dyn-str? tv) (dyn->str tv) "")]
+            (cond
+              (= ty "json_schema")
+              (let [js0: Map(Str Dyn) {}
+                    js1 (assoc js0 "name" (get fm "name" (->dyn "response")))
+                    js2 (if (contains? fm "schema") (assoc js1 "schema" (get! fm "schema")) js1)
+                    js3 (if (contains? fm "strict") (assoc js2 "strict" (get! fm "strict")) js2)
+                    rf0: Map(Str Dyn) {}
+                    rf (assoc (assoc rf0 "type" (->dyn "json_schema")) "json_schema" (->dyn js3))
+                    [out oe] (json/stringify (->dyn (assoc m "response_format" (->dyn rf))))]
+                (if (= oe "") out body))
+              (= ty "json_object")
+              (let [rf0: Map(Str Dyn) {}
+                    [out oe] (json/stringify (->dyn (assoc m "response_format" (->dyn (assoc rf0 "type" (->dyn "json_object"))))))]
+                (if (= oe "") out body))
+              :else body)))))))
+
+;; ---- llama-server へ ----
+
+(defn upstream-opts http/RequestOpts [cfg: &Cfg method: Str path: Str body: Str]
+  (let [o (http/request-opts (str (:upstream cfg) path))
+        hs [(hm/->Header "Authorization" (str "Bearer " (:upstream-key cfg))) (hm/->Header "Content-Type" "application/json")]]
+    (assoc (assoc (assoc (assoc o :method method) :headers hs) :body body) :timeout-ms 900000)))
+
+(defn content-type Str [r: &hm/Resp]
+  (let [[v found] (hm/header-of (:headers r) "content-type")] (if found v "application/json")))
+
+(defn forward hm/Response [cfg: &Cfg method: Str path: Str body: Str]
+  (let [t0 (mono-ms)
+        [r e] (http/request (upstream-opts cfg method path body))
+        z (log-line (str "upstream " method " " path " -> " (if (= e "") (str (:status r)) e) " " (- (mono-ms) t0) "ms"))]
+    (if (not= e "") (err-resp 502 (str "upstream: " e) "server_error" "")
+      (hm/response (:status r) [(hm/->Header "Content-Type" (content-type r))] (:body r) false))))
+
+;; stream: true。SSE をすぐ開き、llama-server から届いた断片をそのまま書く (別のスレッド)
+(defn on-chunk-to http/Flow [sk: &hm/Sink c: &Str]
+  (if (= (hm/sink-write sk c) "") (http/->Continue) (http/->Stop)))
+
+(defn forward-stream hm/Response [cfg: Cfg path: Str body: Str]
+  (let [[resp sk] (hm/stream-response 200 [(hm/->Header "Content-Type" "text/event-stream") (hm/->Header "Cache-Control" "no-cache")])
+        o0 (upstream-opts cfg "POST" path body)
+        o (assoc o0 :as (http/->ChunkStream (fn http/Flow [r: hm/Resp] (http/->Continue)) (fn http/Flow [c: Str] (on-chunk-to sk c))))
+        z (future-detach (future (fn Int [k: Int]
+                                   (let [t0 (mono-ms)
+                                         [r e] (http/request o)
+                                         l (log-line (str "upstream POST " path " (stream) -> " (if (= e "") (str (:status r)) e) " " (- (mono-ms) t0) "ms"))
+                                         c (hm/sink-close sk)]
+                                     0)) 1))]
+    resp))
+
+(defn proxy-post hm/Response [cfg: Cfg path: Str body0: Str]
+  (let [body (if (= path "/v1/responses") (fix-responses body0) body0)
+        z (if (:log-bodies cfg) (log-line (str "request " path " " body0)) 0)]
+    (if (stream? body) (forward-stream cfg path body) (forward cfg "POST" path body))))
+
+(defn handle hm/Response [cfg: Cfg req: hm/Request]
+  (let [p (path-of (:uri req))
+        m (:method req)
+        ap (api-path p)]
+    (cond
+      (and (= m "GET") (= p "/")) (describe cfg)
+      (and (= m "GET") (= p "/health")) (jresp 200 "{\"status\":\"ok\"}")
+      (not (authorized? cfg req)) (err-resp 401 "Incorrect API key provided." "invalid_request_error" "invalid_api_key")
+      (and (= m "GET") (= ap "/v1/models")) (forward cfg "GET" "/v1/models" "")
+      (and (= m "POST") (or (= ap "/v1/responses") (= ap "/v1/chat/completions"))) (proxy-post cfg ap (:body req))
+      :else (err-resp 404 (str "Unknown request URL: " m " " p) "invalid_request_error" "unknown_url"))))
+
+(defn main Int []
+  (let [cfg (->Cfg (env-or "UPSTREAM" "http://llm-ornith-model.ai-model.svc.cluster.local")
+                   (read-key (env-or "UPSTREAM_KEY_FILE" "/secrets/upstream/api-key"))
+                   (read-key (env-or "API_KEY_FILE" "/secrets/self/api-key"))
+                   (env-or "MODEL" "ornith-1.5-35b")
+                   (= (env-or "LOG_BODIES" "") "1"))
+        [port pe] (parse-long (env-or "PORT" "8080"))
+        o (assoc (assoc (http/default-server-opts) :port port) :max-body 16777216)
+        z (log-line (str "llm-openai-emu: listening on " port ", upstream " (:upstream cfg)
+                    (if (= (count (:key cfg)) 0) " (no API key: every request is refused)" "")
+                    (if (:log-bodies cfg) " (logging request bodies)" "")))
+        [rc e] (http/run-server (fn hm/Response [req: hm/Request] (handle cfg req)) o)]
+    (if (not= e "") (do (eprintln (str "llm-openai-emu: " e)) 1) rc)))

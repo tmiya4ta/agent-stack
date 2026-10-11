@@ -4,6 +4,7 @@
 # GPU: device plugin (kube-system の generic-device-plugin、theorems-infra の cluster/gpu/) の squat.ai/dri を 1 つ要求する。
 #   kubelet が /dev/dri/renderD128 を差し込み、device cgroup の許可も付ける。特権も hostPath も要らない。
 #   squat.ai/dri は k0-worker と k0-worker2 に 4 つずつ (同じ iGPU を分け合う)。モデルの PVC が k0-worker にあるので k0-worker に固定する。
+# 公開は llm-ornith-model-route.yaml (llm.ornith.model.theorems.dev)。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
