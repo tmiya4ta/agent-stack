@@ -1,0 +1,57 @@
+# llm.ornith.model.theorems.dev: LLM のエンジン。llama-server (llama.cpp の Vulkan 版) で Ornith 1.5 35B (Q4_K_M) を内蔵 GPU で動かす。
+# OpenAI 互換 (/v1/chat/completions、/v1/responses、/v1/models)。モデル名は ornith-1.5-35b。
+# API キーは Secret llm-ornith-model-api-key (../secrets.sh ai-model llm-ornith-model。元は ~/.config/llm-ornith-model/env)。
+# GPU: device plugin (kube-system の generic-device-plugin、theorems-infra の cluster/gpu/) の squat.ai/dri を 1 つ要求する。
+#   kubelet が /dev/dri/renderD128 を差し込み、device cgroup の許可も付ける。特権も hostPath も要らない。
+#   squat.ai/dri は k0-worker と k0-worker2 に 4 つずつ (同じ iGPU を分け合う)。モデルの PVC が k0-worker にあるので k0-worker に固定する。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-ornith-model
+  namespace: ai-model
+  labels: {app: llm-ornith-model}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: llm-ornith-model}
+  template:
+    metadata:
+      labels: {app: llm-ornith-model}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: k0-worker}
+      securityContext: {supplementalGroups: [106]}   # renderD128 の gid (k0 のノードの中)
+      containers:
+      - name: llama-server
+        image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:f4e145aa5370fd619be9dc512e28a5bb55581dc48b957fe09f775e359f2c7ee8
+        # 値は別の引数で渡す (--model=… の形にすると、llama-server が値の中の _ まで - に変えてファイル名が壊れる)
+        args: [--model, /models/Ornith-1.5-35B-Q4_K_M.gguf, --alias, ornith-1.5-35b, --host, 0.0.0.0, --port, "8080",
+               --n-gpu-layers, "99", --ctx-size, "32768", --parallel, "1", --jinja, --api-key-file, /secrets/api-key]
+        ports: [{name: http, containerPort: 8080}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+        resources:
+          limits: {squat.ai/dri: 1}
+        startupProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: models, mountPath: /models, readOnly: true}
+        - {name: key, mountPath: /secrets, readOnly: true}
+      volumes:
+      - name: models
+        persistentVolumeClaim: {claimName: models, readOnly: true}
+      - name: key
+        secret: {secretName: llm-ornith-model-api-key}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-ornith-model
+  namespace: ai-model
+spec:
+  selector: {app: llm-ornith-model}
+  ports: [{name: http, port: 80, targetPort: http}]

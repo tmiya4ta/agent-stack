@@ -1,0 +1,32 @@
+# モデルの GGUF を置く場所 (local-path。k0-worker に固定)。中身は load-models.sh で入れる。
+# llm-ornith-model と embed-gte-qwen2-model が読み取り専用で共有する。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models
+  namespace: ai-model
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 40Gi
+---
+# PVC を k0-worker に結びつけ、load-models.sh がファイルを入れる間だけ置く Pod。
+# nodeName ではなく nodeSelector にする (nodeName はスケジューラーを通らないので、local-path の PVC が結びつかない)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: models-loader
+  namespace: ai-model
+spec:
+  nodeSelector: {kubernetes.io/hostname: k0-worker}
+  restartPolicy: Never
+  containers:
+  - name: hold
+    image: busybox:1.36
+    command: ["sh", "-c", "sleep 3600"]
+    volumeMounts: [{name: models, mountPath: /models}]
+  volumes:
+  - name: models
+    persistentVolumeClaim: {claimName: models}

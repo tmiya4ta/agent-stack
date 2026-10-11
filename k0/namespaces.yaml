@@ -1,0 +1,21 @@
+# AI のサービスの名前空間。公開名は <何か>.<相手かモデル>.<分類>.theorems.dev で、分類がそのまま名前空間になる。
+#   ai-model: モデルを動かすエンジン (llama-server。内蔵 GPU を使う)
+#   ai-emu:   他社の API の真似 (OpenAI、Gemini、Ollama、Azure)。中身は ai-model のエンジン
+#   ai-stat:  モデルを使わない統計的な実装
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-model
+  labels: {theorems.dev/category: model}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-emu
+  labels: {theorems.dev/category: emu}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-stat
+  labels: {theorems.dev/category: stat}

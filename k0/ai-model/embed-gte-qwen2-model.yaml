@@ -1,0 +1,61 @@
+# embed.gte-qwen2.model.theorems.dev: 埋め込みのエンジン。llama-server (Vulkan) で gte-Qwen2-1.5B-instruct (q8_0、1536 次元) を動かす。
+# OpenAI 互換の /v1/embeddings。モデル名は gte-qwen2-1.5b。
+# gte-Qwen2 は双方向の注意 (non-causal) で、末尾のトークンを取る (last)。causal のままだと別のベクトルになる。
+# non-causal は GGUF の qwen2.attention.causal = false で決まる (このファイルには入っている。llama-server の --attention は
+# llama-embedding 専用で、llama-server では使えない)。pooling は --pooling last で明示する。
+# 1 つの入力は 8192 トークンまで (non-causal では入力が 1 つの ubatch に収まる必要がある)。
+# API キーは Secret embed-gte-qwen2-model-api-key (../secrets.sh ai-model embed-gte-qwen2-model)。
+# GPU は llm-ornith-model と同じく device plugin の squat.ai/dri。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embed-gte-qwen2-model
+  namespace: ai-model
+  labels: {app: embed-gte-qwen2-model}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: embed-gte-qwen2-model}
+  template:
+    metadata:
+      labels: {app: embed-gte-qwen2-model}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: k0-worker}
+      securityContext: {supplementalGroups: [106]}
+      containers:
+      - name: llama-server
+        image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:f4e145aa5370fd619be9dc512e28a5bb55581dc48b957fe09f775e359f2c7ee8
+        # 値は別の引数で渡す (--model=… の形にすると、llama-server が値の中の _ まで - に変えてファイル名が壊れる)
+        args: [--model, /models/gte-Qwen2-1.5B-instruct-q8_0.gguf, --alias, gte-qwen2-1.5b, --host, 0.0.0.0, --port, "8080",
+               --n-gpu-layers, "99", --embeddings, --pooling, last,
+               --ctx-size, "8192", --batch-size, "8192", --ubatch-size, "8192", --parallel, "1",
+               --api-key-file, /secrets/api-key]
+        ports: [{name: http, containerPort: 8080}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+        resources:
+          limits: {squat.ai/dri: 1}
+        startupProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 5
+          failureThreshold: 60
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: models, mountPath: /models, readOnly: true}
+        - {name: key, mountPath: /secrets, readOnly: true}
+      volumes:
+      - name: models
+        persistentVolumeClaim: {claimName: models, readOnly: true}
+      - name: key
+        secret: {secretName: embed-gte-qwen2-model-api-key}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embed-gte-qwen2-model
+  namespace: ai-model
+spec:
+  selector: {app: embed-gte-qwen2-model}
+  ports: [{name: http, port: 80, targetPort: http}]
