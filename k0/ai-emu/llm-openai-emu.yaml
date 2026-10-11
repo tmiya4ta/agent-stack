@@ -56,4 +56,5 @@ spec:
   hostnames: [llm.openai.emu.theorems.dev]
   rules:
   - backendRefs: [{name: llm-openai-emu, port: 80}]
+    # 長い生成のため。今の共有 Gateway (cloud-provider-kind) は timeouts を無視して 15 秒で切る (k0/README.md)
     timeouts: {request: 900s, backendRequest: 900s}

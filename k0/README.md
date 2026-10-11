@@ -55,7 +55,9 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
 
 共有 Gateway (cloud-provider-kind の Envoy) は、どの要求も 15 秒で 504 にする (Envoy の route timeout の既定値)。
 HTTPRoute の `timeouts` は受理されるが効かない (2026-10-12 に確認、config_dump にも出ない)。生成は 1 秒に約 24 トークンなので、
-15 秒を超える生成は公開名からは失敗する。インフラのセッションに直し方を相談中 (cloud-provider-kind の版を上げるか、AI の口だけ L4 にするか)。
+15 秒を超える生成は公開名からは失敗する。cloud-provider-kind は v0.12.0 でも timeouts を移さない (インフラがソースで確認)。
+インフラの案は、v0.10.0 に timeouts を移すパッチを当てて入れ替えること (theorems-infra の cluster/cloud-provider-kind/)。
+その間、ここの HTTPRoute には timeouts (request: 900s) を書いておく。パッチが入ればそのまま効く。
 
 ## 確かめたこと (2026-10-11)
 
