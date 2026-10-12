@@ -123,3 +123,14 @@ curl -X POST -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:18081/clock/a
 - 仕込んだ申込み (10-26〜10-28): 通るもの OA-0001・0002・0007、引っかかるもの OA-0003 (82 歳・未経験・高リスク・年収の 14 倍)、
   OA-0004 (要注意リストと名前が部分一致、生年月日は違う)、OA-0005 (既存のお客さま C005 と重複)、OA-0006 (年収の 16 倍)。
 - `GET /applications`、`GET /applications/{id}`。
+
+## v4: お客さまの問い合わせ (3 つ目の業務の broker、2026-10-12 に通しで動いた)
+
+- 時計が進むと問い合わせ (planned_inquiries、10-29〜10-30 に 6 件) が届き、窓口の broker (networks/max-support、broker.supportUrl) に
+  「問い合わせ Q-0002 に返事して」と回す。broker は max-core の窓口の MCP の口 (`/k/<鍵>/support/mcp`) で、問い合わせ、
+  近い FAQ 3 件 (max/support.dwl の topFaq)、承認が要るか (approvalRule) を 1 回で読み、FAQ の事実だけで返事を下書きする。
+- FAQ で済むものはそのまま送る (送った人は agent:max-support)。次のものは承認箱 (種類「問い合わせ」、送信・差し戻し・担当者対応) へ:
+  売買審査のアラートがあるお客さま、口座が開いていない申込みの方、苦情の言葉、エージェントが確認を求めたもの。
+  決まった守りは send-reply の側でも確かめるので、エージェントが見落としても承認を通らずには送られない。
+- k0 での結果: Q-0001・0002・0004 は送信、Q-0003 (C008、SV-0004)・Q-0005 (OA-0005)・Q-0006 (苦情) は承認箱 (AP-0010〜0012)。
+- `GET /inquiries`、`GET /inquiries/{id}`。
