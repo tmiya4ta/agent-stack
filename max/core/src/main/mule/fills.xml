@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   約定を Anypoint MQ (キュー mq.fillsQueue) から受けて台帳 (trades) に入れる。約定を送るのは max-oms
-  (oms.url が空なら、この中の代わり publish-fills が同じ形で送る。試験用)。
+  (試験では、この中の偽の OMS /admin/fake-oms が同じ契約で送る)。
     POST /fills/drain    キューに届いている約定を台帳に入れる (fills.interval ごとにも回す。fills.state)
   同じ約定 (tradeId) が二度届いても、台帳には一度だけ入る。
   MQ の認証情報は ${mq.file} (mq.url、mq.clientId、mq.clientSecret。リポジトリに入れない)。
@@ -26,14 +26,31 @@
         <anypoint-mq:connection url="${mq.url}" clientId="${mq.clientId}" clientSecret="${mq.clientSecret}"/>
     </anypoint-mq:config>
 
-    <!-- 代わりの OMS: vars.fillMsgs (max/fills.dwl の形) を 1 件ずつ送る -->
-    <sub-flow name="publish-fills">
+    <!-- 試験用の偽の OMS (admin.reset=true のときだけ)。max-oms の POST /orders/day と同じ契約: 終値で約定させ (max/fills.dwl)、
+         約定を MQ に送り、{date, fills: [{tradeId, orderId}]} を返す (注文の表には書かない) -->
+    <flow name="admin-fake-oms">
+        <http:listener config-ref="Http" path="/admin/fake-oms/orders/day" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <choice>
+            <when expression="#[p('admin.reset') != 'true']">
+                <raise-error type="MAX:FORBIDDEN" description="Reset is turned off (admin.reset)"/>
+            </when>
+        </choice>
+        <set-variable variableName="req" value="#[output application/java --- payload]"/>
+        <set-variable variableName="fillMsgs" value="#[output application/java --- max::fills::fills(vars.req.date, vars.req.orders default [], vars.req.closes default {})]"/>
         <foreach collection="#[vars.fillMsgs]">
             <anypoint-mq:publish config-ref="Mq" destination="${mq.fillsQueue}" messageId="#[payload.tradeId]">
                 <anypoint-mq:body><![CDATA[#[output application/json --- payload]]]></anypoint-mq:body>
             </anypoint-mq:publish>
         </foreach>
-    </sub-flow>
+        <set-payload value="#[output application/json --- {date: vars.req.date, fills: vars.fillMsgs map {tradeId: $.tradeId, orderId: $.orderId}}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
 
     <!-- キューの約定を台帳に入れる。ロックは fills.lockTtl と短い (待ち切れずに終わった受け取りが後の約定をロックしても、すぐ戻る)。
          vars.expected (tradeId の配列) が全部入るか、空の待ちが fills.maxEmpty 回続いたら終わる。

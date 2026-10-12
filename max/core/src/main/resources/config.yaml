@@ -25,7 +25,7 @@ broker:
   url: ""
 dispatch:
   async: "true"
-# 注文 (v2): OMS (max-oms) の URL と鍵。url が空なら、OMS の代わりにこのアプリが同じ形の約定を MQ に送る (試験用)
+# 注文 (v2): OMS (max-oms) の URL と鍵 (oms.key は keys.file)。試験では偽の OMS (http://localhost:<port>/admin/fake-oms)
 oms:
   url: ""
 # 約定のキュー (Anypoint MQ)。取り込みの間隔 (ミリ秒)、受けるときの待ち (ミリ秒)、空の待ちが何回続いたらやめるか

@@ -3,7 +3,7 @@
   仮想の業務時計。業務の日付はいつも business_clock から読む (壁の時計は監査ログの時刻にだけ使う)。
     GET  /clock             いまの業務日
     POST /clock/advance     次の営業日へ進める (?days=1..20)。1 日ごとに:
-                              終値 (max/market.dwl)、普段の売買と仕込んだ注文を OMS へ (約定は MQ で台帳に届くのを待つ)、
+                              終値 (max/market.dwl)、普段の売買と仕込んだ注文を OMS (oms.url) へ (約定は MQ で台帳に届くのを待つ)、
                               その日の公表 (planned_events から)、
                               時計を進め、点数付けを回す (できたアラートは調査エージェントへ)
   同じデータから同じ日に進めれば、同じ終値・同じ約定・同じアラートになる。
@@ -116,24 +116,20 @@ output application/java
         </ee:transform>
         <db:bulk-insert config-ref="Db">
             <db:bulk-input-parameters>#[vars.dayPriceRows]</db:bulk-input-parameters>
-            <db:sql>insert into max.prices (code, trade_date, close, volume) values (:code, cast(:trade_date as date), :close, :volume)</db:sql>
+            <db:sql>insert into max.prices (code, trade_date, close, volume) values (:code, cast(:trade_date as date), :close, :volume)
+                    on conflict (code, trade_date) do nothing</db:sql>
         </db:bulk-insert>
         <choice>
             <when expression="#[isEmpty(vars.dayOrders)]">
                 <set-variable variableName="expected" value="#[[]]"/>
             </when>
-            <when expression="#[(p('oms.url') default '') == '']">
-                <!-- OMS の代わり (試験用): 同じ形の約定をここから送る -->
-                <set-variable variableName="fillMsgs" value="#[max::fills::fills(vars.day, vars.dayOrders, vars.closes)]"/>
-                <flow-ref name="publish-fills"/>
-                <set-variable variableName="expected" value="#[vars.fillMsgs map $.tradeId]"/>
-            </when>
             <otherwise>
+                <!-- 試験では oms.url をこのアプリの偽の OMS (/admin/fake-oms) に向ける -->
                 <http:request config-ref="Oms" method="POST" url="#[p('oms.url') ++ '/orders/day']">
                     <http:body><![CDATA[#[output application/json --- {date: vars.day, orders: vars.dayOrders, closes: vars.closes}]]]></http:body>
                     <http:headers><![CDATA[#[{'Authorization': 'Bearer ' ++ p('oms.key')}]]]></http:headers>
                 </http:request>
-                <set-variable variableName="expected" value="#[payload.fills map $.tradeId]"/>
+                <set-variable variableName="expected" value="#[output application/java --- payload.fills map $.tradeId]"/>
             </otherwise>
         </choice>
         <flow-ref name="drain-fills"/>

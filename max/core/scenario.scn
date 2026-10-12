@@ -8,8 +8,8 @@ ID の前置きは TAP で、本物の依頼と混ぜない)、社員の判断 (
 (承認箱で判断したことにして sync)、監査ログ、過去の事例。Salesforce のレコード ID は隠す。
 点数付けが作ったアラートを調査エージェントに回す (試験用の broker /admin/fake-broker が JWT の署名と A2A 1.0 の形を確かめる。
 dispatch.async=false で順に回す)、手で回す、署名の誤り。
-仮想の業務時計 (v2): 進める日数の誤り、5 営業日ずつ 2 回進める (終値、普段の売買と仕込んだ注文の約定 (OMS の代わりが
-本物の Anypoint MQ の試験用のキュー max-test-fills に送り、台帳が受ける)、公表、
+仮想の業務時計 (v2): 進める日数の誤り、5 営業日ずつ 2 回進める (終値、普段の売買と仕込んだ注文の約定 (注文を OMS の契約で
+偽の OMS /admin/fake-oms に HTTP で渡し、約定は本物の Anypoint MQ の試験用のキュー max-test-fills で台帳が受ける)、公表、
 仕込んだ筋書き C008 / MX15 と C018 / MX05 がアラートになり、試験用の broker に回る)。
 MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-alert (番号だけの ID、無いアラート)、request-approval
 (調査メモを組み立てて承認箱へ、二重の依頼、判断済み、推奨の誤り)。MCP のセッション ID は capture で渡し、mask で伏せる。
@@ -18,7 +18,7 @@ MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-al
 [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 "sfId": ?"([0-9A-Za-z]{15,18})"
 %%% requires src/main/resources/sf-secret.yaml src/main/resources/mq-secret.yaml
-%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped -Dbroker.url=http://localhost:18476/admin/fake-broker -Dbroker.jwtSecret=test-jwt -Ddispatch.async=false -Dmq.fillsQueue=max-test-fills -Dfills.state=stopped -Dfills.maxEmpty=8
+%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped -Dbroker.url=http://localhost:18476/admin/fake-broker -Dbroker.jwtSecret=test-jwt -Ddispatch.async=false -Dmq.fillsQueue=max-test-fills -Dfills.state=stopped -Dfills.maxEmpty=8 -Doms.url=http://localhost:18476/admin/fake-oms
 %%% port 18476
 %%% port 18477
 %%% request GET /
