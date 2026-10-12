@@ -242,7 +242,7 @@ create table inquiries (
 
 create table planned_inquiries (
   inquiry_id   text primary key,
-  customer_id  text not null references customers(customer_id),
+  customer_id  text not null,                   -- 口座が開いた後のお客さまもある (C021 など) ので外部キーにしない
   channel      text not null,
   received_on  date not null,
   subject      text not null,

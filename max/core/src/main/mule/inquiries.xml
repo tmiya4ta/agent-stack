@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  お客さまの問い合わせ。時計が進むと届き (clock.xml の intake-inquiries)、窓口の broker (broker.supportUrl) が返事を下書きする。
+  決まった返事で済むものはそのまま送り、承認が要るもの (max/support.dwl の approvalRule、またはエージェントの判断) は承認箱に回す。
+  送ってよいかは道具の側でも確かめるので、エージェントが見落としても承認を通らずには送られない。
+    GET  /inquiries           問い合わせの一覧 (?status=)
+    GET  /inquiries/{id}      問い合わせの中身 (お客さま、FAQ の候補、承認が要るかの決まった守り)
+  MCP (窓口の broker の道具。MCP の口と同じポート、別の経路 /k/<api.key>/support/mcp):
+    list-inquiries、get-inquiry、send-reply
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:mcp="http://www.mulesoft.org/schema/mule/mcp"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/mcp http://www.mulesoft.org/schema/mule/mcp/current/mule-mcp.xsd">
+
+    <mcp:server-config name="SupportMcp" serverName="Max Support MCP" serverVersion="1.0.0">
+        <mcp:streamable-http-server-connection listenerConfig="McpHttp" mcpEndpointPath="/k/${api.key}/support/mcp"/>
+    </mcp:server-config>
+
+    <!-- vars.day に届く問い合わせを受け付ける。vars.newInquiries に ID -->
+    <sub-flow name="intake-inquiries">
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.inquiries (inquiry_id, customer_id, channel, received_on, subject, body)
+                    select inquiry_id, customer_id, channel, received_on, subject, body
+                    from max.planned_inquiries where received_on = cast(:d as date)
+                    on conflict (inquiry_id) do nothing</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:insert>
+        <db:select config-ref="Db" target="newInquiryRows">
+            <db:sql>select inquiry_id from max.inquiries where received_on = cast(:d as date) and status = '受付' order by inquiry_id</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:select>
+        <set-variable variableName="newInquiries" value="#[output application/java --- vars.newInquiryRows map $.inquiry_id]"/>
+    </sub-flow>
+
+    <!-- 今日の問い合わせ (vars.newInquiries) を窓口の broker (broker.supportUrl) に回す -->
+    <sub-flow name="dispatch-inquiries">
+        <choice>
+            <when expression="#[(p('broker.supportUrl') default '') == '' or isEmpty(vars.newInquiries default [])]">
+                <logger level="DEBUG" message="no dispatch"/>
+            </when>
+            <when expression="#[p('dispatch.async') == 'true']">
+                <async>
+                    <foreach collection="#[vars.newInquiries]">
+                        <set-variable variableName="alertId" value="#[payload]"/>
+                        <set-variable variableName="brokerUrl" value="#[p('broker.supportUrl')]"/>
+                        <set-variable variableName="dispatchText" value="#['問い合わせ ' ++ payload ++ ' に返事して']"/>
+                        <flow-ref name="dispatch"/>
+                    </foreach>
+                </async>
+            </when>
+            <otherwise>
+                <foreach collection="#[vars.newInquiries]">
+                    <set-variable variableName="alertId" value="#[payload]"/>
+                    <set-variable variableName="brokerUrl" value="#[p('broker.supportUrl')]"/>
+                    <set-variable variableName="dispatchText" value="#['問い合わせ ' ++ payload ++ ' に返事して']"/>
+                    <flow-ref name="dispatch"/>
+                </foreach>
+            </otherwise>
+        </choice>
+    </sub-flow>
+
+    <!-- 問い合わせの一覧: vars.statusFilter -->
+    <sub-flow name="inquiries-query">
+        <db:select config-ref="Db">
+            <db:sql>select i.inquiry_id, to_char(i.received_on, 'YYYY-MM-DD') as received_on, i.customer_id, c.name as customer_name,
+                           i.channel, i.subject, i.status, i.sent_by
+                    from max.inquiries i join max.customers c using (customer_id)
+                    where (:status = '' or i.status = :status) order by i.inquiry_id</db:sql>
+            <db:input-parameters>#[{status: vars.statusFilter}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {inquiryId: $.inquiry_id, receivedOn: $.received_on, customerId: $.customer_id,
+            customerName: $.customer_name, channel: $.channel, subject: $.subject, status: $.status, sentBy: $.sent_by}]"/>
+    </sub-flow>
+
+    <!-- 問い合わせの中身: vars.inqId。無ければ MAX:NOT_FOUND。vars.guard に決まった守りの結果 -->
+    <sub-flow name="inquiry-detail">
+        <db:select config-ref="Db" target="inq">
+            <db:sql>select i.inquiry_id, i.customer_id, c.name as customer_name, to_char(c.opened_on, 'YYYY-MM-DD') as opened_on,
+                           c.experience_years, c.risk_tolerance, i.channel, to_char(i.received_on, 'YYYY-MM-DD') as received_on,
+                           i.subject, i.body, i.status, i.reply, i.sent_by, to_char(i.sent_on, 'YYYY-MM-DD') as sent_on
+                    from max.inquiries i join max.customers c using (customer_id) where i.inquiry_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.inqId}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[isEmpty(vars.inq)]">
+                <raise-error type="MAX:NOT_FOUND" description="#['Inquiry ' ++ vars.inqId ++ ' was not found']"/>
+            </when>
+        </choice>
+        <db:select config-ref="Db" target="faqs">
+            <db:sql>select faq_id, category, question, answer from max.faq order by faq_id</db:sql>
+        </db:select>
+        <!-- 決まった守りの材料: このお客さまの売買審査のアラートと、同じ名前と生年月日の申込みで口座が開いていないもの -->
+        <db:select config-ref="Db" target="custAlerts">
+            <db:sql>select alert_id from max.alerts where customer_id = :cid order by alert_id</db:sql>
+            <db:input-parameters>#[{cid: vars.inq[0].customer_id}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="custApps">
+            <db:sql>select a.application_id, a.status from max.applications a join max.customers c
+                    on replace(a.name, ' ', '') = replace(c.name, ' ', '') and a.birth_date = c.birth_date
+                    where c.customer_id = :cid and a.status in ('確認待ち', '承認待ち', '否認', '追加確認') order by a.application_id</db:sql>
+            <db:input-parameters>#[{cid: vars.inq[0].customer_id}]</db:input-parameters>
+        </db:select>
+        <set-variable variableName="guard" value="#[output application/java --- max::support::approvalRule(vars.custAlerts, vars.custApps,
+            vars.inq[0].subject ++ ' ' ++ vars.inq[0].body)]"/>
+        <set-payload value="#[output application/json --- do {
+            var q = vars.inq[0]
+            ---
+            {inquiryId: q.inquiry_id, receivedOn: q.received_on, channel: q.channel, subject: q.subject, body: q.body, status: q.status,
+             customer: {customerId: q.customer_id, name: q.customer_name, openedOn: q.opened_on},
+             faq: max::support::topFaq(q.subject ++ ' ' ++ q.body, vars.faqs, 3),
+             requiresApproval: vars.guard.requiresApproval, approvalReasons: vars.guard.reasons,
+             reply: q.reply, sentBy: q.sent_by, sentOn: q.sent_on}}]"/>
+    </sub-flow>
+
+    <flow name="inquiries-list">
+        <http:listener config-ref="Http" path="/inquiries" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="statusFilter" value="#[attributes.queryParams.status default '']"/>
+        <flow-ref name="inquiries-query"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <flow name="inquiry-get">
+        <http:listener config-ref="Http" path="/inquiries/{id}" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="inqId" value="#[attributes.uriParams.id]"/>
+        <flow-ref name="inquiry-detail"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <!-- MCP -->
+    <flow name="support-list-inquiries">
+        <mcp:tool-listener config-ref="SupportMcp" name="list-inquiries">
+            <mcp:description><![CDATA[Lists customer inquiries: ID, received date, customer, channel, subject and status
+(受付 / 送信済み / 承認待ち / 差し戻し / 担当者対応). Give status to list only that status.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "description": "Only inquiries in this status, e.g. 受付. Empty or missing for all."}
+  }
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="statusFilter" value="#[payload.status default '']"/>
+        <flow-ref name="inquiries-query"/>
+    </flow>
+
+    <flow name="support-get-inquiry">
+        <mcp:tool-listener config-ref="SupportMcp" name="get-inquiry">
+            <mcp:description><![CDATA[Returns one customer inquiry in a single call: the message, the customer, the three closest FAQ
+entries (use only their content for facts in the reply), and whether the firm's fixed rules require an employee's approval
+before replying (requiresApproval, approvalReasons). The ID looks like Q-0003; "0003" or "3" is accepted too.
+Returns {"found": false} when there is no such inquiry.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "inquiryId": {"type": "string", "description": "Inquiry ID such as Q-0003"}
+  },
+  "required": ["inquiryId"]
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="inqId" value="#[do {
+            var raw = trim(payload.inquiryId default '')
+            var digits = raw replace /^(?i)Q-?/ with ''
+            ---
+            if (digits matches /\d{1,4}/) 'Q-' ++ ((digits as Number) as String {format: '0000'}) else raw}]"/>
+        <try>
+            <flow-ref name="inquiry-detail"/>
+            <set-payload value="#[output application/json --- {found: true} ++ payload]"/>
+            <error-handler>
+                <on-error-continue type="MAX:NOT_FOUND">
+                    <set-payload value="#[output application/json --- {found: false, inquiryId: vars.inqId}]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <flow name="support-send-reply">
+        <mcp:tool-listener config-ref="SupportMcp" name="send-reply">
+            <mcp:description><![CDATA[Sends the reply to the customer, or, when an employee must approve first, puts the draft in the
+approval inbox instead. Approval is required when the firm's fixed rules say so (the tool checks them itself) or when you
+set needsApproval to "true". Returns {"status": "sent"} or {"status": "approval_requested", "approvalId": ..., "reasons": [...]},
+or "already_sent" / "already_pending" / "not_found" / "failed" with the reason.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "contextId": {"type": "string", "description": "The conversation (A2A contextId)"},
+    "inquiryId": {"type": "string", "description": "Inquiry ID such as Q-0003"},
+    "reply": {"type": "string", "description": "The reply to the customer, in Japanese"},
+    "needsApproval": {"type": "string", "enum": ["true", "false"], "description": "Your own view: true when an employee should check the reply first"},
+    "recommendation": {"type": "string", "enum": ["送信", "担当者対応"], "description": "For the approval inbox: send this draft, or let a person handle the customer"},
+    "reasoning": {"type": "string", "description": "Why, 1 to 3 sentences (shown to the employee)"}
+  },
+  "required": ["contextId", "inquiryId", "reply", "needsApproval", "reasoning"]
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="args" value="#[payload]"/>
+        <try>
+            <set-variable variableName="inqId" value="#[vars.args.inquiryId]"/>
+            <flow-ref name="inquiry-detail"/>
+            <set-variable variableName="detail" value="#[payload]"/>
+            <db:select config-ref="Db" target="pending">
+                <db:sql>select approval_id from max.approvals where target_id = :id and status = '承認待ち'</db:sql>
+                <db:input-parameters>#[{id: vars.inqId}]</db:input-parameters>
+            </db:select>
+            <set-variable variableName="reasons" value="#[output application/java --- vars.guard.reasons
+                ++ (if ((vars.args.needsApproval default 'false') == 'true') ['エージェントが確認を求めた: ' ++ trim(vars.args.reasoning default '')] else [])]"/>
+            <choice>
+                <when expression="#[['送信済み', '差し戻し', '担当者対応'] contains vars.detail.status]">
+                    <set-payload value="#[output application/json --- {status: 'already_sent', inquiryId: vars.inqId, inquiryStatus: vars.detail.status}]"/>
+                </when>
+                <when expression="#[not isEmpty(vars.pending)]">
+                    <set-payload value="#[output application/json --- {status: 'already_pending', inquiryId: vars.inqId, approvalId: vars.pending[0].approval_id}]"/>
+                </when>
+                <when expression="#[isEmpty(trim(vars.args.reply default ''))]">
+                    <set-payload value="#[output application/json --- {status: 'failed', inquiryId: vars.inqId, reason: 'reply is empty'}]"/>
+                </when>
+                <when expression="#[isEmpty(vars.reasons)]">
+                    <db:update config-ref="Db">
+                        <db:sql>update max.inquiries set status = '送信済み', reply = :reply, sent_by = 'agent:max-support',
+                                sent_on = (select today from max.business_clock) where inquiry_id = :id</db:sql>
+                        <db:input-parameters>#[{reply: trim(vars.args.reply), id: vars.inqId}]</db:input-parameters>
+                    </db:update>
+                    <db:insert config-ref="Db">
+                        <db:sql>insert into max.audit_log (actor, action, target, detail) values ('agent:max-support', 'send-reply', :target, cast(:detail as jsonb))</db:sql>
+                        <db:input-parameters>#[{target: vars.inqId, detail: write({contextId: vars.args.contextId, faq: vars.detail.faq map $.faqId}, 'application/json', {indent: false})}]</db:input-parameters>
+                    </db:insert>
+                    <set-payload value="#[output application/json --- {status: 'sent', inquiryId: vars.inqId}]"/>
+                </when>
+                <otherwise>
+                    <set-variable variableName="memo" value="#[output application/java --- do {
+                        var d = vars.detail
+                        ---
+                        '【問い合わせの返事 (エージェントの下書き)】' ++ d.inquiryId ++ ' ' ++ d.customer.name ++ ' (' ++ d.customer.customerId ++ ')\n\n'
+                        ++ '■ お問い合わせ (' ++ d.channel ++ '、' ++ d.receivedOn ++ ')\n' ++ d.subject ++ '\n' ++ d.body ++ '\n\n'
+                        ++ '■ 返事の下書き\n' ++ trim(vars.args.reply) ++ '\n\n'
+                        ++ '■ 承認が要る理由\n' ++ (vars.reasons map ('- ' ++ $) joinBy '\n') ++ '\n\n'
+                        ++ '■ 推奨 (下書き): ' ++ (vars.args.recommendation default '送信') ++ '\n' ++ trim(vars.args.reasoning default '') ++ '\n\n'
+                        ++ '※ 送信でこの返事を送り、差し戻しで送らずに戻し、担当者対応で人が引き取ります。'}]"/>
+                    <set-variable variableName="req" value="#[output application/java --- {targetId: vars.inqId, contextId: vars.args.contextId,
+                        recommendation: vars.args.recommendation default '送信', memo: vars.memo, requestedBy: 'agent:max-support',
+                        kind: '問い合わせ', reply: trim(vars.args.reply)}]"/>
+                    <flow-ref name="create-approval"/>
+                    <set-payload value="#[output application/json --- {status: 'approval_requested', approvalId: payload.approvalId, inquiryId: vars.inqId, reasons: vars.reasons}]"/>
+                </otherwise>
+            </choice>
+            <error-handler>
+                <on-error-continue type="MAX:NOT_FOUND">
+                    <set-payload value="#[output application/json --- {status: 'not_found', inquiryId: vars.args.inquiryId default ''}]"/>
+                </on-error-continue>
+                <on-error-continue>
+                    <set-payload value="#[output application/json --- {status: 'failed', inquiryId: vars.args.inquiryId default '', reason: error.description}]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+</mule>

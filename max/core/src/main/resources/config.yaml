@@ -25,6 +25,8 @@ broker:
   url: ""
   # 口座開設の broker (空なら回さない)
   opsUrl: ""
+  # 問い合わせの窓口の broker (空なら回さない)
+  supportUrl: ""
 dispatch:
   async: "true"
 # 注文 (v2): OMS (max-oms) の URL と鍵 (oms.key は keys.file)。試験では偽の OMS (http://localhost:<port>/admin/fake-oms)

@@ -415,6 +415,19 @@ fresh map ((a, i) -> a ++ {
                         {found: true, decided: ['口座開設', '否認', '追加確認'] contains a.status, status: a.status, label: 'Application',
                          title: a.application_id ++ ' 口座開設: ' ++ a.name ++ ' (規則の引っかかり ' ++ (sizeOf(read(a.findings, 'application/json')) as String) ++ ' 件)'}}]"/>
             </when>
+            <when expression="#[(vars.req.kind default '売買審査') == '問い合わせ']">
+                <db:select config-ref="Db" target="inquiry">
+                    <db:sql>select i.inquiry_id, i.subject, i.status, c.name as customer_name from max.inquiries i join max.customers c using (customer_id)
+                            where i.inquiry_id = :id</db:sql>
+                    <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
+                </db:select>
+                <set-variable variableName="target" value="#[if (isEmpty(vars.inquiry)) {found: false, decided: false, status: null, title: null, label: 'Inquiry'}
+                    else do {
+                        var q = vars.inquiry[0]
+                        ---
+                        {found: true, decided: ['送信済み', '差し戻し', '担当者対応'] contains q.status, status: q.status, label: 'Inquiry',
+                         title: q.inquiry_id ++ ' 問い合わせ: ' ++ q.customer_name ++ ' 「' ++ q.subject ++ '」'}}]"/>
+            </when>
             <otherwise>
                 <db:select config-ref="Db" target="alert">
                     <db:sql>select a.alert_id, a.kind, a.status, a.score, c.name as customer_name, i.name as instrument_name
@@ -440,6 +453,12 @@ fresh map ((a, i) -> a ++ {
                     <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
                 </db:update>
             </when>
+            <when expression="#[(vars.req.kind default '売買審査') == '問い合わせ']">
+                <db:update config-ref="Db">
+                    <db:sql>update max.inquiries set status = '承認待ち', reply = :reply where inquiry_id = :id</db:sql>
+                    <db:input-parameters>#[{id: vars.req.targetId, reply: vars.req.reply default null}]</db:input-parameters>
+                </db:update>
+            </when>
             <otherwise>
                 <db:update config-ref="Db">
                     <db:sql>update max.alerts set status = '承認待ち' where alert_id = :id</db:sql>
@@ -456,6 +475,18 @@ fresh map ((a, i) -> a ++ {
                 <set-variable variableName="appId" value="#[vars.ap[0].target_id]"/>
                 <set-variable variableName="openedBy" value="#['user:' ++ vars.decidedBy]"/>
                 <flow-ref name="open-account"/>
+            </when>
+            <when expression="#[vars.ap[0].kind == '問い合わせ' and vars.decision == '送信']">
+                <db:update config-ref="Db">
+                    <db:sql>update max.inquiries set status = '送信済み', sent_by = :by, sent_on = (select today from max.business_clock) where inquiry_id = :id</db:sql>
+                    <db:input-parameters>#[{by: 'user:' ++ vars.decidedBy, id: vars.ap[0].target_id}]</db:input-parameters>
+                </db:update>
+            </when>
+            <when expression="#[vars.ap[0].kind == '問い合わせ']">
+                <db:update config-ref="Db">
+                    <db:sql>update max.inquiries set status = :decision where inquiry_id = :id</db:sql>
+                    <db:input-parameters>#[{decision: vars.decision, id: vars.ap[0].target_id}]</db:input-parameters>
+                </db:update>
             </when>
             <when expression="#[vars.ap[0].kind == '口座開設']">
                 <db:update config-ref="Db">
@@ -501,7 +532,8 @@ fresh map ((a, i) -> a ++ {
 
     <!-- 承認の依頼を作る: vars.req {targetId, contextId, recommendation, memo, requestedBy, kind} -->
     <sub-flow name="create-approval">
-        <set-variable variableName="allowed" value="#[output application/java --- if ((vars.req.kind default '売買審査') == '口座開設') ['承認', '否認', '追加確認'] else vars.decisions]"/>
+        <set-variable variableName="allowed" value="#[output application/java --- if ((vars.req.kind default '売買審査') == '口座開設') ['承認', '否認', '追加確認']
+            else if ((vars.req.kind default '売買審査') == '問い合わせ') ['送信', '差し戻し', '担当者対応'] else vars.decisions]"/>
         <choice>
             <when expression="#[not (vars.allowed contains (vars.req.recommendation default ''))]">
                 <raise-error type="MAX:BAD_REQUEST" description="#['recommendation must be one of ' ++ (vars.allowed joinBy ', ')]"/>
@@ -642,7 +674,7 @@ fresh map ((a, i) -> a ++ {
          承認を判断済みにし、アラートの状態を判断にし、調査を decided にして、監査ログに残す -->
     <sub-flow name="decide">
         <choice>
-            <when expression="#[not ((vars.decisions ++ ['承認', '否認', '追加確認']) contains vars.decision)]">
+            <when expression="#[not ((vars.decisions ++ ['承認', '否認', '追加確認', '送信', '差し戻し', '担当者対応']) contains vars.decision)]">
                 <raise-error type="MAX:BAD_REQUEST" description="#['decision must be one of ' ++ (vars.decisions joinBy ', ')]"/>
             </when>
             <when expression="#[isEmpty(vars.decidedBy)]">
@@ -661,7 +693,8 @@ fresh map ((a, i) -> a ++ {
                 <raise-error type="MAX:CONFLICT" description="#['Approval ' ++ vars.id ++ ' is already decided (' ++ vars.ap[0].decision ++ ')']"/>
             </when>
         </choice>
-        <set-variable variableName="allowed" value="#[output application/java --- if (vars.ap[0].kind == '口座開設') ['承認', '否認', '追加確認'] else vars.decisions]"/>
+        <set-variable variableName="allowed" value="#[output application/java --- if (vars.ap[0].kind == '口座開設') ['承認', '否認', '追加確認']
+            else if (vars.ap[0].kind == '問い合わせ') ['送信', '差し戻し', '担当者対応'] else vars.decisions]"/>
         <choice>
             <when expression="#[not (vars.allowed contains vars.decision)]">
                 <raise-error type="MAX:BAD_REQUEST" description="#['decision must be one of ' ++ (vars.allowed joinBy ', ')]"/>

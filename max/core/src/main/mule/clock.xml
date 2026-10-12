@@ -309,6 +309,8 @@ output application/java
         </db:insert>
         <!-- 今日の口座開設の申込み: 規則で確かめ、問題が無ければ口座を開き、引っかかれば確認待ちにして口座開設の broker に回す -->
         <flow-ref name="intake-applications"/>
+        <!-- 今日の問い合わせ: 窓口の broker に返事を下書きさせる -->
+        <flow-ref name="intake-inquiries"/>
         <db:update config-ref="Db">
             <db:sql>update max.business_clock set today = cast(:d as date)</db:sql>
             <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
@@ -320,9 +322,10 @@ output application/java
         </db:insert>
         <flow-ref name="surveillance"/>
         <flow-ref name="dispatch-flagged"/>
+        <flow-ref name="dispatch-inquiries"/>
         <set-payload value="#[{date: vars.day, prices: sizeOf(vars.dayPriceRows), trades: vars.dayTrades map ($.trade_id ++ ' ' ++ $.customer_id ++ ' ' ++ $.code ++ ' ' ++ $.side ++ ' ' ++ ($.qty as String) ++ ' @ ' ++ ($.price as String)),
             missingFills: vars.fillResult.missing,
-            applicationsOpened: vars.opened, applicationsFlagged: vars.flagged,
+            applicationsOpened: vars.opened, applicationsFlagged: vars.flagged, inquiries: vars.newInquiries,
             announcements: vars.todays map $.announcement_id, raised: vars.raised map $.alert_id}]"/>
     </sub-flow>
 </mule>
