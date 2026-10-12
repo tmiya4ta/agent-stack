@@ -27,7 +27,7 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
 | `embed.openai.emu` | OpenAI の埋め込み (`/v1/embeddings`)。ソースは `emu/embed-emu` (FLAVOR=openai) | `embed.gte-qwen2.model` | 動いている。HTTPRoute あり |
 | `embed.azure.emu` | Azure OpenAI の埋め込み (`/openai/deployments/<名前>/embeddings`)。同じプログラム (FLAVOR=azure) | `embed.gte-qwen2.model` | 動いている。HTTPRoute あり |
 | `embed.ollama.emu` | Ollama の埋め込み (`/api/embed`、`/api/embeddings`、`/api/tags`)。同じプログラム (FLAVOR=ollama) | `embed.gte-qwen2.model` | 動いている。HTTPRoute あり |
-| `ai-search.azure.emu` | Azure AI Search の真似 (ベクトル DB) | 自前 (PVC) | これから |
+| `ai-search.azure.emu` | Azure AI Search の真似 (ベクトル DB)。ソースは `aisearch-server` | 自前 (PVC `ai-search-data`) | 動いている。HTTPRoute あり |
 | `llm.tfidf.stat` | 統計的な LLM (agent-harness の方式、mulay で動かす) | なし | これから |
 | `embed.hash512.stat` | 統計的な埋め込み (ハッシュ、512 次元、mulay で動かす) | なし | これから |
 
@@ -71,6 +71,9 @@ MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここ
 | Ollama | baseUrl `https://embed.ollama.emu.theorems.dev/k/<embed-ollama-emu の鍵>` | `GET {baseUrl}/api/tags` (接続の確認)、`POST {baseUrl}/api/embeddings` (`{model, prompt}`、1 件ずつ) |
 
 - OpenAI の接続は apiKey しか持たず、行き先が `https://api.openai.com` に固定なので使えない。
+- 保存先は `ai-search-connection` (url `https://ai-search.azure.emu.theorems.dev`、apiKey は `ai-search-azure-emu` の鍵)。
+  アプリの pom で、コネクタの additionalDependencies に `dev.langchain4j:langchain4j-azure-ai-search:1.1.0-beta7` を足す
+  (無いと `NoClassDefFoundError: com/azure/core/exception/HttpResponseException`)。
 - Ollama の接続は base URL しか持たず、鍵のヘッダを付けられない。そこで鍵をパスの前置き `/k/<鍵>` で渡す
   (鍵は `secrets.sh` が英数字だけで作る。base URL の末尾に `/` を付けても通る)。
   鍵が URL に入るので、`embed-emu` は URI をログに出さない (Caddy と Envoy のアクセスログには残りうる)。
@@ -128,3 +131,5 @@ MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここ
   `MS-VECTORS:EMBEDDING_OPERATIONS_FAILURE` (文言は 401 の本文を含む)。Mule のログに鍵は出ない。
 - `llm.gemini.emu`: 公開名に証明書が付き、鍵なしは 403。`?key=` 付きの `streamGenerateContent?alt=sse` で 781 トークン (30 秒) が流れ、
   最後に finishReason と usageMetadata が来る。
+- `ai-search.azure.emu`: smoke_test.py (並行登録を含む) が通る。実 Mule 4.11.3 + Vectors 1.0.0 で、embed.azure.emu で埋め込んで
+  store-add (インデックスはコネクタが作る) と query が公開名で通り、英語の問いに正しい文書が最も近い 1 件として返る。

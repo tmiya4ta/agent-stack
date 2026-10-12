@@ -1,20 +1,21 @@
 # aisearch-server
 
 Azure AI Search の REST API（のうちベクトル検索まわり）を真似るエミュレーター。
-MuleSoft の Semantic Cache Config で Vector database provider に「Azure AI Search」を選んだときの
-接続先にする想定。clay で書き、このマシンで動かす（embeddings-server と同じ置き方）。
+MuleSoft の Vectors コネクタの保存先 (`ai-search-connection`) や、Semantic Cache Config の Vector database provider に
+「Azure AI Search」を選んだときの接続先にする。clay で書き、k0 の `ai-emu` で `ai-search.azure.emu.theorems.dev` として動かす
+(2026-10-12 から。前はこのマシンの systemd で `aisearch.theorems.io` として動かしていた。その運用とデータは消した)。
 
 ```
-クライアント ─ https://aisearch.theorems.io ─ theorems-edge (Caddy, TLS 終端)
-                                                  ▼
-                 (api-key)→ 172.23.0.1:8897  aisearch-server（clay の HTTP サーバ、systemd --user）
+クライアント ─ https://ai-search.azure.emu.theorems.dev ─ theorems-edge (Caddy、TLS 終端) ─ 共有 Gateway (k0)
+                                                                      ▼
+                 (api-key)→ ai-emu/ai-search-azure-emu (Pod、:8080)  aisearch-server
                                               │ 状態 = 1 つの atom（インデックスと文書）
-                                              └ 状態を変えた要求を ~/.local/share/aisearch-server/log/<連番>.json に書き、起動時に再生
+                                              └ 状態を変えた要求を /data/log/<連番>.json (PVC ai-search-data) に書き、起動時に再生
 ```
 
-- `https://aisearch.theorems.io` で公開（2026-09-22）。サーバ自体は 172.23.0.1（kind bridge）にだけ bind
-- LAN 内からは `aisearch.theorems.io` を直接開けない（ヘアピン NAT が効かない）。`--resolve aisearch.theorems.io:443:192.168.11.6`
-  を付けるか、このマシンから `http://172.23.0.1:8897` を叩く
+- 定義は `../k0/ai-emu/ai-search-azure-emu.yaml`、鍵は `~/.config/ai-search-azure-emu/env` (`../k0/secrets.sh` が作る)
+- LAN 内からは公開名を直接開けない（ヘアピン NAT が効かない）。`--resolve ai-search.azure.emu.theorems.dev:443:192.168.11.6`
+  を付けるか、`kubectl -n ai-emu port-forward svc/ai-search-azure-emu 18898:80` で `http://127.0.0.1:18898` を叩く
 - clay 0.85.0 で書いている（2026-10-12 に 0.42 から移した。`hm/Request`・`hm/Response` の run-server、
   型付きの `Atom(Map)`、`dyn->map` してから読む Dyn など、0.43〜0.85 で変わった書き方に合わせた）。
   インストール済みの `clay` だけでビルドできる（`build.sh`）
@@ -22,18 +23,24 @@ MuleSoft の Semantic Cache Config で Vector database provider に「Azure AI S
 ## 使い方
 
 ```bash
-KEY=$(grep ^AIS_API_KEYS= ~/.config/aisearch-server/env | cut -d= -f2)
-curl -s "https://aisearch.theorems.io/indexes?api-version=2024-07-01" -H "api-key: $KEY"
+KEY=$(grep ^API_KEY= ~/.config/ai-search-azure-emu/env | cut -d= -f2-)
+curl -s --resolve ai-search.azure.emu.theorems.dev:443:192.168.11.6 \
+  "https://ai-search.azure.emu.theorems.dev/indexes?api-version=2024-07-01" -H "api-key: $KEY"
 ```
 
-Anypoint の Semantic Cache Config なら、Vector database provider は Azure AI Search、
-Host は `https://aisearch.theorems.io`（リレーの URL は不可。下の「実際に来たもの」参照）、
-API Key は上の `$KEY`、Index name は `semantic-cache`（既定のまま）。
-Embedding の手順は embeddings-server（`https://embeddings.theorems.io/v1/embeddings`、`text-embedding-ada-002`）。
+- Vectors コネクタ (1.0.0): `<ms-vectors:ai-search-connection url="https://ai-search.azure.emu.theorems.dev" apiKey="..."/>`。
+  インデックスはコネクタが作る。埋め込みは `embed.azure.emu` などで作る (このエミュは埋め込みを持たない)。
+  アプリの pom で、コネクタの `additionalDependencies` に `dev.langchain4j:langchain4j-azure-ai-search:1.1.0-beta7` を足す
+  (コネクタが provided にしている。無いと `NoClassDefFoundError: com/azure/core/exception/HttpResponseException`)。
+  実 Mule 4.11.3 で登録・検索を確かめた (2026-10-12)
+- Semantic Cache Config: Vector database provider は Azure AI Search、Host は `https://ai-search.azure.emu.theorems.dev`
+  (パス無し。下の「実際に来たもの」参照)、API Key は上の `$KEY`、Index name は `semantic-cache`。
+  Embedding の手順は `https://embed.openai.emu.theorems.dev/v1/embeddings` (k0/README.md)。
+  以下の「実際に来たもの」は前の置き方 (2026-09-22) で見たもの
 
 ## 想定している使われ方
 
-Semantic Cache は文字列のベクトル化を自分で行い（Config の Embedding 手順。embeddings-server を向ける）、
+Semantic Cache は文字列のベクトル化を自分で行い（Config の Embedding 手順。埋め込みの口を向ける）、
 このエミュにはベクトルそのものを渡すはず。つまりエミュ側に埋め込みモデルは要らない。
 
 ```
@@ -48,7 +55,7 @@ GET/PUT /indexes/semantic-cache            インデックスの確認・作成
   （欄: id, proxyId, text, topic, provider, model, userId, clientId, expiresAt(Int64), createdAt, hitCount, input_format, contentVector）
 - 検索: `vectorQueries: [{kind: vector, fields: contentVector, k: 5}]` + `select` + `filter: input_format eq 'openai'`
 - 登録: `docs/index` に `{@search.action, id, contentVector, text, expiresAt, input_format}`（応答本文は Object Store 側）
-- **ポリシーは設定した URL のパスを捨てる**ので、Config の Host はパス無しの `https://aisearch.theorems.io` にする
+- **ポリシーは設定した URL のパスを捨てる**ので、Config の Host はパス無しにする
   （リレー `…/aisearch` だと `/indexes/..` がリレー直下に来て別サブドメイン扱いになる）
 - 要求本文は chunked で届く（clay 0.42.0 から受けられる）
 
@@ -88,26 +95,27 @@ GET/PUT /indexes/semantic-cache            インデックスの確認・作成
 
 ```bash
 ./build.sh        # テスト（test/*.clay）を回してから build/aisearch-server を作る
-./install.sh      # ~/.local/lib/aisearch-server/ に置いて systemd --user で（再）起動。初回は api-key を作る
-API_KEY=$KEY python3 smoke_test.py http://172.23.0.1:8897                  # HTTP のスモークテスト
-API_KEY=$KEY python3 smoke_test.py http://172.23.0.1:8897 --concurrency    # 並行登録で更新が消えないかも見る
-systemctl --user status aisearch-server
-journalctl --user -u aisearch-server -f     # 1 要求 1 行。本文は要約（キー名、ベクトルは長さ、vectorQueries の kind/fields/k、filter）
+./image.sh        # イメージ aisearch-server:<VERSION> を作って k0 に読み込む (中身を変えたら VERSION と yaml の image を上げる)
+kubectl --context kind-k0 apply -f ../k0/ai-emu/ai-search-azure-emu.yaml
+kubectl --context kind-k0 -n ai-emu port-forward svc/ai-search-azure-emu 18898:80 &
+API_KEY=$KEY python3 smoke_test.py http://127.0.0.1:18898                  # HTTP のスモークテスト
+API_KEY=$KEY python3 smoke_test.py http://127.0.0.1:18898 --concurrency    # 並行登録で更新が消えないかも見る
+kubectl --context kind-k0 -n ai-emu logs deploy/ai-search-azure-emu -f    # 1 要求 1 行。本文は要約
 ```
 
-環境変数（`~/.config/aisearch-server/env`）: `AIS_API_KEYS`（カンマ区切り。空なら認証しない）
-`AIS_HOST`（既定 172.23.0.1）`AIS_PORT`（既定 8897）`AIS_SERVICE`（エラー文に出るサービス名、既定 aisearch）
-`AIS_DATA`（既定 ~/.local/share/aisearch-server）。
+環境変数: `AIS_API_KEYS`（カンマ区切り）`AIS_API_KEY_FILE`（下記）`AIS_HOST`（既定 172.23.0.1。Pod では 0.0.0.0）
+`AIS_PORT`（既定 8897。Pod では 8080）`AIS_SERVICE`（エラー文に出るサービス名、既定 aisearch）
+`AIS_DATA`（既定 ~/.local/share/aisearch-server。Pod では /data）。
 
 - 環境変数 `AIS_API_KEY_FILE` に鍵を 1 つ書いたファイルを指定すると、読めればその中身（前後の空白は除く）を
-  許可する鍵に足す（`AIS_API_KEYS` と併用可。ファイルだけでもよい）。読めない・空のときは起動時に注意を出して足さない
-  （`AIS_API_KEYS` も空なら認証しない）
+  許可する鍵に足す（`AIS_API_KEYS` と併用可。ファイルだけでもよい）。指定したのに読めない・空のときは起動しない
+  （Secret が付かなかった Pod が認証なしで公開されないため）。`AIS_API_KEY_FILE` も `AIS_API_KEYS` も無ければ認証しない (手元での試験用)
 - 認証は `api-key` ヘッダか、クエリの `?api-key=<鍵>`（Azure のクライアントはどちらも使う。無い・違うときは 403）。
   `GET /health` だけは認証なし。クエリの鍵は要求ログにも永続化のログにも書かない（`api-key=***` にする）
 - SIGTERM / SIGINT で受付をやめ、処理中の要求を待って（最大 5 秒）終わる
 - 永続化: 状態を変えた要求（インデックスの作成・更新・削除、docs/index）を 1 件 1 ファイルで残し、
   起動時に連番の順に流し直す。連番は swap! の中で決めるので、並行に書いても再生の順は確定した順になる。
-  ログは消さないので増え続ける（全部消せば空から始まる: `systemctl --user stop aisearch-server && rm ~/.local/share/aisearch-server/log/*.json`）
+  ログは消さないので増え続ける（全部消すには Deployment を 0 にして PVC ai-search-data を消し、作り直す）
 - 1536 次元・1000 件で、検索（k=1）12ms、1 件登録 1ms、100 件まとめて 90ms 程度（Ryzen 7 255）
 
 ## 構成
@@ -122,7 +130,7 @@ ais/engine.clay   ルーティング。(handle 状態 method uri body) → Value
 ais/server.clay   HTTP サーバ（認証、atom、永続化、要求ログ）
 test/             engine まわりの単体・結合テスト（HTTP を通さない）
 smoke_test.py     HTTP のスモークテスト（標準ライブラリのみ）
-build.sh / install.sh / aisearch-server.service
+build.sh / image.sh / Dockerfile / VERSION
 ```
 
 clay 0.85 での書き方の注意:
