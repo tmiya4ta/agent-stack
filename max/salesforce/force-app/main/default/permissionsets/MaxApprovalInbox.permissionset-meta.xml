@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>マックス証券 承認箱</label>
+    <description>承認依頼 (MaxApproval__c) を読み書きする</description>
+    <hasActivationRequired>false</hasActivationRequired>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.Title__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.Kind__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.TargetId__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.RequestedBy__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.ApprovalId__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.Memo__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.DecisionNote__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.Recommendation__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.Decision__c</field><readable>true</readable></fieldPermissions>
+    <fieldPermissions><editable>true</editable><field>MaxApproval__c.Status__c</field><readable>true</readable></fieldPermissions>
+    <objectPermissions><allowCreate>true</allowCreate><allowDelete>true</allowDelete><allowEdit>true</allowEdit><allowRead>true</allowRead><modifyAllRecords>true</modifyAllRecords><object>MaxApproval__c</object><viewAllRecords>true</viewAllRecords></objectPermissions>
+    <tabSettings><tab>MaxApproval__c</tab><visibility>Visible</visibility></tabSettings>
+</PermissionSet>

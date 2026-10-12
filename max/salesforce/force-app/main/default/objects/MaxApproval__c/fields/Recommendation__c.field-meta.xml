@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Recommendation__c</fullName>
+    <label>推奨 (エージェント)</label>
+    <type>Picklist</type>
+    <trackHistory>true</trackHistory>
+    <valueSet><restricted>true</restricted><valueSetDefinition><sorted>false</sorted>
+        <value><fullName>問題なし</fullName><default>false</default><label>問題なし</label></value>
+        <value><fullName>深掘り</fullName><default>false</default><label>深掘り</label></value>
+        <value><fullName>保留</fullName><default>false</default><label>保留</label></value>
+        <value><fullName>当局報告</fullName><default>false</default><label>当局報告</label></value>
+    </valueSetDefinition></valueSet>
+</CustomField>

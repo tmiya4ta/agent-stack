@@ -3,11 +3,14 @@ max-core (マックス証券、架空): 審査の点数付け (インサイダ�
 DB は mulay の試験用の PG (localhost:15432、スキーマ max)。最初に /admin/reset で合成データを流し直す。
 仕込んだ筋書き 3 件 (C017 取引先の社員と公開買付け、C011 業務提携の前の初めての銘柄、C004 積み立て) が
 アラートになること、2 回目の点数付けで同じアラートを作らないこと、鍵の誤り、無いアラート。
-調査の状態 (無い会話、残す、読み直す)、承認の依頼 (誤った推奨、二重の依頼)、Salesforce の ID の結び付け、
-社員の判断 (誤った判断、二度目の判断)、監査ログ、過去の事例。
+調査の状態 (無い会話、残す、読み直す)、承認の依頼 (誤った推奨、二重の依頼。Salesforce d30 の承認箱 MaxApproval__c に置く。
+ID の前置きは TAP で、本物の依頼と混ぜない)、社員の判断 (誤った判断、二度目の判断)、承認箱からの取り込み
+(承認箱で判断したことにして sync)、監査ログ、過去の事例。Salesforce のレコード ID は隠す。
 %%% mask
 "at": ?"([0-9T:-]+)"
-%%% jvm -Dhttp.port=18476 -Dapi.key=test-key -Dadmin.reset=true
+"sfId": ?"([0-9A-Za-z]{15,18})"
+%%% requires src/main/resources/sf-secret.yaml
+%%% jvm -Dhttp.port=18476 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped
 %%% port 18476
 %%% request GET /
 %%% response 200
@@ -26,6 +29,7 @@ content-type: application/json; charset=UTF-8
     "POST|GET /approvals",
     "PATCH /approvals/{id}",
     "POST /approvals/{id}/decision",
+    "POST /approvals/sync",
     "GET /audit"
   ],
   "auth": "Authorization: Bearer KEY or api-key: KEY"
@@ -805,8 +809,10 @@ content-type: application/json
 content-type: application/json; charset=UTF-8
 
 {
-  "approvalId": "AP-0001",
+  "approvalId": "TAP-0001",
   "targetId": "SV-0001",
+  "sfId": "***",
+  "title": "SV-0001 インサイダー取引の疑い: 西田 亮 / 白樺化学 (100 点)",
   "status": "承認待ち"
 }
 %%% request POST /approvals
@@ -818,9 +824,9 @@ content-type: application/json
 content-type: application/json; charset=UTF-8
 
 {
-  "error": "Alert SV-0001 already waits for approval AP-0001"
+  "error": "Alert SV-0001 already waits for approval TAP-0001"
 }
-%%% request PATCH /approvals/AP-0001
+%%% request PATCH /approvals/TAP-0001
 authorization: Bearer test-key
 content-type: application/json
 
@@ -829,10 +835,10 @@ content-type: application/json
 content-type: application/json; charset=UTF-8
 
 {
-  "approvalId": "AP-0001",
+  "approvalId": "TAP-0001",
   "linked": true
 }
-%%% request PATCH /approvals/AP-0099
+%%% request PATCH /approvals/TAP-0099
 authorization: Bearer test-key
 content-type: application/json
 
@@ -841,7 +847,7 @@ content-type: application/json
 content-type: application/json; charset=UTF-8
 
 {
-  "error": "Approval AP-0099 was not found"
+  "error": "Approval TAP-0099 was not found"
 }
 %%% request GET /approvals?status=%E6%89%BF%E8%AA%8D%E5%BE%85%E3%81%A1
 authorization: Bearer test-key
@@ -850,11 +856,11 @@ content-type: application/json; charset=UTF-8
 
 [
   {
-    "approvalId": "AP-0001",
+    "approvalId": "TAP-0001",
     "kind": "売買審査",
     "targetId": "SV-0001",
     "contextId": "ctx-1",
-    "sfId": "a0X000000000001",
+    "sfId": "***",
     "recommendation": "深掘り",
     "memo": "取引先の社員が公表前に初めての銘柄を大きく買った。",
     "requestedBy": "agent:max-surveillance",
@@ -907,7 +913,7 @@ content-type: application/json; charset=UTF-8
     "announcementId": "A008"
   }
 ]
-%%% request POST /approvals/AP-0001/decision
+%%% request POST /approvals/TAP-0001/decision
 authorization: Bearer test-key
 content-type: application/json
 
@@ -918,7 +924,7 @@ content-type: application/json; charset=UTF-8
 {
   "error": "decision must be one of 問題なし, 深掘り, 保留, 当局報告"
 }
-%%% request POST /approvals/AP-0001/decision
+%%% request POST /approvals/TAP-0001/decision
 authorization: Bearer test-key
 content-type: application/json
 
@@ -927,12 +933,12 @@ content-type: application/json
 content-type: application/json; charset=UTF-8
 
 {
-  "approvalId": "AP-0001",
+  "approvalId": "TAP-0001",
   "targetId": "SV-0001",
   "decision": "深掘り",
   "status": "判断済み"
 }
-%%% request POST /approvals/AP-0001/decision
+%%% request POST /approvals/TAP-0001/decision
 authorization: Bearer test-key
 content-type: application/json
 
@@ -941,7 +947,7 @@ content-type: application/json
 content-type: application/json; charset=UTF-8
 
 {
-  "error": "Approval AP-0001 is already decided (深掘り)"
+  "error": "Approval TAP-0001 is already decided (深掘り)"
 }
 %%% request POST /approvals
 authorization: Bearer test-key
@@ -1025,7 +1031,7 @@ content-type: application/json; charset=UTF-8
     "detail": {
       "note": "本人に取引の経緯を確認する",
       "decision": "深掘り",
-      "approvalId": "AP-0001"
+      "approvalId": "TAP-0001"
     }
   },
   {
@@ -1035,8 +1041,148 @@ content-type: application/json; charset=UTF-8
     "action": "request-approval",
     "target": "SV-0001",
     "detail": {
-      "approvalId": "AP-0001",
+      "sfId": "***",
+      "approvalId": "TAP-0001",
       "recommendation": "深掘り"
     }
+  }
+]
+%%% request POST /approvals
+authorization: Bearer test-key
+content-type: application/json
+
+{"targetId":"SV-0002","contextId":"ctx-3","recommendation":"保留","memo":"情報源が分からない。営業担当に本人への聞き取りを頼む。","requestedBy":"agent:max-surveillance"}
+%%% response 201
+content-type: application/json; charset=UTF-8
+
+{
+  "approvalId": "TAP-0002",
+  "targetId": "SV-0002",
+  "sfId": "***",
+  "title": "SV-0002 インサイダー取引の疑い: 柴田 浩二 / 常磐バイオ (75 点)",
+  "status": "承認待ち"
+}
+%%% request POST /approvals/sync
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "synced": [
+    
+  ]
+}
+%%% request POST /admin/sf-decide
+authorization: Bearer test-key
+content-type: application/json
+
+{"approvalId":"TAP-0002","decision":"保留","note":"聞き取りの結果を待つ"}
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "approvalId": "TAP-0002",
+  "successful": true
+}
+%%% request POST /approvals/sync
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "synced": [
+    {
+      "approvalId": "TAP-0002",
+      "decision": "保留",
+      "result": "recorded"
+    }
+  ]
+}
+%%% request POST /approvals/sync
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "synced": [
+    
+  ]
+}
+%%% request GET /approvals
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "approvalId": "TAP-0001",
+    "kind": "売買審査",
+    "targetId": "SV-0001",
+    "contextId": "ctx-1",
+    "sfId": "***",
+    "recommendation": "深掘り",
+    "memo": "取引先の社員が公表前に初めての銘柄を大きく買った。",
+    "requestedBy": "agent:max-surveillance",
+    "status": "判断済み",
+    "decision": "深掘り",
+    "note": "本人に取引の経緯を確認する",
+    "decidedBy": "審査部 相沢"
+  },
+  {
+    "approvalId": "TAP-0002",
+    "kind": "売買審査",
+    "targetId": "SV-0002",
+    "contextId": "ctx-3",
+    "sfId": "***",
+    "recommendation": "保留",
+    "memo": "情報源が分からない。営業担当に本人への聞き取りを頼む。",
+    "requestedBy": "agent:max-surveillance",
+    "status": "判断済み",
+    "decision": "保留",
+    "note": "聞き取りの結果を待つ",
+    "decidedBy": "Miyashita Tsutomu"
+  }
+]
+%%% request GET /alerts
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "alertId": "SV-0001",
+    "kind": "インサイダー取引の疑い",
+    "score": 100,
+    "status": "深掘り",
+    "raisedOn": "2026-10-09",
+    "customerId": "C017",
+    "customerName": "西田 亮",
+    "code": "MX07",
+    "instrumentName": "白樺化学",
+    "announcementId": "A005"
+  },
+  {
+    "alertId": "SV-0002",
+    "kind": "インサイダー取引の疑い",
+    "score": 75,
+    "status": "保留",
+    "raisedOn": "2026-10-09",
+    "customerId": "C011",
+    "customerName": "柴田 浩二",
+    "code": "MX21",
+    "instrumentName": "常磐バイオ",
+    "announcementId": "A009"
+  },
+  {
+    "alertId": "SV-0003",
+    "kind": "インサイダー取引の疑い",
+    "score": 30,
+    "status": "未対応",
+    "raisedOn": "2026-10-09",
+    "customerId": "C004",
+    "customerName": "遠藤 拓也",
+    "code": "MX12",
+    "instrumentName": "汐見エナジー",
+    "announcementId": "A008"
   }
 ]
