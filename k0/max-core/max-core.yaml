@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - name: max-core
-        image: max-core:0.4.0
+        image: max-core:0.5.0
         imagePullPolicy: IfNotPresent
         args:
         - http.port=8081
@@ -36,6 +36,8 @@ spec:
         - broker.url=https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/max-surveillance-broker/
         # 口座開設の broker (sets/max-demo の max-operations)
         - broker.opsUrl=https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/max-operations-broker/
+        # 問い合わせの窓口の broker (sets/max-demo の max-support)
+        - broker.supportUrl=https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/max-support-broker/
         ports:
         - {name: http, containerPort: 8081}
         - {name: mcp, containerPort: 8082}
