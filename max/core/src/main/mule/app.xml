@@ -136,11 +136,8 @@
         </error-handler>
     </flow>
 
-    <flow name="surveillance-run">
-        <http:listener config-ref="Http" path="/surveillance/run" allowedMethods="POST">
-            <http:response statusCode="#[vars.status default 200]"/>
-        </http:listener>
-        <flow-ref name="auth"/>
+    <!-- 点数付け: アラートを作り (同じ顧客・銘柄・公表の組は二度作らない)、調査エージェントに回す。payload は作ったアラートの一覧 -->
+    <sub-flow name="surveillance">
         <db:select config-ref="Db" target="days">
             <db:sql>select to_char(d, 'YYYY-MM-DD') as d from (select distinct trade_date as d from max.prices) x order by d</db:sql>
         </db:select>
@@ -196,6 +193,14 @@ fresh map ((a, i) -> a ++ {
         <set-payload value="#[output application/json --- {
             raised: vars.raised map {alertId: $.alert_id, customerId: $.customer_id, code: $.code, announcementId: $.announcement_id, score: $.score},
             alreadyKnown: sizeOf(vars.existing)}]"/>
+    </sub-flow>
+
+    <flow name="surveillance-run">
+        <http:listener config-ref="Http" path="/surveillance/run" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <flow-ref name="surveillance"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>
