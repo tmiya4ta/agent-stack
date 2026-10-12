@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - name: embed-azure-emu
-        image: embed-emu:0.1.0
+        image: embed-emu:0.1.1
         imagePullPolicy: IfNotPresent
         env:
         - {name: FLAVOR, value: "azure"}

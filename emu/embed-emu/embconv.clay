@@ -26,12 +26,14 @@
 
 ;; ---- 鍵とパス ----
 
-;; /k/<鍵>/<残り> → [鍵 /<残り>]。前置きが無ければ ["" パス]。base URL しか設定できない Ollama の利用者 (Mule の Vectors コネクタ) 用
+;; /k/<鍵>/<残り> → [鍵 /<残り>]。前置きが無ければ ["" パス]。base URL しか設定できない Ollama の利用者 (Mule の Vectors コネクタ) 用。
+;; base URL の末尾に / を付けられても通るように、鍵の後の // は / にする
 (defn split-key-prefix Values(Str Str) [path: Str]
   (if (not (str/starts-with? path "/k/")) (values "" path)
     (let [i (str/index-of-after path "/" 3)]
       (if (< i 0) (values (subs path 3 (count path)) "/")
-        (values (subs path 3 i) (subs path i (count path)))))))
+        (let [j (if (str/starts-with? (subs path i (count path)) "//") (+ i 1) i)]
+          (values (subs path 3 i) (subs path j (count path))))))))
 
 ;; /openai/deployments/<名前>/embeddings → 名前。合わなければ ""
 (defn azure-deployment Str [path: Str]

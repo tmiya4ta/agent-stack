@@ -71,7 +71,8 @@ MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここ
 | Ollama | baseUrl `https://embed.ollama.emu.theorems.dev/k/<embed-ollama-emu の鍵>` | `GET {baseUrl}/api/tags` (接続の確認)、`POST {baseUrl}/api/embeddings` (`{model, prompt}`、1 件ずつ) |
 
 - OpenAI の接続は apiKey しか持たず、行き先が `https://api.openai.com` に固定なので使えない。
-- Ollama の接続は base URL しか持たず、鍵のヘッダを付けられない。そこで鍵をパスの前置き `/k/<鍵>` で渡す。
+- Ollama の接続は base URL しか持たず、鍵のヘッダを付けられない。そこで鍵をパスの前置き `/k/<鍵>` で渡す
+  (鍵は `secrets.sh` が英数字だけで作る。base URL の末尾に `/` を付けても通る)。
   鍵が URL に入るので、`embed-emu` は URI をログに出さない (Caddy と Envoy のアクセスログには残りうる)。
 
 ## embed-emu の作り (`emu/embed-emu`)
@@ -82,6 +83,7 @@ MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここ
   (1536 次元の float で約 250 件)。clay に上限を変える項目を頼んである (2026-10-12)。1 回で済む要求は本文をそのまま返す。
 - Ollama の違い: `truncate` は効かない (8192 トークンを超えると 400)。`GET /` は "Ollama is running" ではなくこのサービスの説明。
 - テストは `clay test test` (変換は `embconv.clay`、テストからは symlink で読む)。
+- 中身を変えたら VERSION を上げ、yaml の image も上げる (imagePullPolicy が IfNotPresent なので、同じ版の作り直しは Pod に届かない)。
 - イメージの PID 1 は tini。Clay のサーバーが PID 1 だと SIGTERM を受けず、Pod の入れ替えで 30 秒待たされる。
 
 ## 確かめたこと (2026-10-11)

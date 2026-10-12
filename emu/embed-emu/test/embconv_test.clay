@@ -13,11 +13,13 @@
   (let [[k p] (ec/split-key-prefix "/k/abc123/api/embeddings")
         [k2 p2] (ec/split-key-prefix "/api/tags")
         [k3 p3] (ec/split-key-prefix "/k/abc123")
-        [k4 p4] (ec/split-key-prefix "/k//api/tags")]
+        [k4 p4] (ec/split-key-prefix "/k//api/tags")
+        [k5 p5] (ec/split-key-prefix "/k/abc123//api/embeddings")]
     (is (= k "abc123")) (is (= p "/api/embeddings"))
         (is (= k2 "")) (is (= p2 "/api/tags"))
         (is (= k3 "abc123")) (is (= p3 "/"))
-        (is (= k4 "")) (is (= p4 "/api/tags"))))
+        (is (= k4 "")) (is (= p4 "/api/tags"))
+    (is (= k5 "abc123")) (is (= p5 "/api/embeddings"))))
 
 (deftest azure-deployment-is-read-from-the-path
   (is (= (ec/azure-deployment "/openai/deployments/text-embedding-3-small/embeddings") "text-embedding-3-small"))
