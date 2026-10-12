@@ -25,3 +25,16 @@ broker:
   url: ""
 dispatch:
   async: "true"
+# 注文 (v2): OMS (max-oms) の URL と鍵。url が空なら、OMS の代わりにこのアプリが同じ形の約定を MQ に送る (試験用)
+oms:
+  url: ""
+# 約定のキュー (Anypoint MQ)。取り込みの間隔 (ミリ秒)、受けるときの待ち (ミリ秒)、空の待ちが何回続いたらやめるか
+mq:
+  fillsQueue: "max-fills"
+fills:
+  interval: "60000"
+  state: "started"
+  pollingTime: "2000"
+  maxEmpty: "10"
+  # 受けた約定のロック (ミリ秒)。待ち切れずに終わった前の受け取りが後の約定を取ってロックすることがあるので短くし、すぐ戻るようにする
+  lockTtl: "5000"

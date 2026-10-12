@@ -8,7 +8,8 @@ ID の前置きは TAP で、本物の依頼と混ぜない)、社員の判断 (
 (承認箱で判断したことにして sync)、監査ログ、過去の事例。Salesforce のレコード ID は隠す。
 点数付けが作ったアラートを調査エージェントに回す (試験用の broker /admin/fake-broker が JWT の署名と A2A 1.0 の形を確かめる。
 dispatch.async=false で順に回す)、手で回す、署名の誤り。
-仮想の業務時計 (v2): 進める日数の誤り、5 営業日ずつ 2 回進める (終値、普段の売買と仕込んだ注文の約定、公表、
+仮想の業務時計 (v2): 進める日数の誤り、5 営業日ずつ 2 回進める (終値、普段の売買と仕込んだ注文の約定 (OMS の代わりが
+本物の Anypoint MQ の試験用のキュー max-test-fills に送り、台帳が受ける)、公表、
 仕込んだ筋書き C008 / MX15 と C018 / MX05 がアラートになり、試験用の broker に回る)。
 MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-alert (番号だけの ID、無いアラート)、request-approval
 (調査メモを組み立てて承認箱へ、二重の依頼、判断済み、推奨の誤り)。MCP のセッション ID は capture で渡し、mask で伏せる。
@@ -16,8 +17,8 @@ MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-al
 "at": ?"([0-9T:-]+)"
 [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 "sfId": ?"([0-9A-Za-z]{15,18})"
-%%% requires src/main/resources/sf-secret.yaml
-%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped -Dbroker.url=http://localhost:18476/admin/fake-broker -Dbroker.jwtSecret=test-jwt -Ddispatch.async=false
+%%% requires src/main/resources/sf-secret.yaml src/main/resources/mq-secret.yaml
+%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped -Dbroker.url=http://localhost:18476/admin/fake-broker -Dbroker.jwtSecret=test-jwt -Ddispatch.async=false -Dmq.fillsQueue=max-test-fills -Dfills.state=stopped -Dfills.maxEmpty=8
 %%% port 18476
 %%% port 18477
 %%% request GET /
@@ -1492,7 +1493,10 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-12",
       "prices": 30,
       "trades": [
-        "T000179 C015 MX14 買 100 @ 1476.5"
+        "T261012001 C015 MX14 買 100 @ 1476.5"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         
@@ -1505,8 +1509,11 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-13",
       "prices": 30,
       "trades": [
-        "T000180 C008 MX15 買 1200 @ 1551.7",
-        "T000181 C010 MX28 買 100 @ 3175.5"
+        "T261013001 C008 MX15 買 1200 @ 1551.7",
+        "T261013002 C010 MX28 買 100 @ 3175.5"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         
@@ -1519,8 +1526,11 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-14",
       "prices": 30,
       "trades": [
-        "T000182 C001 MX10 買 100 @ 4700.2",
-        "T000183 C018 MX06 売 100 @ 1720.3"
+        "T261014001 C001 MX10 買 100 @ 4700.2",
+        "T261014002 C018 MX06 売 100 @ 1720.3"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         
@@ -1533,8 +1543,11 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-15",
       "prices": 30,
       "trades": [
-        "T000184 C008 MX15 買 800 @ 1570.7",
-        "T000185 C011 MX11 売 600 @ 565.5"
+        "T261015001 C008 MX15 買 800 @ 1570.7",
+        "T261015002 C011 MX11 売 600 @ 565.5"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         
@@ -1547,7 +1560,10 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-16",
       "prices": 30,
       "trades": [
-        "T000186 C010 MX28 買 100 @ 3230"
+        "T261016001 C010 MX28 買 100 @ 3230"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         "A101"
@@ -1569,9 +1585,12 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-19",
       "prices": 30,
       "trades": [
-        "T000187 C017 MX07 売 100 @ 1524.8",
-        "T000188 C018 MX26 売 100 @ 3345",
-        "T000189 C020 MX08 買 600 @ 1095.8"
+        "T261019001 C017 MX07 売 100 @ 1524.8",
+        "T261019002 C018 MX26 売 100 @ 3345",
+        "T261019003 C020 MX08 買 600 @ 1095.8"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         
@@ -1584,9 +1603,12 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-20",
       "prices": 30,
       "trades": [
-        "T000190 C008 MX15 売 2000 @ 1704.5",
-        "T000191 C011 MX21 売 100 @ 5233.3",
-        "T000192 C013 MX25 買 700 @ 922.5"
+        "T261020001 C008 MX15 売 2000 @ 1704.5",
+        "T261020002 C011 MX21 売 100 @ 5233.3",
+        "T261020003 C013 MX25 買 700 @ 922.5"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         
@@ -1599,8 +1621,11 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-21",
       "prices": 30,
       "trades": [
-        "T000193 C012 MX28 売 100 @ 3233.6",
-        "T000194 C018 MX05 買 100 @ 477.7"
+        "T261021001 C012 MX28 売 100 @ 3233.6",
+        "T261021002 C018 MX05 買 100 @ 477.7"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         
@@ -1613,7 +1638,10 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-22",
       "prices": 30,
       "trades": [
-        "T000195 C002 MX27 買 100 @ 2913.6"
+        "T261022001 C002 MX27 買 100 @ 2913.6"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         "A102"
@@ -1626,9 +1654,12 @@ content-type: application/json; charset=UTF-8
       "date": "2026-10-23",
       "prices": 30,
       "trades": [
-        "T000196 C007 MX06 買 100 @ 1723.9",
-        "T000197 C013 MX25 買 300 @ 929.4",
-        "T000198 C014 MX13 買 100 @ 1952.7"
+        "T261023001 C007 MX06 買 100 @ 1723.9",
+        "T261023002 C013 MX25 買 300 @ 929.4",
+        "T261023003 C014 MX13 買 100 @ 1952.7"
+      ],
+      "missingFills": [
+        
       ],
       "announcements": [
         
@@ -1735,7 +1766,7 @@ content-type: application/json; charset=UTF-8
   },
   "tradesInThisInstrument": [
     {
-      "trade_id": "T000180",
+      "trade_id": "T261013001",
       "side": "買",
       "qty": 1200,
       "price": 1551.7,
@@ -1743,7 +1774,7 @@ content-type: application/json; charset=UTF-8
       "channel": "ネット"
     },
     {
-      "trade_id": "T000184",
+      "trade_id": "T261015001",
       "side": "買",
       "qty": 800,
       "price": 1570.7,
@@ -1751,7 +1782,7 @@ content-type: application/json; charset=UTF-8
       "channel": "ネット"
     },
     {
-      "trade_id": "T000190",
+      "trade_id": "T261020001",
       "side": "売",
       "qty": 2000,
       "price": 1704.5,
@@ -1761,7 +1792,7 @@ content-type: application/json; charset=UTF-8
   ],
   "recentTrades": [
     {
-      "trade_id": "T000190",
+      "trade_id": "T261020001",
       "code": "MX15",
       "instrument_name": "灯台ライフ",
       "side": "売",
@@ -1770,7 +1801,7 @@ content-type: application/json; charset=UTF-8
       "trade_date": "2026-10-20"
     },
     {
-      "trade_id": "T000184",
+      "trade_id": "T261015001",
       "code": "MX15",
       "instrument_name": "灯台ライフ",
       "side": "買",
@@ -1779,7 +1810,7 @@ content-type: application/json; charset=UTF-8
       "trade_date": "2026-10-15"
     },
     {
-      "trade_id": "T000180",
+      "trade_id": "T261013001",
       "code": "MX15",
       "instrument_name": "灯台ライフ",
       "side": "買",

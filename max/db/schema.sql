@@ -157,3 +157,17 @@ create table planned_orders (
   trade_date  date not null,
   primary key (customer_id, code, side, trade_date)
 );
+
+-- 注文 (max-oms が受け、その日の終値で約定させる。約定は Anypoint MQ で台帳 (trades) に届く)
+create table orders (
+  order_id    text primary key,                 -- O26101200001..
+  customer_id text not null references customers(customer_id),
+  code        text not null references instruments(code),
+  side        text not null check (side in ('買', '売')),
+  qty         int not null,
+  trade_date  date not null,
+  price       numeric(12,1) not null,
+  channel     text not null,
+  trade_id    text not null,                    -- 約定の ID (T261012001..)
+  created_at  timestamp not null default now()
+);

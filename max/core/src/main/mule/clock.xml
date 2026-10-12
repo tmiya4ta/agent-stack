@@ -3,7 +3,8 @@
   仮想の業務時計。業務の日付はいつも business_clock から読む (壁の時計は監査ログの時刻にだけ使う)。
     GET  /clock             いまの業務日
     POST /clock/advance     次の営業日へ進める (?days=1..20)。1 日ごとに:
-                              終値 (max/market.dwl)、普段の売買と仕込んだ注文の約定、その日の公表 (planned_events から)、
+                              終値 (max/market.dwl)、普段の売買と仕込んだ注文を OMS へ (約定は MQ で台帳に届くのを待つ)、
+                              その日の公表 (planned_events から)、
                               時計を進め、点数付けを回す (できたアラートは調査エージェントへ)
   同じデータから同じ日に進めれば、同じ終値・同じ約定・同じアラートになる。
 -->
@@ -85,9 +86,6 @@
             <db:sql>select customer_id, code, side, qty from max.planned_orders where trade_date = cast(:d as date) order by customer_id, code, side</db:sql>
             <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
         </db:select>
-        <db:select config-ref="Db" target="lastTrade">
-            <db:sql>select coalesce(max(cast(substr(trade_id, 2) as int)), 0) as n from max.trades</db:sql>
-        </db:select>
         <ee:transform>
             <ee:variables>
                 <ee:set-variable variableName="dayPriceRows"><![CDATA[%dw 2.0
@@ -98,19 +96,22 @@ dayPrices(vars.day, vars.prev, {(vars.published map {($.code): $.price_move_pct}
             </ee:variables>
         </ee:transform>
         <!-- 同じ ee:transform の中では、前の set-variable の値が見えない (実 Mule と同じ) ので分ける -->
+        <!-- 今日の注文: 普段の売買と仕込んだ注文。約定は OMS (oms.url) が終値で作り、MQ で台帳に届く -->
         <ee:transform>
             <ee:variables>
-                <ee:set-variable variableName="dayTrades"><![CDATA[%dw 2.0
+                <ee:set-variable variableName="dayOrders"><![CDATA[%dw 2.0
 import backgroundTrades from max::market
 output application/java
 var closes = {(vars.dayPriceRows map {($.code): $.close})}
 var favs = (vars.favorites groupBy $.customer_id) mapObject ((rows, cid) -> {(cid): rows map $.code})
-var background = backgroundTrades(vars.day, vars.customers, favs, closes)
-var planted = vars.planned map {customer_id: $.customer_id, code: $.code, side: $.side, qty: $.qty, price: closes[$.code],
-    trade_date: vars.day, channel: 'ネット'}
-var all = (background ++ planted) orderBy ($.customer_id ++ '|' ++ $.code ++ '|' ++ $.side)
+var background = backgroundTrades(vars.day, vars.customers, favs, closes) map {customer_id: $.customer_id, code: $.code, side: $.side, qty: $.qty, channel: $.channel}
+var planted = vars.planned map {customer_id: $.customer_id, code: $.code, side: $.side, qty: $.qty, channel: 'ネット'}
 ---
-all map ((t, i) -> t ++ {trade_id: 'T' ++ ((vars.lastTrade[0].n + i + 1) as String {format: '000000'})})]]></ee:set-variable>
+background ++ planted]]></ee:set-variable>
+                <ee:set-variable variableName="closes"><![CDATA[%dw 2.0
+output application/java
+---
+{(vars.dayPriceRows map {($.code): $.close})}]]></ee:set-variable>
             </ee:variables>
         </ee:transform>
         <db:bulk-insert config-ref="Db">
@@ -118,14 +119,29 @@ all map ((t, i) -> t ++ {trade_id: 'T' ++ ((vars.lastTrade[0].n + i + 1) as Stri
             <db:sql>insert into max.prices (code, trade_date, close, volume) values (:code, cast(:trade_date as date), :close, :volume)</db:sql>
         </db:bulk-insert>
         <choice>
-            <when expression="#[not isEmpty(vars.dayTrades)]">
-                <db:bulk-insert config-ref="Db">
-                    <db:bulk-input-parameters>#[vars.dayTrades]</db:bulk-input-parameters>
-                    <db:sql>insert into max.trades (trade_id, customer_id, code, side, qty, price, trade_date, channel)
-                            values (:trade_id, :customer_id, :code, :side, :qty, :price, cast(:trade_date as date), :channel)</db:sql>
-                </db:bulk-insert>
+            <when expression="#[isEmpty(vars.dayOrders)]">
+                <set-variable variableName="expected" value="#[[]]"/>
             </when>
+            <when expression="#[(p('oms.url') default '') == '']">
+                <!-- OMS の代わり (試験用): 同じ形の約定をここから送る -->
+                <set-variable variableName="fillMsgs" value="#[max::fills::fills(vars.day, vars.dayOrders, vars.closes)]"/>
+                <flow-ref name="publish-fills"/>
+                <set-variable variableName="expected" value="#[vars.fillMsgs map $.tradeId]"/>
+            </when>
+            <otherwise>
+                <http:request config-ref="Oms" method="POST" url="#[p('oms.url') ++ '/orders/day']">
+                    <http:body><![CDATA[#[output application/json --- {date: vars.day, orders: vars.dayOrders, closes: vars.closes}]]]></http:body>
+                    <http:headers><![CDATA[#[{'Authorization': 'Bearer ' ++ p('oms.key')}]]]></http:headers>
+                </http:request>
+                <set-variable variableName="expected" value="#[payload.fills map $.tradeId]"/>
+            </otherwise>
         </choice>
+        <flow-ref name="drain-fills"/>
+        <set-variable variableName="fillResult" value="#[payload]"/>
+        <db:select config-ref="Db" target="dayTrades">
+            <db:sql>select trade_id, customer_id, code, side, qty, price from max.trades where trade_date = cast(:d as date) order by trade_id</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:select>
         <!-- 今日の公表を announcements に移す -->
         <db:select config-ref="Db" target="todays">
             <db:sql>select announcement_id from max.planned_events where cast(published_at as date) = cast(:d as date) order by announcement_id</db:sql>
@@ -143,11 +159,12 @@ all map ((t, i) -> t ++ {trade_id: 'T' ++ ((vars.lastTrade[0].n + i + 1) as Stri
         </db:update>
         <db:insert config-ref="Db">
             <db:sql>insert into max.audit_log (actor, action, target, detail) values ('system:clock', 'advance', :d, cast(:detail as jsonb))</db:sql>
-            <db:input-parameters>#[{d: vars.day, detail: write({prices: sizeOf(vars.dayPriceRows), trades: sizeOf(vars.dayTrades),
+            <db:input-parameters>#[{d: vars.day, detail: write({prices: sizeOf(vars.dayPriceRows), orders: sizeOf(vars.dayOrders), trades: sizeOf(vars.dayTrades),
                 announcements: vars.todays map $.announcement_id}, 'application/json', {indent: false})}]</db:input-parameters>
         </db:insert>
         <flow-ref name="surveillance"/>
         <set-payload value="#[{date: vars.day, prices: sizeOf(vars.dayPriceRows), trades: vars.dayTrades map ($.trade_id ++ ' ' ++ $.customer_id ++ ' ' ++ $.code ++ ' ' ++ $.side ++ ' ' ++ ($.qty as String) ++ ' @ ' ++ ($.price as String)),
+            missingFills: vars.fillResult.missing,
             announcements: vars.todays map $.announcement_id, raised: vars.raised map $.alert_id}]"/>
     </sub-flow>
 </mule>

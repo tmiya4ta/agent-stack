@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  約定を Anypoint MQ (キュー mq.fillsQueue) から受けて台帳 (trades) に入れる。約定を送るのは max-oms
+  (oms.url が空なら、この中の代わり publish-fills が同じ形で送る。試験用)。
+    POST /fills/drain    キューに届いている約定を台帳に入れる (fills.interval ごとにも回す。fills.state)
+  同じ約定 (tradeId) が二度届いても、台帳には一度だけ入る。
+  MQ の認証情報は ${mq.file} (mq.url、mq.clientId、mq.clientSecret。リポジトリに入れない)。
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd">
+
+    <global-property name="mq.file" value="mq-secret.yaml"/>
+    <configuration-properties file="${mq.file}"/>
+
+    <http:request-config name="Oms" responseTimeout="120000"/>
+
+    <anypoint-mq:config name="Mq">
+        <anypoint-mq:connection url="${mq.url}" clientId="${mq.clientId}" clientSecret="${mq.clientSecret}"/>
+    </anypoint-mq:config>
+
+    <!-- 代わりの OMS: vars.fillMsgs (max/fills.dwl の形) を 1 件ずつ送る -->
+    <sub-flow name="publish-fills">
+        <foreach collection="#[vars.fillMsgs]">
+            <anypoint-mq:publish config-ref="Mq" destination="${mq.fillsQueue}" messageId="#[payload.tradeId]">
+                <anypoint-mq:body><![CDATA[#[output application/json --- payload]]]></anypoint-mq:body>
+            </anypoint-mq:publish>
+        </foreach>
+    </sub-flow>
+
+    <!-- キューの約定を台帳に入れる。ロックは fills.lockTtl と短い (待ち切れずに終わった受け取りが後の約定をロックしても、すぐ戻る)。
+         vars.expected (tradeId の配列) が全部入るか、空の待ちが fills.maxEmpty 回続いたら終わる。
+         vars.expected が空なら、キューが空になるまで。payload は {drained: [tradeId], missing: [tradeId]} -->
+    <sub-flow name="drain-fills">
+        <set-variable variableName="drained" value="#[[]]"/>
+        <set-variable variableName="drainDone" value="#[false]"/>
+        <set-variable variableName="empties" value="#[0]"/>
+        <foreach collection="#[1 to 1000]">
+            <choice>
+                <when expression="#[not vars.drainDone]">
+                    <try>
+                        <anypoint-mq:consume config-ref="Mq" destination="${mq.fillsQueue}" acknowledgementMode="MANUAL" pollingTime="${fills.pollingTime}" acknowledgementTimeout="${fills.lockTtl}"/>
+                        <set-variable variableName="ackToken" value="#[attributes.ackToken]"/>
+                        <set-variable variableName="fill" value="#[output application/java --- read(payload.^raw as String, 'application/json')]"/>
+                        <db:insert config-ref="Db">
+                            <db:sql>insert into max.trades (trade_id, customer_id, code, side, qty, price, trade_date, channel)
+                                    values (:tradeId, :customerId, :code, :side, :qty, :price, cast(:tradeDate as date), :channel)
+                                    on conflict (trade_id) do nothing</db:sql>
+                            <db:input-parameters>#[vars.fill filterObject ((v, k) -> ['tradeId', 'customerId', 'code', 'side', 'qty', 'price', 'tradeDate', 'channel'] contains (k as String))]</db:input-parameters>
+                        </db:insert>
+                        <anypoint-mq:ack config-ref="Mq" ackToken="#[vars.ackToken]"/>
+                        <set-variable variableName="drained" value="#[vars.drained + vars.fill.tradeId]"/>
+                        <!-- not は and より弱く結び付く (not a and b は not (a and b)) ので括弧を付ける -->
+                        <set-variable variableName="drainDone" value="#[(not isEmpty(vars.expected default [])) and isEmpty((vars.expected default []) -- vars.drained)]"/>
+                        <error-handler>
+                            <on-error-continue type="ANYPOINT-MQ:TIMEOUT">
+                                <set-variable variableName="empties" value="#[vars.empties + 1]"/>
+                                <set-variable variableName="drainDone" value="#[isEmpty(vars.expected default []) or vars.empties &gt;= (p('fills.maxEmpty') as Number)]"/>
+                            </on-error-continue>
+                        </error-handler>
+                    </try>
+                </when>
+            </choice>
+        </foreach>
+        <!-- 届かなかった約定 (別の取り込みが先に入れたものは台帳にある) -->
+        <db:select config-ref="Db" target="present">
+            <db:sql>select trade_id from max.trades where trade_id = any(string_to_array(:ids, ','))</db:sql>
+            <db:input-parameters>#[{ids: (vars.expected default []) joinBy ','}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[{drained: vars.drained orderBy $, missing: ((vars.expected default []) -- (vars.present map $.trade_id)) orderBy $}]"/>
+    </sub-flow>
+
+    <flow name="fills-drain">
+        <http:listener config-ref="Http" path="/fills/drain" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="expected" value="#[[]]"/>
+        <flow-ref name="drain-fills"/>
+        <set-payload value="#[output application/json --- payload]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 時計を進めていないときに届いた約定 (手で出した注文など) を取り込む -->
+    <flow name="fills-poll" initialState="${fills.state}">
+        <scheduler>
+            <scheduling-strategy>
+                <fixed-frequency frequency="${fills.interval}" startDelay="${fills.interval}"/>
+            </scheduling-strategy>
+        </scheduler>
+        <set-variable variableName="expected" value="#[[]]"/>
+        <flow-ref name="drain-fills"/>
+        <logger level="INFO" message="#[output text/plain --- 'fills drained: ' ++ write(payload.drained, 'application/json', {indent: false})]"/>
+    </flow>
+
+    <!-- 試験用: キューを空にする (台帳には入れない) -->
+    <sub-flow name="purge-fills">
+        <set-variable variableName="purged" value="#[false]"/>
+        <foreach collection="#[1 to 200]">
+            <choice>
+                <when expression="#[not vars.purged]">
+                    <try>
+                        <anypoint-mq:consume config-ref="Mq" destination="${mq.fillsQueue}" pollingTime="1"/>
+                        <error-handler>
+                            <on-error-continue>
+                                <set-variable variableName="purged" value="#[true]"/>
+                            </on-error-continue>
+                        </error-handler>
+                    </try>
+                </when>
+            </choice>
+        </foreach>
+    </sub-flow>
+</mule>

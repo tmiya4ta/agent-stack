@@ -108,6 +108,8 @@
                 <raise-error type="MAX:FORBIDDEN" description="Reset is turned off (admin.reset)"/>
             </when>
         </choice>
+        <!-- 約定のキューを空にする (試験のキュー。前の実行の残り) -->
+        <flow-ref name="purge-fills"/>
         <!-- 承認箱の依頼も消す (この前置きのものだけ) -->
         <salesforce:query config-ref="Sf" target="old">
             <salesforce:salesforce-query>#["SELECT Id FROM MaxApproval__c WHERE ApprovalId__c LIKE '" ++ p('approval.prefix') ++ "-%'"]</salesforce:salesforce-query>
