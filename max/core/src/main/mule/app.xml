@@ -400,6 +400,41 @@ fresh map ((a, i) -> a ++ {
 
     <!-- 承認の依頼を作る (エージェントの推奨と調査メモ)。Salesforce の承認箱 (MaxApproval__c) に置き、アラートを承認待ちにする。
          ID は ${approval.prefix}-0001 から (試験は別の前置きにして、承認箱の本物の依頼と混ぜない) -->
+    <!-- 承認の対象 (種類ごと)。vars.req {kind, targetId} → vars.target {found, decided, status, title, label} -->
+    <sub-flow name="approval-target">
+        <db:select config-ref="Db" target="alert">
+            <db:sql>select a.alert_id, a.kind, a.status, a.score, c.name as customer_name, i.name as instrument_name
+                    from max.alerts a join max.customers c using (customer_id) join max.instruments i using (code) where a.alert_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
+        </db:select>
+        <set-variable variableName="target" value="#[if (isEmpty(vars.alert)) {found: false, decided: false, status: null, title: null, label: 'Alert'}
+            else do {
+                var a = vars.alert[0]
+                ---
+                {found: true, decided: vars.decisions contains a.status, status: a.status, label: 'Alert',
+                 title: a.alert_id ++ ' ' ++ a.kind ++ ': ' ++ a.customer_name ++ ' / ' ++ a.instrument_name ++ ' (' ++ (a.score as String) ++ ' 点)'}}]"/>
+    </sub-flow>
+
+    <!-- 承認の対象を承認待ちにする (種類ごと)。vars.req -->
+    <sub-flow name="approval-mark-pending">
+        <db:update config-ref="Db">
+            <db:sql>update max.alerts set status = '承認待ち' where alert_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
+        </db:update>
+    </sub-flow>
+
+    <!-- 判断を対象に反映する (種類ごと)。vars.ap[0] (承認)、vars.decision -->
+    <sub-flow name="approval-finalize">
+        <db:update config-ref="Db">
+            <db:sql>update max.alerts set status = :decision where alert_id = :id</db:sql>
+            <db:input-parameters>#[{decision: vars.decision, id: vars.ap[0].target_id}]</db:input-parameters>
+        </db:update>
+        <db:update config-ref="Db">
+            <db:sql>update max.investigations set step = 'decided', updated_at = now() where context_id = :ctx</db:sql>
+            <db:input-parameters>#[{ctx: vars.ap[0].context_id default ''}]</db:input-parameters>
+        </db:update>
+    </sub-flow>
+
     <!-- 承認の依頼を作る: vars.req {targetId, contextId, recommendation, memo, requestedBy, kind} -->
     <sub-flow name="create-approval">        <choice>
             <when expression="#[not (vars.decisions contains (vars.req.recommendation default ''))]">
@@ -409,17 +444,13 @@ fresh map ((a, i) -> a ++ {
                 <raise-error type="MAX:BAD_REQUEST" description="targetId, memo and requestedBy are required"/>
             </when>
         </choice>
-        <db:select config-ref="Db" target="alert">
-            <db:sql>select a.alert_id, a.kind, a.status, a.score, c.name as customer_name, i.name as instrument_name
-                    from max.alerts a join max.customers c using (customer_id) join max.instruments i using (code) where a.alert_id = :id</db:sql>
-            <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
-        </db:select>
+        <flow-ref name="approval-target"/>
         <choice>
-            <when expression="#[isEmpty(vars.alert)]">
-                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ vars.req.targetId ++ ' was not found']"/>
+            <when expression="#[not vars.target.found]">
+                <raise-error type="MAX:NOT_FOUND" description="#[vars.target.label ++ ' ' ++ vars.req.targetId ++ ' was not found']"/>
             </when>
-            <when expression="#[vars.decisions contains vars.alert[0].status]">
-                <raise-error type="MAX:CONFLICT" description="#['Alert ' ++ vars.req.targetId ++ ' is already decided (' ++ vars.alert[0].status ++ ')']"/>
+            <when expression="#[vars.target.decided]">
+                <raise-error type="MAX:CONFLICT" description="#[vars.target.label ++ ' ' ++ vars.req.targetId ++ ' is already decided (' ++ vars.target.status ++ ')']"/>
             </when>
         </choice>
         <db:select config-ref="Db" target="pending">
@@ -428,7 +459,7 @@ fresh map ((a, i) -> a ++ {
         </db:select>
         <choice>
             <when expression="#[not isEmpty(vars.pending)]">
-                <raise-error type="MAX:CONFLICT" description="#['Alert ' ++ vars.req.targetId ++ ' already waits for approval ' ++ vars.pending[0].approval_id]"/>
+                <raise-error type="MAX:CONFLICT" description="#[vars.target.label ++ ' ' ++ vars.req.targetId ++ ' already waits for approval ' ++ vars.pending[0].approval_id]"/>
             </when>
         </choice>
         <db:select config-ref="Db" target="next">
@@ -436,10 +467,7 @@ fresh map ((a, i) -> a ++ {
             <db:input-parameters>#[{prefix: p('approval.prefix')}]</db:input-parameters>
         </db:select>
         <set-variable variableName="id" value="#[vars.next[0].id]"/>
-        <set-variable variableName="title" value="#[do {
-            var a = vars.alert[0]
-            ---
-            a.alert_id ++ ' ' ++ a.kind ++ ': ' ++ a.customer_name ++ ' / ' ++ a.instrument_name ++ ' (' ++ (a.score as String) ++ ' 点)'}]"/>
+        <set-variable variableName="title" value="#[vars.target.title]"/>
         <salesforce:create config-ref="Sf" type="MaxApproval__c" target="sf">
             <salesforce:records>#[[{
                 Name: vars.id, ApprovalId__c: vars.id, Title__c: vars.title, Kind__c: vars.req.kind default '売買審査',
@@ -458,10 +486,7 @@ fresh map ((a, i) -> a ++ {
             <db:input-parameters>#[{id: vars.id, kind: vars.req.kind default '売買審査', target: vars.req.targetId,
                 ctx: vars.req.contextId default null, sf: vars.sfId, rec: vars.req.recommendation, memo: vars.req.memo, by: vars.req.requestedBy}]</db:input-parameters>
         </db:insert>
-        <db:update config-ref="Db">
-            <db:sql>update max.alerts set status = '承認待ち' where alert_id = :id</db:sql>
-            <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
-        </db:update>
+        <flow-ref name="approval-mark-pending"/>
         <db:insert config-ref="Db">
             <db:sql>insert into max.audit_log (actor, action, target, detail) values (:actor, 'request-approval', :target, cast(:detail as jsonb))</db:sql>
             <db:input-parameters>#[{actor: vars.req.requestedBy, target: vars.req.targetId,
@@ -559,7 +584,7 @@ fresh map ((a, i) -> a ++ {
             </when>
         </choice>
         <db:select config-ref="Db" target="ap">
-            <db:sql>select approval_id, target_id, context_id, status, decision from max.approvals where approval_id = :id</db:sql>
+            <db:sql>select approval_id, kind, target_id, context_id, status, decision from max.approvals where approval_id = :id</db:sql>
             <db:input-parameters>#[{id: vars.id}]</db:input-parameters>
         </db:select>
         <choice>
@@ -575,14 +600,7 @@ fresh map ((a, i) -> a ++ {
                     where approval_id = :id</db:sql>
             <db:input-parameters>#[{decision: vars.decision, note: vars.note, by: vars.decidedBy, id: vars.id}]</db:input-parameters>
         </db:update>
-        <db:update config-ref="Db">
-            <db:sql>update max.alerts set status = :decision where alert_id = :id</db:sql>
-            <db:input-parameters>#[{decision: vars.decision, id: vars.ap[0].target_id}]</db:input-parameters>
-        </db:update>
-        <db:update config-ref="Db">
-            <db:sql>update max.investigations set step = 'decided', updated_at = now() where context_id = :ctx</db:sql>
-            <db:input-parameters>#[{ctx: vars.ap[0].context_id default ''}]</db:input-parameters>
-        </db:update>
+        <flow-ref name="approval-finalize"/>
         <db:insert config-ref="Db">
             <db:sql>insert into max.audit_log (actor, action, target, detail) values (:actor, 'decide', :target, cast(:detail as jsonb))</db:sql>
             <db:input-parameters>#[{actor: 'user:' ++ vars.decidedBy, target: vars.ap[0].target_id,
