@@ -1,0 +1,182 @@
+(ns embconv-test (:require [clay.json :as json] [embconv :as ec]))
+
+;; JSON の中の値を読む (テストの比較用)
+(defn jget Dyn [s: Str k: Str]
+  (let [[d e] (json/parse s)] (get (dyn->map d) k (nil->dyn))))
+
+(defn jstr-of Str [d: Dyn]
+  (let [[s e] (json/stringify d)] s))
+
+;; ---- 鍵とパス ----
+
+(deftest key-prefix-is-split-off
+  (let [[k p] (ec/split-key-prefix "/k/abc123/api/embeddings")
+        [k2 p2] (ec/split-key-prefix "/api/tags")
+        [k3 p3] (ec/split-key-prefix "/k/abc123")
+        [k4 p4] (ec/split-key-prefix "/k//api/tags")]
+    (is (= k "abc123")) (is (= p "/api/embeddings"))
+        (is (= k2 "")) (is (= p2 "/api/tags"))
+        (is (= k3 "abc123")) (is (= p3 "/"))
+        (is (= k4 "")) (is (= p4 "/api/tags"))))
+
+(deftest azure-deployment-is-read-from-the-path
+  (is (= (ec/azure-deployment "/openai/deployments/text-embedding-3-small/embeddings") "text-embedding-3-small"))
+      (is (= (ec/azure-deployment "/openai/deployments//embeddings") ""))
+      (is (= (ec/azure-deployment "/openai/deployments/a/b/embeddings") ""))
+      (is (= (ec/azure-deployment "/openai/deployments/x/chat/completions") ""))
+      (is (= (ec/azure-deployment "/v1/embeddings") "")))
+
+;; ---- OpenAI と Azure の要求 ----
+
+(deftest openai-request-passes-the-body-through
+  (let [b "{\"model\":\"text-embedding-3-small\",\"input\":[\"a\",\"b\"],\"encoding_format\":\"base64\"}"
+        [out err] (ec/openai-request b 1536 "")]
+    (is (= err "")) (is (= out b))))
+
+(deftest openai-request-accepts-native-dimensions-only
+  (let [[o1 e1] (ec/openai-request "{\"input\":\"a\",\"dimensions\":1536}" 1536 "")
+        [o2 e2] (ec/openai-request "{\"input\":\"a\",\"dimensions\":256}" 1536 "")
+        [o3 e3] (ec/openai-request "{\"input\":\"a\",\"dimensions\":\"256\"}" 1536 "")]
+    (is (= e1 ""))
+        (is (= e2 "This model does not support specifying dimensions."))
+        (is (= e3 "This model does not support specifying dimensions."))))
+
+(deftest openai-request-rejects-bad-bodies
+  (let [[o1 e1] (ec/openai-request "not json" 1536 "")
+        [o2 e2] (ec/openai-request "[1,2]" 1536 "")
+        [o3 e3] (ec/openai-request "{\"model\":\"m\"}" 1536 "")]
+    (is (not= e1 "")) (is (not= e2 "")) (is (= e3 "'input' is a required property"))))
+
+(deftest azure-request-uses-the-deployment-as-model
+  (let [[out err] (ec/openai-request "{\"input\":[\"a\"]}" 1536 "my-deploy")]
+    (is (= err ""))
+        (is (= (dyn->str (jget out "model")) "my-deploy"))
+        (is (= (jstr-of (jget out "input")) "[\"a\"]"))))
+
+;; ---- 大きな束を分けて送り、応答をつなぐ ----
+
+(deftest split-request-keeps-small-bodies
+  (let [b "{\"model\":\"m\",\"input\":[\"a\",\"b\"]}"
+        [parts err] (ec/split-request b 2)
+        [p2 e2] (ec/split-request "{\"input\":\"a\"}" 1)
+        [p3 e3] (ec/split-request "{\"input\":[1,2,3]}" 1)]
+    (is (= err "")) (is (= (count parts) 1)) (is (= (nth parts 0) b))
+    (is (= (count p2) 1))
+    (is (= (count p3) 1))))
+
+(deftest split-request-cuts-big-arrays
+  (let [[parts err] (ec/split-request "{\"model\":\"m\",\"input\":[\"a\",\"b\",\"c\",\"d\",\"e\"],\"encoding_format\":\"base64\"}" 2)]
+    (is (= err "")) (is (= (count parts) 3))
+    (is (= (jstr-of (jget (nth parts 0) "input")) "[\"a\",\"b\"]"))
+    (is (= (jstr-of (jget (nth parts 2) "input")) "[\"e\"]"))
+    (is (= (dyn->str (jget (nth parts 1) "encoding_format")) "base64"))
+    (is (= (dyn->str (jget (nth parts 1) "model")) "m"))))
+
+(deftest split-request-cuts-token-lists
+  (let [[parts err] (ec/split-request "{\"input\":[[1,2],[3],[4,5]]}" 2)]
+    (is (= (count parts) 2))
+    (is (= (jstr-of (jget (nth parts 1) "input")) "[[4,5]]"))))
+
+(def part-a "{\"model\":\"m\",\"object\":\"list\",\"usage\":{\"prompt_tokens\":3,\"total_tokens\":3},\"data\":[{\"embedding\":[0.5],\"index\":0,\"object\":\"embedding\"},{\"embedding\":[0.25],\"index\":1,\"object\":\"embedding\"}]}")
+(def part-b "{\"model\":\"m\",\"object\":\"list\",\"usage\":{\"prompt_tokens\":4,\"total_tokens\":4},\"data\":[{\"embedding\":\"AAAAPw==\",\"index\":0,\"object\":\"embedding\"}]}")
+
+(deftest merge-responses-shifts-indexes-and-sums-usage
+  (let [[out err] (ec/merge-responses [part-a part-b])
+        data (dyn->vec (jget out "data"))
+        u (dyn->map (jget out "usage"))
+        d2 (dyn->map (nth data 2))]
+    (is (= err "")) (is (= (count data) 3))
+    (is (= (dyn->int (get d2 "index" (nil->dyn))) 2))
+    (is (= (dyn->str (get d2 "embedding" (nil->dyn))) "AAAAPw=="))
+    (is (= (dyn->int (get u "prompt_tokens" (nil->dyn))) 7))
+    (is (= (dyn->int (get u "total_tokens" (nil->dyn))) 7))
+    (is (= (dyn->str (jget out "model")) "m"))))
+
+(deftest merge-responses-of-one-is-that-one
+  (let [[out err] (ec/merge-responses [part-a])]
+    (is (= err "")) (is (= out part-a))))
+
+(deftest merge-responses-rejects-bad-parts
+  (let [[out err] (ec/merge-responses [part-a "{\"data\":3}"])]
+    (is (not= err ""))))
+
+;; ---- Ollama の要求 ----
+
+(deftest ollama-embed-request-wraps-a-string-input
+  (let [[up model err] (ec/ollama-embed-request "{\"model\":\"nomic-embed-text\",\"input\":\"hello\",\"truncate\":true}" 1536)]
+    (is (= err "")) (is (= model "nomic-embed-text"))
+        (is (= (jstr-of (jget up "input")) "[\"hello\"]"))
+        (is (= (dyn->str (jget up "model")) "nomic-embed-text"))))
+
+(deftest ollama-embed-request-keeps-an-array-input
+  (let [[up model err] (ec/ollama-embed-request "{\"model\":\"m\",\"input\":[\"a\",\"b\"]}" 1536)]
+    (is (= err "")) (is (= (jstr-of (jget up "input")) "[\"a\",\"b\"]"))))
+
+(deftest ollama-embed-request-with-no-input-needs-no-upstream
+  (let [[up model err] (ec/ollama-embed-request "{\"model\":\"m\"}" 1536)
+        [up2 model2 err2] (ec/ollama-embed-request "{\"model\":\"m\",\"input\":[]}" 1536)]
+    (is (= err "")) (is (= up "")) (is (= model "m"))
+        (is (= err2 "")) (is (= up2 ""))))
+
+(deftest ollama-embed-request-errors
+  (let [[u1 m1 e1] (ec/ollama-embed-request "{\"input\":\"a\"}" 1536)
+        [u2 m2 e2] (ec/ollama-embed-request "{\"model\":\"m\",\"input\":3}" 1536)
+        [u3 m3 e3] (ec/ollama-embed-request "{\"model\":\"m\",\"input\":\"a\",\"dimensions\":512}" 1536)
+        [u4 m4 e4] (ec/ollama-embed-request "{\"model\":\"m\",\"input\":\"a\",\"dimensions\":1536}" 1536)]
+    (is (= e1 "model is required")) (is (= e2 "invalid input type"))
+        (is (= e3 "This model does not support specifying dimensions.")) (is (= e4 ""))))
+
+(deftest ollama-legacy-request-uses-the-prompt
+  (let [[up model err] (ec/ollama-legacy-request "{\"model\":\"m\",\"prompt\":\"hi\"}")
+        [up2 model2 err2] (ec/ollama-legacy-request "{\"model\":\"m\",\"prompt\":\"\"}")
+        [up3 model3 err3] (ec/ollama-legacy-request "{\"prompt\":\"hi\"}")]
+    (is (= err "")) (is (= (jstr-of (jget up "input")) "\"hi\""))
+        (is (= err2 "")) (is (= up2 ""))
+        (is (= err3 "model is required"))))
+
+;; ---- Ollama の応答 ----
+
+(def up-resp "{\"model\":\"m\",\"object\":\"list\",\"usage\":{\"prompt_tokens\":7,\"total_tokens\":7},\"data\":[{\"embedding\":[0.25,-0.005860476288944483],\"index\":1,\"object\":\"embedding\"},{\"embedding\":[0.5,1.5],\"index\":0,\"object\":\"embedding\"}]}")
+
+(deftest ollama-embed-response-orders-by-index
+  (let [[out err] (ec/ollama-embed-response up-resp "nomic-embed-text" 12000000)]
+    (is (= err ""))
+        (is (= (dyn->str (jget out "model")) "nomic-embed-text"))
+        (is (= (jstr-of (jget out "embeddings")) "[[0.5,1.5],[0.25,-0.005860476288944483]]"))
+        (is (= (dyn->int (jget out "prompt_eval_count")) 7))
+        (is (= (dyn->int (jget out "total_duration")) 12000000))
+        (is (= (dyn->int (jget out "load_duration")) 0))))
+
+(deftest ollama-legacy-response-takes-the-first
+  (let [[out err] (ec/ollama-legacy-response up-resp)]
+    (is (= err "")) (is (= (jstr-of (jget out "embedding")) "[0.5,1.5]"))))
+
+(deftest ollama-responses-reject-bad-upstream-bodies
+  (let [[o1 e1] (ec/ollama-embed-response "{\"data\":3}" "m" 0)
+        [o2 e2] (ec/ollama-legacy-response "{\"data\":[]}")]
+    (is (not= e1 "")) (is (not= e2 ""))))
+
+;; ---- Ollama のモデル一覧 ----
+
+(deftest ollama-tags-lists-the-model
+  (let [t (ec/ollama-tags "gte-qwen2-1.5b")
+        [d e] (json/parse t)
+        ms (dyn->vec (get (dyn->map d) "models" (nil->dyn)))
+        m0 (dyn->map (nth ms 0))]
+    (is (= e "")) (is (= (count ms) 1))
+        (is (= (dyn->str (get m0 "name" (nil->dyn))) "gte-qwen2-1.5b:latest"))
+        (is (= (dyn->str (get m0 "model" (nil->dyn))) "gte-qwen2-1.5b:latest"))))
+
+;; ---- 誤り ----
+
+(deftest upstream-error-message-is-extracted
+  (is (= (ec/upstream-error-message "{\"error\":{\"code\":400,\"message\":\"request (20001 tokens) exceeds the available context size (8192 tokens), try increasing it\",\"type\":\"exceed_context_size_error\"}}")
+             "request (20001 tokens) exceeds the available context size (8192 tokens), try increasing it"))
+      (is (= (ec/upstream-error-message "{\"error\":\"plain\"}") "plain"))
+      (is (= (ec/upstream-error-message "Bad Gateway") "Bad Gateway")))
+
+(deftest error-bodies-have-each-vendors-shape
+  (is (= (ec/openai-error "bad \"x\"" 400) "{\"error\":{\"message\":\"bad \\\"x\\\"\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"))
+      (is (= (ec/openai-error "down" 502) "{\"error\":{\"message\":\"down\",\"type\":\"server_error\",\"param\":null,\"code\":null}}"))
+      (is (= (ec/azure-error "down" 401) "{\"error\":{\"code\":\"401\",\"message\":\"down\"}}"))
+      (is (= (ec/ollama-error "model is required") "{\"error\":\"model is required\"}")))

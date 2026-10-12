@@ -1,0 +1,230 @@
+;; 埋め込みの API の形の変換 (OpenAI、Azure OpenAI、Ollama ⇔ llama-server の /v1/embeddings)。I/O はしない。
+;; llama-server の /v1/embeddings は OpenAI の形 (base64、配列、トークン列、L2 正規化) をそのまま話すので、
+;; OpenAI と Azure は本文をほぼ通す。Ollama は要求と応答の形を変える。
+(ns embconv
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]))
+
+(def dims-msg "This model does not support specifying dimensions.")
+
+(defn jstr Str [s: Str]
+  (let [[j e] (json/stringify (->dyn s))] j))
+
+(defn json-map Values(Map(Str Dyn) Bool) [body: Str]
+  (let [[d e] (json/parse body)
+        m0: Map(Str Dyn) {}]
+    (if (and (= e "") (dyn-map? d)) (values (dyn->map d) true) (values m0 false))))
+
+(defn str-field Str [m: &Map(Str Dyn) k: Str]
+  (let [v (get m k (nil->dyn))] (if (dyn-str? v) (dyn->str v) "")))
+
+;; dimensions は無いか、モデルの次元 (native) と同じときだけ受ける。gte-Qwen2 は次元を切り詰める前提で訓練されていないため
+(defn dims-ok? Bool [m: &Map(Str Dyn) native: Int]
+  (if (not (contains? m "dimensions")) true
+    (let [v (get! m "dimensions")] (and (dyn-int? v) (= (dyn->int v) native)))))
+
+;; ---- 鍵とパス ----
+
+;; /k/<鍵>/<残り> → [鍵 /<残り>]。前置きが無ければ ["" パス]。base URL しか設定できない Ollama の利用者 (Mule の Vectors コネクタ) 用
+(defn split-key-prefix Values(Str Str) [path: Str]
+  (if (not (str/starts-with? path "/k/")) (values "" path)
+    (let [i (str/index-of-after path "/" 3)]
+      (if (< i 0) (values (subs path 3 (count path)) "/")
+        (values (subs path 3 i) (subs path i (count path)))))))
+
+;; /openai/deployments/<名前>/embeddings → 名前。合わなければ ""
+(defn azure-deployment Str [path: Str]
+  (let [pre "/openai/deployments/" suf "/embeddings"]
+    (if (and (str/starts-with? path pre) (str/ends-with? path suf) (> (count path) (+ (count pre) (count suf))))
+      (let [d (subs path (count pre) (- (count path) (count suf)))]
+        (if (< (str/index-of d "/") 0) d ""))
+      "")))
+
+;; ---- OpenAI と Azure の要求 ----
+
+;; 要求を確かめて上流への本文を返す: [本文 誤り]。model が空でなければ本文の model をそれにする (Azure の deployment)。
+;; 変えるものが無ければ受けた本文をそのまま返す
+(defn openai-request Values(Str Str) [body: Str native: Int model: Str]
+  (let [[m ok] (json-map body)]
+    (cond
+      (not ok) (values "" "We could not parse the JSON body of your request.")
+      (not (contains? m "input")) (values "" "'input' is a required property")
+      (not (dims-ok? m native)) (values "" dims-msg)
+      (= model "") (values body "")
+      :else (let [[out e] (json/stringify (->dyn (assoc m "model" (->dyn model))))]
+              (if (= e "") (values out "") (values "" e))))))
+
+;; ---- 大きな束を分けて送り、応答をつなぐ ----
+;; clay.http のクライアントは応答の本文が 8 MiB を超えると失敗する (1536 次元の float で約 250 件)。
+;; そこで上流には batch 件ずつ送り、応答をつなぐ。
+
+;; input が batch 件より多い配列 (文字列か、トークン列の配列) なら、batch 件ずつの本文に分ける。
+;; 分けないときは受けた本文 1 つ。input 以外の項目 (model、encoding_format など) はどの本文にも入れる
+(defn split-request Values(Vec(Str) Str) [body: Str batch: Int]
+  (let [[m ok] (json-map body)
+        one: Vec(Str) [body]
+        in (get m "input" (nil->dyn))]
+    (if (or (not ok) (not (dyn-vec? in))) (values one "")
+      (let [v: Vec(Dyn) (dyn->vec in) n (count v)]
+        (if (or (<= n batch) (dyn-int? (nth v 0))) (values one "")
+          (loop [acc: Vec(Str) [] i 0]
+            (if (>= i n) (values acc "")
+              (let [part: Vec(Dyn) (subvec v i (min (+ i batch) n))
+                    [s e] (json/stringify (->dyn (assoc m "input" (->dyn part))))]
+                (if (not= e "") (values one e) (recur (conj acc s) (+ i batch)))))))))))
+
+(defn usage-of Int [m: &Map(Str Dyn) k: Str]
+  (let [u (get m "usage" (nil->dyn))]
+    (if (dyn-map? u) (let [t (get (dyn->map u) k (nil->dyn))] (if (dyn-int? t) (dyn->int t) 0)) 0)))
+
+;; split-request で分けて得た上流の応答をつなぐ。data の index を前の応答の件数だけずらし、usage を足す。1 つならそのまま
+(defn merge-responses Values(Str Str) [ups: Vec(Str)]
+  (if (= (count ups) 1) (values (nth ups 0) "")
+    (let [[first-m ok0] (json-map (nth ups 0))]
+      (loop [data: Vec(Dyn) [] i 0 pt 0 tt 0]
+        (if (>= i (count ups))
+          (let [u0: Map(Str Dyn) {}
+                u (assoc (assoc u0 "prompt_tokens" (->dyn pt)) "total_tokens" (->dyn tt))
+                [out e] (json/stringify (->dyn (assoc (assoc first-m "data" (->dyn data)) "usage" (->dyn u))))]
+            (values out e))
+          (let [[m ok] (json-map (nth ups i))
+                d (get m "data" (nil->dyn))]
+            (if (or (not ok) (not (dyn-vec? d))) (values "" "upstream: unexpected response")
+              (let [items: Vec(Dyn) (dyn->vec d)
+                    off (count data)
+                    [moved e] (shift-indexes items off)]
+                (if (not= e "") (values "" e)
+                  (recur (into-vec data moved) (+ i 1) (+ pt (usage-of m "prompt_tokens")) (+ tt (usage-of m "total_tokens"))))))))))))
+
+(defn shift-indexes Values(Vec(Dyn) Str) [items: Vec(Dyn) off: Int]
+  (loop [acc: Vec(Dyn) [] i 0]
+    (if (>= i (count items)) (values acc "")
+      (let [it (nth items i)
+            im: Map(Str Dyn) (if (dyn-map? it) (dyn->map it) {})
+            ix (get im "index" (nil->dyn))]
+        (if (not (dyn-int? ix)) (values acc "upstream: unexpected response")
+          (recur (conj acc (->dyn (assoc im "index" (->dyn (+ off (dyn->int ix)))))) (+ i 1)))))))
+
+(defn into-vec Vec(Dyn) [acc: Vec(Dyn) more: Vec(Dyn)]
+  (loop [a: Vec(Dyn) acc i 0] (if (>= i (count more)) a (recur (conj a (nth more i)) (+ i 1)))))
+
+;; ---- Ollama の要求 ----
+
+(defn all-str? Bool [v: &Vec(Dyn)]
+  (loop [i 0] (if (>= i (count v)) true (if (dyn-str? (nth v i)) (recur (+ i 1)) false))))
+
+(defn up-body Values(Str Str) [model: Str input: Dyn]
+  (let [m0: Map(Str Dyn) {}
+        [out e] (json/stringify (->dyn (assoc (assoc m0 "model" (->dyn model)) "input" input)))]
+    (values out e)))
+
+;; /api/embed: {model, input (文字列か文字列の配列), truncate, dimensions, ...} → [上流の本文 model 誤り]。
+;; 入力が無いか空の配列なら上流の本文は "" (上流に行かずに空の embeddings を返す)
+(defn ollama-embed-request Values(Str Str Str) [body: Str native: Int]
+  (let [[m ok] (json-map body)
+        model (str-field m "model")
+        in (get m "input" (nil->dyn))]
+    (cond
+      (not ok) (values "" "" "invalid request body")
+      (= model "") (values "" "" "model is required")
+      (not (dims-ok? m native)) (values "" model dims-msg)
+      (dyn-nil? in) (values "" model "")
+      (dyn-str? in) (let [v: Vec(Dyn) [in] [out e] (up-body model (->dyn v))] (values out model e))
+      (dyn-vec? in) (let [v: Vec(Dyn) (dyn->vec in)]
+                      (cond (= (count v) 0) (values "" model "")
+                            (not (all-str? v)) (values "" model "invalid input type")
+                            :else (let [[out e] (up-body model in)] (values out model e))))
+      :else (values "" model "invalid input type"))))
+
+;; /api/embeddings (旧式): {model, prompt} → [上流の本文 model 誤り]。prompt が空なら上流の本文は ""
+(defn ollama-legacy-request Values(Str Str Str) [body: Str]
+  (let [[m ok] (json-map body)
+        model (str-field m "model")
+        p (get m "prompt" (nil->dyn))]
+    (cond
+      (not ok) (values "" "" "invalid request body")
+      (= model "") (values "" "" "model is required")
+      (dyn-nil? p) (values "" model "")
+      (not (dyn-str? p)) (values "" model "invalid input type")
+      (= (count (dyn->str p)) 0) (values "" model "")
+      :else (let [[out e] (up-body model p)] (values out model e)))))
+
+;; ---- Ollama の応答 ----
+
+;; 上流の data を index の順に並べた埋め込みの列と、prompt_tokens
+(defn up-embeddings Values(Vec(Dyn) Int Str) [up: Str]
+  (let [[m ok] (json-map up)
+        none: Vec(Dyn) []
+        d (get m "data" (nil->dyn))
+        u (get m "usage" (nil->dyn))
+        pt (if (dyn-map? u) (let [t (get (dyn->map u) "prompt_tokens" (nil->dyn))] (if (dyn-int? t) (dyn->int t) 0)) 0)]
+    (if (or (not ok) (not (dyn-vec? d))) (values none 0 "upstream: unexpected response")
+      (let [items: Vec(Dyn) (dyn->vec d)
+            n (count items)
+            slots: Vec(Dyn) (loop [acc: Vec(Dyn) [] i 0] (if (< i n) (recur (conj acc (nil->dyn)) (+ i 1)) acc))]
+        (loop [acc: Vec(Dyn) slots i 0]
+          (if (>= i n)
+            (if (all-filled? acc) (values acc pt "") (values none 0 "upstream: unexpected response"))
+            (let [it (nth items i)
+                  im: Map(Str Dyn) (if (dyn-map? it) (dyn->map it) {})
+                  ix (get im "index" (nil->dyn))
+                  e (get im "embedding" (nil->dyn))
+                  k (if (dyn-int? ix) (dyn->int ix) -1)]
+              (if (or (< k 0) (>= k n) (not (dyn-vec? e))) (values none 0 "upstream: unexpected response")
+                (recur (assoc acc k e) (+ i 1))))))))))
+
+(defn all-filled? Bool [v: &Vec(Dyn)]
+  (loop [i 0] (if (>= i (count v)) true (if (dyn-nil? (nth v i)) false (recur (+ i 1))))))
+
+;; /api/embed の応答: {model, embeddings, total_duration (ns), load_duration, prompt_eval_count}
+(defn ollama-embed-response Values(Str Str) [up: Str model: Str total-ns: Int]
+  (let [[es pt e] (up-embeddings up)]
+    (if (not= e "") (values "" e)
+      (let [m0: Map(Str Dyn) {}
+            m (-> m0 (assoc "model" (->dyn model)) (assoc "embeddings" (->dyn es))
+                  (assoc "total_duration" (->dyn total-ns)) (assoc "load_duration" (->dyn 0))
+                  (assoc "prompt_eval_count" (->dyn pt)))
+            [out oe] (json/stringify (->dyn m))]
+        (values out oe)))))
+
+;; 入力が無いときの /api/embed の応答
+(defn ollama-empty-response Str [model: Str]
+  (str "{\"model\":" (jstr model) ",\"embeddings\":[],\"total_duration\":0,\"load_duration\":0,\"prompt_eval_count\":0}"))
+
+;; /api/embeddings (旧式) の応答: {embedding}
+(defn ollama-legacy-response Values(Str Str) [up: Str]
+  (let [[es pt e] (up-embeddings up)]
+    (cond (not= e "") (values "" e)
+          (= (count es) 0) (values "" "upstream: no embedding")
+          :else (let [m0: Map(Str Dyn) {}
+                      [out oe] (json/stringify (->dyn (assoc m0 "embedding" (nth es 0))))]
+                  (values out oe)))))
+
+;; /api/tags。Vectors コネクタは接続の確認にこれを呼ぶ
+(defn ollama-tags Str [model: Str]
+  (let [n (jstr (str model ":latest"))]
+    (str "{\"models\":[{\"name\":" n ",\"model\":" n ",\"modified_at\":\"2026-10-12T00:00:00Z\",\"size\":0,\"digest\":\"\","
+         "\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen2\",\"families\":[\"qwen2\"],"
+         "\"parameter_size\":\"1.5B\",\"quantization_level\":\"Q8_0\"}}]}")))
+
+;; ---- 誤り ----
+
+;; llama-server の誤りの本文から文言を取り出す。JSON でなければ本文そのもの
+(defn upstream-error-message Str [up: Str]
+  (let [[m ok] (json-map up)
+        er (get m "error" (nil->dyn))]
+    (cond (not ok) (str/trim up)
+          (dyn-str? er) (dyn->str er)
+          (dyn-map? er) (let [mm (dyn->map er) s (str-field mm "message")] (if (= s "") (str/trim up) s))
+          :else (str/trim up))))
+
+(defn openai-error Str [msg: Str status: Int]
+  (str "{\"error\":{\"message\":" (jstr msg) ",\"type\":" (if (< status 500) "\"invalid_request_error\"" "\"server_error\"")
+       ",\"param\":null,\"code\":null}}"))
+
+(defn azure-error Str [msg: Str status: Int]
+  (str "{\"error\":{\"code\":" (jstr (str status)) ",\"message\":" (jstr msg) "}}"))
+
+(defn ollama-error Str [msg: Str]
+  (str "{\"error\":" (jstr msg) "}"))

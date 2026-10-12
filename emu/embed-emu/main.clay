@@ -1,0 +1,206 @@
+;; embed.{openai,azure,ollama}.emu.theorems.dev — 埋め込みの API の真似。中身は k0 の embed.gte-qwen2.model
+;; (llama-server + gte-Qwen2-1.5B-instruct、1536 次元)。どの形で動くかは FLAVOR で選ぶ (1 つのイメージを 3 つの Deployment で使う)。
+;;
+;;   共通        GET /  このサービスの説明 (認証なし)、GET /health
+;;   openai      POST /v1/embeddings (/embeddings も)、GET /v1/models
+;;   azure       POST /openai/deployments/<名前>/embeddings?api-version=..  (model は deployment の名前になる)
+;;               POST /openai/v1/embeddings
+;;   ollama      POST /api/embed、POST /api/embeddings (旧式。Mule の Vectors コネクタが使う)、GET /api/tags、GET /api/version
+;;
+;; 認証: 鍵は 3 通りのどれでもよい。Authorization: Bearer <鍵>、api-key: <鍵> (Azure の形)、パスの前置き /k/<鍵>/ 。
+;; 前置きは base URL しか設定できない利用者 (Vectors コネクタの Ollama) のため。鍵が URL に入るので、ログに URI は出さない。
+;; 鍵が無ければ全部断る。llama-server へは UPSTREAM_KEY_FILE の鍵で行く。
+;;
+;; llama-server との違いを埋めるのはここだけ (変換は embconv.clay):
+;;   - dimensions はモデルの次元 (DIMS) と同じときだけ受け、他は 400 (gte-Qwen2 は次元の切り詰めを前提に訓練されていない)
+;;   - 誤りの本文を各社の形にする。Ollama は要求と応答の形を変える
+;;   - 上流には BATCH 件ずつ送り、応答をつなぐ (clay.http のクライアントは応答が 8 MiB を超えると失敗するため。1 回で済めば本文はそのまま)
+;;
+;; 環境変数: FLAVOR (openai | azure | ollama、必須)、PORT (既定 8080)、UPSTREAM (既定 http://embed-gte-qwen2-model.ai-model.svc.cluster.local)、
+;;           API_KEY_FILE (既定 /secrets/self/api-key)、UPSTREAM_KEY_FILE (既定 /secrets/upstream/api-key)、
+;;           MODEL (説明と /api/tags に出すモデル名、既定 gte-qwen2-1.5b)、DIMS (既定 1536)、BATCH (既定 128)
+(ns embed-emu
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]
+            [clay.http :as http]
+            [clay.httpmsg :as hm]
+            [embconv :as ec]))
+
+(defrecord Cfg [flavor: Str upstream: Str upstream-key: Str key: Str model: Str dims: Int batch: Int])
+
+(defn env-or Str [name: Str dflt: Str]
+  (let [[v found] (getenv name)] (if (or (not found) (= (count v) 0)) dflt v)))
+
+(defn read-key Str [path: Str]
+  (let [[s e] (read-file path)] (if (not= e "") "" (str/trim s))))
+
+(defn log-line Int [line: Str] (do (eprintln line) 0))
+
+(defn host-name Str [cfg: &Cfg] (str "embed." (:flavor cfg) ".emu.theorems.dev"))
+
+;; ---- 応答 ----
+
+(defn jresp hm/Response [status: Int body: Str]
+  (hm/response status [(hm/->Header "Content-Type" "application/json")] body false))
+
+(defn err-resp hm/Response [cfg: &Cfg status: Int msg: Str]
+  (let [f (:flavor cfg)]
+    (jresp status (cond (= f "azure") (ec/azure-error msg status)
+                        (= f "ollama") (ec/ollama-error msg)
+                        :else (ec/openai-error msg status)))))
+
+(defn unauthorized hm/Response [cfg: &Cfg]
+  (let [f (:flavor cfg)]
+    (err-resp cfg 401 (cond (= f "azure") "Access denied due to invalid subscription key or wrong API endpoint."
+                            (= f "ollama") "unauthorized"
+                            :else "Incorrect API key provided."))))
+
+(defn endpoints Str [cfg: &Cfg]
+  (let [f (:flavor cfg)]
+    (cond (= f "azure") "[\"POST /openai/deployments/{deployment}/embeddings?api-version=...\",\"POST /openai/v1/embeddings\"]"
+          (= f "ollama") "[\"POST /api/embed\",\"POST /api/embeddings\",\"GET /api/tags\",\"GET /api/version\"]"
+          :else "[\"POST /v1/embeddings\",\"GET /v1/models\"]")))
+
+(defn auth-text Str [cfg: &Cfg]
+  (let [f (:flavor cfg)]
+    (cond (= f "azure") "api-key: <key> (or Authorization: Bearer <key>)"
+          (= f "ollama") "Authorization: Bearer <key>, or put the key in the base URL: https://embed.ollama.emu.theorems.dev/k/<key>"
+          :else "Authorization: Bearer <key>")))
+
+(defn describe hm/Response [cfg: &Cfg]
+  (jresp 200 (str "{\"name\":" (ec/jstr (host-name cfg)) ","
+                  "\"what\":" (ec/jstr (str "An emulation of the " (:flavor cfg) " embeddings API for Agent Fabric and Mule apps.")) ","
+                  "\"backend\":\"embed.gte-qwen2.model.theorems.dev (llama-server + gte-Qwen2-1.5B-instruct, local iGPU)\","
+                  "\"model\":" (ec/jstr (:model cfg)) ",\"dimensions\":" (:dims cfg) ","
+                  "\"endpoints\":" (endpoints cfg) ","
+                  "\"auth\":" (ec/jstr (auth-text cfg)) ","
+                  "\"source\":\"agent-stack/emu/embed-emu\"}")))
+
+;; ---- 要求 ----
+
+(defn path-of Str [uri: Str]
+  (let [q (str/index-of uri "?")] (if (< q 0) uri (subs uri 0 q))))
+
+(defn authorized? Bool [cfg: &Cfg req: &hm/Request path-key: Str]
+  (let [k (:key cfg)
+        [a fa] (hm/header-of (:headers req) "authorization")
+        [b fb] (hm/header-of (:headers req) "api-key")]
+    (and (> (count k) 0)
+         (or (and fa (= a (str "Bearer " k))) (and fb (= b k)) (= path-key k)))))
+
+;; ---- llama-server へ ----
+
+(defn upstream-opts http/RequestOpts [cfg: &Cfg method: Str path: Str body: Str]
+  (let [o (http/request-opts (str (:upstream cfg) path))
+        hs [(hm/->Header "Authorization" (str "Bearer " (:upstream-key cfg))) (hm/->Header "Content-Type" "application/json")]]
+    (assoc (assoc (assoc (assoc o :method method) :headers hs) :body body) :timeout-ms 900000)))
+
+(defn call-upstream Values(hm/Resp Str) [cfg: &Cfg method: Str path: Str body: Str]
+  (let [t0 (mono-ms)
+        [r e] (http/request (upstream-opts cfg method path body))
+        z (log-line (str "upstream " method " " path " " (count body) "B -> " (if (= e "") (str (:status r)) e) " " (- (mono-ms) t0) "ms"))]
+    (values r e)))
+
+;; 上流の /v1/embeddings に BATCH 件ずつ送り、応答をつなぐ: [本文 状態 誤り]。
+;; 上流が誤りを返したら、その本文と状態 (誤りは "")。上流に届かないときやつなげないときは誤りの文言
+(defn call-batched Values(Str Int Str) [cfg: &Cfg up-body: Str]
+  (let [[parts se] (ec/split-request up-body (:batch cfg))]
+    (if (not= se "") (values "" 502 se)
+      (loop [acc: Vec(Str) [] i 0]
+        (if (>= i (count parts))
+          (let [[out me] (ec/merge-responses acc)] (values out 200 me))
+          (let [[r e] (call-upstream cfg "POST" "/v1/embeddings" (nth parts i))]
+            (cond (not= e "") (values "" 502 (str "upstream: " e))
+                  (>= (:status r) 400) (values (:body r) (:status r) "")
+                  :else (recur (conj acc (:body r)) (+ i 1)))))))))
+
+;; OpenAI と Azure: 成功なら上流の本文を返し、誤りは各社の形にする
+(defn embeddings-pass hm/Response [cfg: &Cfg up-body: Str]
+  (let [[b st e] (call-batched cfg up-body)]
+    (cond (not= e "") (err-resp cfg 502 e)
+          (>= st 400) (err-resp cfg st (ec/upstream-error-message b))
+          :else (jresp 200 b))))
+
+(defn openai-embeddings hm/Response [cfg: &Cfg body: Str model: Str]
+  (let [[up err] (ec/openai-request body (:dims cfg) model)]
+    (if (not= err "") (err-resp cfg 400 err) (embeddings-pass cfg up))))
+
+;; Ollama: 上流の応答を Ollama の形にする
+(defn ollama-call hm/Response [cfg: &Cfg up-body: Str model: Str legacy: Bool]
+  (let [t0 (mono-ms)
+        [b st e] (call-batched cfg up-body)]
+    (cond (not= e "") (err-resp cfg 502 e)
+          (>= st 400) (err-resp cfg st (ec/upstream-error-message b))
+          :else (let [[out oe] (if legacy (ec/ollama-legacy-response b)
+                                   (ec/ollama-embed-response b model (* (- (mono-ms) t0) 1000000)))]
+                  (if (not= oe "") (err-resp cfg 502 oe) (jresp 200 out))))))
+
+(defn ollama-embed hm/Response [cfg: &Cfg body: Str]
+  (let [[up model err] (ec/ollama-embed-request body (:dims cfg))]
+    (cond (not= err "") (err-resp cfg 400 err)
+          (= up "") (jresp 200 (ec/ollama-empty-response model))
+          :else (ollama-call cfg up model false))))
+
+(defn ollama-legacy hm/Response [cfg: &Cfg body: Str]
+  (let [[up model err] (ec/ollama-legacy-request body)]
+    (cond (not= err "") (err-resp cfg 400 err)
+          (= up "") (jresp 200 "{\"embedding\":[]}")
+          :else (ollama-call cfg up model true))))
+
+;; ---- 振り分け ----
+
+(defn route-openai hm/Response [cfg: &Cfg m: Str p: Str body: Str]
+  (cond
+    (and (= m "GET") (or (= p "/v1/models") (= p "/models")))
+    (let [[r e] (call-upstream cfg "GET" "/v1/models" "")]
+      (if (not= e "") (err-resp cfg 502 (str "upstream: " e)) (jresp (:status r) (:body r))))
+    (and (= m "POST") (or (= p "/v1/embeddings") (= p "/embeddings"))) (openai-embeddings cfg body "")
+    :else (err-resp cfg 404 (str "Unknown request URL: " m " " p))))
+
+(defn route-azure hm/Response [cfg: &Cfg m: Str p: Str body: Str]
+  (let [d (ec/azure-deployment p)]
+    (cond
+      (and (= m "POST") (not= d "")) (openai-embeddings cfg body d)
+      (and (= m "POST") (= p "/openai/v1/embeddings")) (openai-embeddings cfg body "")
+      :else (err-resp cfg 404 "Resource not found"))))
+
+(defn route-ollama hm/Response [cfg: &Cfg m: Str p: Str body: Str]
+  (cond
+    (and (= m "GET") (= p "/api/tags")) (jresp 200 (ec/ollama-tags (:model cfg)))
+    (and (= m "GET") (= p "/api/version")) (jresp 200 "{\"version\":\"0.12.0\"}")
+    (and (= m "POST") (= p "/api/embed")) (ollama-embed cfg body)
+    (and (= m "POST") (= p "/api/embeddings")) (ollama-legacy cfg body)
+    :else (err-resp cfg 404 "404 page not found")))
+
+(defn handle hm/Response [cfg: Cfg req: hm/Request]
+  (let [[pk p] (ec/split-key-prefix (path-of (:uri req)))
+        m (:method req)
+        f (:flavor cfg)]
+    (cond
+      (and (= m "GET") (= p "/")) (describe cfg)
+      (and (= m "GET") (= p "/health")) (jresp 200 "{\"status\":\"ok\"}")
+      (not (authorized? cfg req pk)) (unauthorized cfg)
+      (= f "azure") (route-azure cfg m p (:body req))
+      (= f "ollama") (route-ollama cfg m p (:body req))
+      :else (route-openai cfg m p (:body req)))))
+
+(defn main Int []
+  (let [flavor (env-or "FLAVOR" "")
+        [dims de] (parse-long (env-or "DIMS" "1536"))
+        [batch be] (parse-long (env-or "BATCH" "128"))
+        cfg (->Cfg flavor
+                   (env-or "UPSTREAM" "http://embed-gte-qwen2-model.ai-model.svc.cluster.local")
+                   (read-key (env-or "UPSTREAM_KEY_FILE" "/secrets/upstream/api-key"))
+                   (read-key (env-or "API_KEY_FILE" "/secrets/self/api-key"))
+                   (env-or "MODEL" "gte-qwen2-1.5b")
+                   dims
+                   (if (> batch 0) batch 128))
+        [port pe] (parse-long (env-or "PORT" "8080"))]
+    (if (not (or (= flavor "openai") (= flavor "azure") (= flavor "ollama")))
+      (do (eprintln "embed-emu: FLAVOR must be openai, azure or ollama") 2)
+      (let [o (assoc (assoc (http/default-server-opts) :port port) :max-body 16777216)
+            z (log-line (str "embed-emu (" flavor "): listening on " port ", upstream " (:upstream cfg)
+                             (if (= (count (:key cfg)) 0) " (no API key: every request is refused)" "")))
+            [rc e] (http/run-server (fn hm/Response [req: hm/Request] (handle cfg req)) o)]
+        (if (not= e "") (do (eprintln (str "embed-emu: " e)) 1) rc)))))
