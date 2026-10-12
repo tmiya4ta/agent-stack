@@ -22,7 +22,7 @@
                        :else (str out (chr c)))))))))
 
 (defn resp Map [status: Int ctype: Str body: Str]
-  (assoc (assoc (assoc (map-empty) "status" status) "content-type" ctype) "body" body))
+  (assoc (assoc (assoc {} "status" status) "content-type" ctype) "body" body))
 
 (defn json-resp Map [status: Int body: Str]
   (resp status "application/json; odata.metadata=minimal" body))
@@ -61,9 +61,9 @@
 
 ;; a=1&b=x%20y → {"a" "1" "b" "x y"}。キーは大文字小文字を区別しない（小文字にそろえる）。
 (defn parse-query Map [q: Str]
-  (if (= (count q) 0) (map-empty)
+  (if (= (count q) 0) {}
     (let [parts: Vec(Str) (str/split q "&")]
-      (loop [i 0 m: Map (map-empty)]
+      (loop [i 0 m: Map {}]
         (if (>= i (count parts)) m
           (let [p: Str (nth parts i)
                 eq (str/index-of p "=")
@@ -71,13 +71,12 @@
                 v: Str (if (< eq 0) "" (url-decode (subs p (+ eq 1) (count p)) true))]
             (recur (+ i 1) (if (= (count k) 0) m (assoc m k v)))))))))
 
-(defn qget Str [q: Map k: Str]
-  (if (map-contains? q k) (map-get-str q k) ""))
+(defn qget Str [q: Map k: Str] (mget-str q k))
 
 ;; /indexes('x')/docs('k') → /indexes/x/docs/k。セグメントのリスト（空は除く、%XX は戻す）。
 (defn- odata-key-segment Str [seg: Str]
   (let [p (str/index-of seg "('")]
-    (if (and (> p 0) (str/ends-with? seg "')"))
+    (if (and (> p 0) (>= (count seg) (+ p 4)) (str/ends-with? seg "')"))
       (str (subs seg 0 p) "/" (subs seg (+ p 2) (- (count seg) 2)))
       seg)))
 
@@ -93,17 +92,49 @@
                        (if (>= j (count parts)) a
                          (recur (+ j 1) (conj a (url-decode (nth parts j) false)))))))))))))
 
+;; ---- Map（値は Dyn）----
+;; 無いキーや型の違う値は既定値（"" / 0 / 0.0 / 空 / nil）。clay 0.42 の map-get-* と同じ読み方。
+
+(defn mget Dyn [m: Map k: Str] (get m k (nil->dyn)))
+
+(defn mget-str Str [m: Map k: Str]
+  (let [v (mget m k)] (if (dyn-str? v) (dyn->str v) "")))
+
+(defn mget-int Int [m: Map k: Str]
+  (let [v (mget m k)] (if (dyn-int? v) (dyn->int v) 0)))
+
+(defn mget-float Float [m: Map k: Str]
+  (let [v (mget m k)] (cond (dyn-float? v) (dyn->float v) (dyn-int? v) (int->float (dyn->int v)) :else 0.0)))
+
+(defn mget-map Map [m: Map k: Str]
+  (let [v (mget m k)] (if (dyn-map? v) (dyn->map v) {})))
+
 ;; ---- Dyn ----
 
-;; dyn-get は無いキーで int 0 を返すので、先に有無を見る
+;; 配列なら要素、でなければ空
+(defn dvec Vec(Dyn) [d: Dyn]
+  (if (dyn-vec? d) (dyn->vec d) (let [none: Vec(Dyn) []] none)))
+
+;; オブジェクトならその Map、でなければ空
+(defn dmap Map [d: Dyn] (if (dyn-map? d) (dyn->map d) {}))
+
+;; 配列の長さ（オブジェクトなら欄の数）
+(defn dcount Int [d: Dyn]
+  (cond (dyn-vec? d) (let [v: Vec(Dyn) (dyn->vec d)] (count v))
+        (dyn-map? d) (count (keys (dyn->map d)))
+        :else 0))
+
+(defn dnth Dyn [d: Dyn i: Int]
+  (let [v: Vec(Dyn) (dvec d)] (if (and (>= i 0) (< i (count v))) (nth v i) (nil->dyn))))
+
+;; オブジェクトの欄名（書かれた順）
+(defn dkeys Vec(Str) [d: Dyn] (keys (dmap d)))
+
 (defn has? Bool [d: Dyn k: Str]
-  (if (not (dyn-map? d)) false
-    (loop [i 0]
-      (if (>= i (dyn-count d)) false
-        (if (= (dyn-key d i) k) true (recur (+ i 1)))))))
+  (and (dyn-map? d) (contains? (dyn->map d) k)))
 
 (defn dget Dyn [d: Dyn k: Str]
-  (if (has? d k) (dyn-get d k) (nil->dyn)))
+  (if (has? d k) (get! (dyn->map d) k) (nil->dyn)))
 
 (defn dstr Str [d: Dyn k: Str dflt: Str]
   (let [v (dget d k)] (if (dyn-str? v) (dyn->str v) dflt)))
@@ -116,7 +147,12 @@
 
 (defn num? Bool [d: Dyn] (or (dyn-int? d) (dyn-float? d)))
 
-(defn as-float Float [d: Dyn] (if (dyn-float? d) (dyn->float d) (int->float (dyn->int d))))
+;; 数でなければ 0.0（clay.core の as-float は Values を返すので別の名前）
+(defn to-float Float [d: Dyn]
+  (cond (dyn-float? d) (dyn->float d) (dyn-int? d) (int->float (dyn->int d)) :else 0.0))
+
+;; JSON にする（Dyn は JSON から読んだものか、ここで組んだものなので失敗しない）
+(defn to-json Str [d: Dyn] (let [[s e] (json/stringify d)] s))
 
 ;; "a, b ,c" → ["a" "b" "c"]
 (defn split-list Vec(Str) [s: Str]

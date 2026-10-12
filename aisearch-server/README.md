@@ -15,8 +15,9 @@ MuleSoft の Semantic Cache Config で Vector database provider に「Azure AI S
 - `https://aisearch.theorems.io` で公開（2026-09-22）。サーバ自体は 172.23.0.1（kind bridge）にだけ bind
 - LAN 内からは `aisearch.theorems.io` を直接開けない（ヘアピン NAT が効かない）。`--resolve aisearch.theorems.io:443:192.168.11.6`
   を付けるか、このマシンから `http://172.23.0.1:8897` を叩く
-- clay 0.42.0 以降が要る（`http/header` とスレッド安全な atom は 0.41.0、chunked の要求本文は 0.42.0。
-  ゲートウェイ越しの要求は chunked で届く）。インストール済みの `clay` だけでビルドできる（`build.sh`）
+- clay 0.85.0 で書いている（2026-10-12 に 0.42 から移した。`hm/Request`・`hm/Response` の run-server、
+  型付きの `Atom(Map)`、`dyn->map` してから読む Dyn など、0.43〜0.85 で変わった書き方に合わせた）。
+  インストール済みの `clay` だけでビルドできる（`build.sh`）
 
 ## 使い方
 
@@ -98,7 +99,12 @@ journalctl --user -u aisearch-server -f     # 1 要求 1 行。本文は要約�
 `AIS_HOST`（既定 172.23.0.1）`AIS_PORT`（既定 8897）`AIS_SERVICE`（エラー文に出るサービス名、既定 aisearch）
 `AIS_DATA`（既定 ~/.local/share/aisearch-server）。
 
-- 認証は `api-key` ヘッダ（無い・違うときは 403）。`GET /health` だけは認証なし
+- 環境変数 `AIS_API_KEY_FILE` に鍵を 1 つ書いたファイルを指定すると、読めればその中身（前後の空白は除く）を
+  許可する鍵に足す（`AIS_API_KEYS` と併用可。ファイルだけでもよい）。読めない・空のときは起動時に注意を出して足さない
+  （`AIS_API_KEYS` も空なら認証しない）
+- 認証は `api-key` ヘッダか、クエリの `?api-key=<鍵>`（Azure のクライアントはどちらも使う。無い・違うときは 403）。
+  `GET /health` だけは認証なし。クエリの鍵は要求ログにも永続化のログにも書かない（`api-key=***` にする）
+- SIGTERM / SIGINT で受付をやめ、処理中の要求を待って（最大 5 秒）終わる
 - 永続化: 状態を変えた要求（インデックスの作成・更新・削除、docs/index）を 1 件 1 ファイルで残し、
   起動時に連番の順に流し直す。連番は swap! の中で決めるので、並行に書いても再生の順は確定した順になる。
   ログは消さないので増え続ける（全部消せば空から始まる: `systemctl --user stop aisearch-server && rm ~/.local/share/aisearch-server/log/*.json`）
@@ -119,9 +125,11 @@ smoke_test.py     HTTP のスモークテスト（標準ライブラリのみ）
 build.sh / install.sh / aisearch-server.service
 ```
 
-clay 側の制約でこう書いているところ（clay エージェントに報告済み。直ったら素直な形に戻す）:
+clay 0.85 での書き方の注意:
 
-- 順位リストはレコードでなく「Vec(Str) + Map」を多値で受け渡す（レコードの欄に Vec(Float) を置けない、
-  Values にも Vec にもレコードを入れられない）
-- swap! に渡すクロージャの中身は名前付きの関数に出す（クロージャの中で多値の分割代入ができない）
-- ファイルへの追記が無いので、永続化のログは 1 件 1 ファイル
+- 状態や応答は `Map`（値は Dyn）のまま持つ。読むのは web.clay の `mget-str` などで、無いキー・型の違う値は
+  0.42 の `map-get-*` と同じく既定値になる（0.85 の `dyn->str` などは型が違うとプログラムを止める）
+- 順位リストは「Vec(Str) + Map」を多値で受け渡し、RRF の畳み込みはレコード（`Fold`）
+- 変える要求の engine/handle は swap! の中で回る。0.85 の swap! は f が失敗すると atom が空のまま残り、
+  次の要求でサーバごと止まるので、engine は壊れた入力でも失敗しない（範囲外の subs・nth をしない）ように書く
+- 永続化のログは 1 件 1 ファイル（0.42 にはファイルへの追記が無かった名残。今は append-file があるが形式は変えていない）

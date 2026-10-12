@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # aisearch-server をビルドする: テスト（test/*.clay）を回してから build/aisearch-server を作る。
 #
-# - clay 0.42.0 以降（http/header・スレッド安全な atom は 0.41.0、run-server アプリの `clay build` は 0.41.1、
-#   chunked の要求本文・threaded バックエンドの自動選択・max-body が効かない不具合の修正は 0.42.0）。
+# - clay 0.85.0（2026-10-12 に 0.42 から移した。0.42 の書き方ではもうビルドできない）。
 # - `-I .` はモジュール ais/*.clay を解決する起点（無いと入口と同じ階層の ais/ais/.. を探す）。
 set -euo pipefail
 cd "$(dirname "$0")"

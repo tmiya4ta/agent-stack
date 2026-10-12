@@ -6,15 +6,15 @@
             [ais.web :as w]
             [ais.engine :as en]))
 
-(defvar ^Int g-fail 0)
+(defvar g-fail: Int 0)
 
 (defn fail Int [msg: Str] (do (println (str "FAIL " msg)) (set! g-fail (+ g-fail 1)) 1))
 
-(defn body-of Dyn [resp: Map] (let [[d e] (json/parse (map-get-str resp "body"))] d))
+(defn body-of Dyn [resp: Map] (let [[d e] (json/parse (w/mget-str resp "body"))] d))
 
 (defn expect-status Int [label: Str resp: Map want: Int]
-  (if (= (map-get-int resp "status") want) 0
-    (fail (str label ": status " (map-get-int resp "status") " (want " want ") body=" (map-get-str resp "body")))))
+  (if (= (w/mget-int resp "status") want) 0
+    (fail (str label ": status " (w/mget-int resp "status") " (want " want ") body=" (w/mget-str resp "body")))))
 
 (def index-def "{\"name\":\"semantic-cache\",\"fields\":[{\"name\":\"id\",\"type\":\"Edm.String\",\"key\":true,\"filterable\":true},{\"name\":\"prompt\",\"type\":\"Edm.String\",\"searchable\":true},{\"name\":\"api\",\"type\":\"Edm.String\",\"filterable\":true},{\"name\":\"hidden\",\"type\":\"Edm.String\",\"retrievable\":false},{\"name\":\"vec\",\"type\":\"Collection(Edm.Single)\",\"searchable\":true,\"dimensions\":3,\"vectorSearchProfile\":\"p1\"}],\"vectorSearch\":{\"algorithms\":[{\"name\":\"a1\",\"kind\":\"hnsw\",\"hnswParameters\":{\"metric\":\"cosine\"}}],\"profiles\":[{\"name\":\"p1\",\"algorithm\":\"a1\"}]}}")
 
@@ -37,7 +37,7 @@
         _ (expect-status "upload" r2 200)
         _ (if (= c2 1) 0 (fail "upload should change state"))
         _ (let [v (w/dget (body-of r2) "value")]
-            (if (and (= (dyn-count v) 3) (= (w/dint (dyn-nth v 0) "statusCode" 0) 201)) 0 (fail (str "upload result " (map-get-str r2 "body")))))
+            (if (and (= (w/dcount v) 3) (= (w/dint (w/dnth v 0) "statusCode" 0) 201)) 0 (fail (str "upload result " (w/mget-str r2 "body")))))
         [st2b r2b c2b] (en/handle st2 "POST" "/indexes/semantic-cache/docs/index" "{\"value\":[{\"id\":\"d9\",\"vec\":[1.0,2.0]}]}")
         _ (expect-status "wrong dims" r2b 400)
         [st2c r2c c2c] (en/handle st2 "POST" "/indexes/semantic-cache/docs/index" "{\"value\":[{\"id\":\"d9\",\"nosuch\":1}]}")
@@ -46,7 +46,7 @@
         _ (expect-status "partial failure" r2d 207)
         ;; 件数と 1 件取得
         [s3 r3 c3] (en/handle st2 "GET" "/indexes/semantic-cache/docs/$count?api-version=2024-07-01" "")
-        _ (if (= (map-get-str r3 "body") "3") 0 (fail (str "$count=" (map-get-str r3 "body"))))
+        _ (if (= (w/mget-str r3 "body") "3") 0 (fail (str "$count=" (w/mget-str r3 "body"))))
         [s4 r4 c4] (en/handle st2 "GET" "/indexes/semantic-cache/docs('d1')?api-version=2024-07-01" "")
         _ (expect-status "get doc" r4 200)
         _ (if (w/has? (body-of r4) "hidden") (fail "non-retrievable field returned") 0)
@@ -56,35 +56,35 @@
         _ (expect-status "vector search" r5 200)
         b5 (body-of r5)
         v5 (w/dget b5 "value")
-        _ (if (= (dyn-count v5) 2) 0 (fail (str "k=2 returned " (dyn-count v5) ": " (map-get-str r5 "body"))))
-        _ (if (= (w/dstr (dyn-nth v5 0) "id" "") "d1") 0 (fail "top hit should be d1"))
-        _ (if (= (w/dstr (dyn-nth v5 1) "id" "") "d3") 0 (fail "second hit should be d3"))
-        s1 (w/as-float (w/dget (dyn-nth v5 0) "@search.score"))
-        s2 (w/as-float (w/dget (dyn-nth v5 1) "@search.score"))
+        _ (if (= (w/dcount v5) 2) 0 (fail (str "k=2 returned " (w/dcount v5) ": " (w/mget-str r5 "body"))))
+        _ (if (= (w/dstr (w/dnth v5 0) "id" "") "d1") 0 (fail "top hit should be d1"))
+        _ (if (= (w/dstr (w/dnth v5 1) "id" "") "d3") 0 (fail "second hit should be d3"))
+        s1 (w/to-float (w/dget (w/dnth v5 0) "@search.score"))
+        s2 (w/to-float (w/dget (w/dnth v5 1) "@search.score"))
         _ (if (and (> s1 0.9999) (< s1 1.0001)) 0 (fail (str "score1=" s1)))
         _ (if (and (> s2 0.71428) (< s2 0.71429)) 0 (fail (str "score2=" s2 " (want 1/1.4)")))
-        _ (if (w/has? (dyn-nth v5 0) "vec") (fail "select should drop vec") 0)
+        _ (if (w/has? (w/dnth v5 0) "vec") (fail "select should drop vec") 0)
         _ (if (= (w/dint b5 "@odata.count" -1) 2) 0 (fail "@odata.count"))
         ;; フィルタ付き
         [s6 r6 c6] (en/handle st2 "POST" "/indexes/semantic-cache/docs/search"
                               "{\"filter\":\"api eq 'weather'\",\"vectorQueries\":[{\"kind\":\"vector\",\"vector\":[1.0,0.0,0.0],\"fields\":\"vec\",\"k\":5}]}")
         v6 (w/dget (body-of r6) "value")
-        _ (if (and (= (dyn-count v6) 1) (= (w/dstr (dyn-nth v6 0) "id" "") "d3")) 0 (fail (str "filtered: " (map-get-str r6 "body"))))
+        _ (if (and (= (w/dcount v6) 1) (= (w/dstr (w/dnth v6 0) "id" "") "d3")) 0 (fail (str "filtered: " (w/mget-str r6 "body"))))
         ;; しきい値（cos >= 0.7 → d1 だけ）
         [s7 r7 c7] (en/handle st2 "POST" "/indexes/semantic-cache/docs/search"
                               "{\"vectorQueries\":[{\"kind\":\"vector\",\"vector\":[1.0,0.0,0.0],\"fields\":\"vec\",\"k\":5,\"threshold\":{\"kind\":\"vectorSimilarity\",\"value\":0.7}}]}")
-        _ (if (= (dyn-count (w/dget (body-of r7) "value")) 1) 0 (fail (str "threshold: " (map-get-str r7 "body"))))
+        _ (if (= (w/dcount (w/dget (body-of r7) "value")) 1) 0 (fail (str "threshold: " (w/mget-str r7 "body"))))
         ;; 文字列検索（GET）
         [s8 r8 c8] (en/handle st2 "GET" "/indexes/semantic-cache/docs?api-version=2024-07-01&search=%E8%BF%94%E5%93%81&$count=true" "")
         v8 (w/dget (body-of r8) "value")
-        _ (if (and (= (dyn-count v8) 1) (= (w/dstr (dyn-nth v8 0) "id" "") "d2")) 0 (fail (str "text search: " (map-get-str r8 "body"))))
+        _ (if (and (= (w/dcount v8) 1) (= (w/dstr (w/dnth v8 0) "id" "") "d2")) 0 (fail (str "text search: " (w/mget-str r8 "body"))))
         ;; 不正なフィルタ
         [s9 r9 c9] (en/handle st2 "POST" "/indexes/semantic-cache/docs/search" "{\"filter\":\"api eq\"}")
         _ (expect-status "bad filter" r9 400)
         ;; 削除
         [s10 r10 c10] (en/handle st2 "POST" "/indexes/semantic-cache/docs/index" "{\"value\":[{\"@search.action\":\"delete\",\"id\":\"d1\"}]}")
         [s11 r11 c11] (en/handle s10 "GET" "/indexes/semantic-cache/docs/$count" "")
-        _ (if (= (map-get-str r11 "body") "2") 0 (fail "count after delete"))
+        _ (if (= (w/mget-str r11 "body") "2") 0 (fail "count after delete"))
         [s12 r12 c12] (en/handle s10 "GET" "/indexes/semantic-cache/stats" "")
         _ (expect-status "stats" r12 200)
         [s13 r13 c13] (en/handle s10 "GET" "/servicestats" "")
@@ -92,6 +92,14 @@
         [s14 r14 c14] (en/handle s10 "DELETE" "/indexes/semantic-cache" "")
         _ (expect-status "delete index" r14 204)
         [s15 r15 c15] (en/handle s14 "GET" "/indexes" "")
-        _ (if (= (dyn-count (w/dget (body-of r15) "value")) 0) 0 (fail "index list after delete"))]
+        _ (if (= (w/dcount (w/dget (body-of r15) "value")) 0) 0 (fail "index list after delete"))
+        ;; 壊れた入力でも止まらない（変える要求は swap! の中で回るので、失敗は許されない）
+        [s16 r16 c16] (en/handle st2 "DELETE" "/indexes/a(')" "")
+        _ (expect-status "short odata key segment" r16 404)
+        [s17 r17 c17] (en/handle st2 "GET" "/indexes/semantic-cache/docs?$skip=-1&$top=x" "")
+        _ (expect-status "negative skip" r17 200)
+        _ (if (= (w/dcount (w/dget (body-of r17) "value")) 3) 0 (fail (str "negative skip / bad top: " (w/mget-str r17 "body"))))
+        [s18 r18 c18] (en/handle st2 "POST" "/indexes/semantic-cache/docs/search" "{\"skip\":-2,\"filter\":\"api eq 99999999999999999999\"}")
+        _ (expect-status "overflowing literal" r18 200)]
     (do (println (if (= g-fail 0) "engine: all passed" (str "engine: " g-fail " failure(s)")))
         g-fail)))

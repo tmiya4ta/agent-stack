@@ -2,9 +2,10 @@
 (ns test.odata-test
   (:require [clay.core]
             [clay.json :as json]
+            [ais.web :as w]
             [ais.odata :as od]))
 
-(defvar ^Int g-fail 0)
+(defvar g-fail: Int 0)
 
 (defn check Int [label: Str got: Bool want: Bool]
   (if (= got want) 0
@@ -18,7 +19,7 @@
 (defn t Int [expr: Str want: Bool]
   (let [n: Map (od/parse expr)]
     (if (od/err? n)
-      (do (println (str "FAIL " expr ": parse error " (map-get-str n "msg"))) (set! g-fail (+ g-fail 1)) 1)
+      (do (println (str "FAIL " expr ": parse error " (w/mget-str n "msg"))) (set! g-fail (+ g-fail 1)) 1)
       (check expr (od/matches? n (doc)) want))))
 
 (defn bad Int [expr: Str]

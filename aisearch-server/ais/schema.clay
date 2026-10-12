@@ -38,8 +38,8 @@
 (defn- find-named Dyn [arr: Dyn name: Str]
   (if (not (dyn-vec? arr)) (nil->dyn)
     (loop [i 0]
-      (if (>= i (dyn-count arr)) (nil->dyn)
-        (let [x (dyn-nth arr i)]
+      (if (>= i (w/dcount arr)) (nil->dyn)
+        (let [x (w/dnth arr i)]
           (if (= (w/dstr x "name" "") name) x (recur (+ i 1))))))))
 
 (defn- algorithm-metric Str [alg: Dyn]
@@ -75,19 +75,19 @@
 ;; fields 配列を読んで欄の Map に足す。Values(欄の Map, キー欄の名前, エラー文)
 (defn- read-fields Values(Map Str Str) [vs: Dyn arr: Dyn prefix: Str acc0: Map key0: Str]
   (loop [i 0 acc: Map acc0 key: Str key0]
-    (if (>= i (dyn-count arr)) (values acc key "")
-      (let [f (dyn-nth arr i)
+    (if (>= i (w/dcount arr)) (values acc key "")
+      (let [f (w/dnth arr i)
             fname0: Str (w/dstr f "name" "")
             fname: Str (str prefix fname0)
             ftype: Str (w/dstr f "type" "")]
         (cond
           (= (count fname0) 0) (values acc key "Every field must have a name.")
           (= (count ftype) 0) (values acc key (str "The field '" fname "' must have a type."))
-          (map-contains? acc fname) (values acc key (str "The field '" fname "' is defined more than once."))
+          (contains? acc fname) (values acc key (str "The field '" fname "' is defined more than once."))
           (or (= ftype "Edm.ComplexType") (= ftype "Collection(Edm.ComplexType)"))
           (let [sub (w/dget f "fields")]
             (if (not (dyn-vec? sub)) (values acc key (str "The complex field '" fname "' must have sub-fields."))
-              (let [info: Map (assoc (assoc (assoc (assoc (map-empty) "type" ftype) "retrievable" 1) "searchable" 0) "vector" 0)
+              (let [info: Map (assoc (assoc (assoc (assoc {} "type" ftype) "retrievable" 1) "searchable" 0) "vector" 0)
                     [acc2 key2 e] (read-fields vs sub (str fname "/") (assoc acc fname info) key)]
                 (if (> (count e) 0) (values acc2 key2 e) (recur (+ i 1) acc2 key2)))))
           :else
@@ -95,7 +95,7 @@
                 retr (and (w/dbool f "retrievable" true) (not (w/dbool f "hidden" false)) (w/dbool f "stored" true))
                 vec? (vector-type? ftype)
                 srch (w/dbool f "searchable" (or vec? (text-type? ftype)))
-                base: Map (assoc (assoc (assoc (assoc (map-empty) "type" ftype) "retrievable" (flag retr))
+                base: Map (assoc (assoc (assoc (assoc {} "type" ftype) "retrievable" (flag retr))
                                         "searchable" (flag srch)) "vector" (flag vec?))]
             (cond
               (and is-key (> (count key) 0)) (values acc key "The index must contain exactly one key field.")
@@ -117,24 +117,24 @@
         vs (w/dget d "vectorSearch")]
     (cond
       (not (valid-index-name? name))
-      (values (map-empty) (str invalid-prefix "Index name must only contain lowercase letters, digits or dashes, cannot start or end with dashes and is limited to 128 characters."))
-      (or (not (dyn-vec? fields)) (= (dyn-count fields) 0))
-      (values (map-empty) (str invalid-prefix "The index must contain at least one field."))
+      (values {} (str invalid-prefix "Index name must only contain lowercase letters, digits or dashes, cannot start or end with dashes and is limited to 128 characters."))
+      (or (not (dyn-vec? fields)) (= (w/dcount fields) 0))
+      (values {} (str invalid-prefix "The index must contain at least one field."))
       :else
-      (let [[fm key e] (read-fields vs fields "" (map-empty) "")]
+      (let [[fm key e] (read-fields vs fields "" {} "")]
         (cond
-          (> (count e) 0) (values (map-empty) (str invalid-prefix e))
-          (= (count key) 0) (values (map-empty) (str invalid-prefix "The index must contain exactly one key field."))
-          :else (values (assoc (assoc (assoc (assoc (map-empty) "name" name) "def" d) "key" key) "fields" fm) ""))))))
+          (> (count e) 0) (values {} (str invalid-prefix e))
+          (= (count key) 0) (values {} (str invalid-prefix "The index must contain exactly one key field."))
+          :else (values (assoc (assoc (assoc (assoc {} "name" name) "def" d) "key" key) "fields" fm) ""))))))
 
-(defn field-names Vec(Str) [ix: Map] (map-keys-str (map-get-map ix "fields")))
+(defn field-names Vec(Str) [ix: Map] (keys (w/mget-map ix "fields")))
 
-(defn field Map [ix: Map fname: Str] (map-get-map (map-get-map ix "fields") fname))
+(defn field Map [ix: Map fname: Str] (w/mget-map (w/mget-map ix "fields") fname))
 
-(defn has-field? Bool [ix: Map fname: Str] (map-contains? (map-get-map ix "fields") fname))
+(defn has-field? Bool [ix: Map fname: Str] (contains? (w/mget-map ix "fields") fname))
 
 (defn vector-field? Bool [ix: Map fname: Str]
-  (and (has-field? ix fname) (= (map-get-int (field ix fname) "vector") 1)))
+  (and (has-field? ix fname) (= (w/mget-int (field ix fname) "vector") 1)))
 
 (defn vector-fields Vec(Str) [ix: Map]
   (let [names: Vec(Str) (field-names ix)]
@@ -143,4 +143,4 @@
         (recur (+ i 1) (if (vector-field? ix (nth names i)) (conj acc (nth names i)) acc))))))
 
 (defn retrievable? Bool [ix: Map fname: Str]
-  (and (has-field? ix fname) (= (map-get-int (field ix fname) "retrievable") 1)))
+  (and (has-field? ix fname) (= (w/mget-int (field ix fname) "retrievable") 1)))

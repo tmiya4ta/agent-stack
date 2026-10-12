@@ -1,40 +1,71 @@
 ;; ais/server.clay — aisearch-server の HTTP サーバ（clay.http の run-server、スレッド並行）。
 ;;
 ;; 状態（インデックスと文書）は 1 つの atom に置く。読むだけの要求（GET と検索）は deref した
-;; その時点の状態で答え、変える要求は swap! の中で engine/handle を回す（競合すると f は
-;; やり直されるので、f は純粋に保ち、応答は最後に成功した回のものを out に残す）。
+;; その時点の状態で答え、変える要求は swap! の中で engine/handle を回す（clay 0.85 の swap! は
+;; 値を取り出して f を 1 回だけ回し、その間ほかの deref・swap! は待つ。f は失敗してはいけない。
+;; 応答・変わったか・連番は out に残す）。
 ;;
 ;; 永続化: 状態を変えた要求を 1 件 1 ファイル（<AIS_DATA>/log/<連番>.json）に書き、起動時に
 ;; 連番の順に engine/handle へ流し直す。連番は swap! の中で状態に持たせるので、書き込みの順が
 ;; 前後しても再生の順は確定した順になる。
 ;;
 ;; 環境変数:
-;;   AIS_HOST       bind するアドレス（既定 172.23.0.1 = kind bridge。theorems-edge からだけ届く）
-;;   AIS_PORT       既定 8897
-;;   AIS_API_KEYS   許可する api-key（カンマ区切り）。空なら認証しない
-;;   AIS_SERVICE    サービス名（エラー文に出る。既定 aisearch）
-;;   AIS_DATA       データの置き場所（既定 ~/.local/share/aisearch-server）
+;;   AIS_HOST          bind するアドレス（既定 172.23.0.1 = kind bridge。theorems-edge からだけ届く）
+;;   AIS_PORT          既定 8897
+;;   AIS_API_KEYS      許可する api-key（カンマ区切り）。AIS_API_KEY_FILE とも空なら認証しない
+;;   AIS_API_KEY_FILE  許可する api-key を 1 つ書いたファイル（前後の空白は除く）。AIS_API_KEYS に足す。
+;;                     指定したのに読めない・空なら起動しない
+;;   AIS_SERVICE       サービス名（エラー文に出る。既定 aisearch）
+;;   AIS_DATA          データの置き場所（既定 ~/.local/share/aisearch-server）
+;;
+;; api-key は api-key ヘッダか、クエリの ?api-key=<鍵>（Azure のクライアントはどちらも使う）。
+;; クエリの鍵は、標準エラーのログにもログファイルにも書かない（api-key=*** にする）。
+;; SIGTERM / SIGINT で受付をやめ、処理中の要求を待って（最大 5 秒）終わる。
 (ns ais.server
   (:require [clay.core]
             [clay.string :as str]
             [clay.json :as json]
             [clay.http :as http]
+            [clay.httpmsg :as hm]
             [clay.io :as io]
+            [clay.sys :as sys]
             [ais.web :as w]
             [ais.engine :as en]))
 
+;; シグナルを待つ future を本当のスレッドで回す（無いと future は呼んだスレッドで走り、run-server に届かない）
+(c-flags "-DCLAY_PARALLEL")
+
 (defn env-or Str [name: Str dflt: Str]
-  (let [v: Str (getenv name)] (if (= (count v) 0) dflt v)))
+  (let [[v found] (getenv name)] (if (or (not found) (= (count v) 0)) dflt v)))
 
 (defn env-int Int [name: Str dflt: Int]
-  (let [v: Str (getenv name)] (if (= (count v) 0) dflt (parse-long v))))
+  (let [v: Str (env-or name "")]
+    (if (= (count v) 0) dflt
+      (let [[n e] (parse-long (str/trim v))] (if (= e "") n dflt)))))
 
-(defn data-dir Str [] (env-or "AIS_DATA" (str (getenv "HOME") "/.local/share/aisearch-server")))
+(defn data-dir Str [] (env-or "AIS_DATA" (str (env-or "HOME" "") "/.local/share/aisearch-server")))
 
 (defn log-dir Str [] (str (data-dir) "/log"))
 
 ;; 状態は engine の Map に "mseq"（変更の連番）を足したもの
-(def ^Atom store (atom (map->dyn (assoc (en/new-state (env-or "AIS_SERVICE" "aisearch")) "mseq" 0))))
+(def store: Atom(Map) (atom (assoc (en/new-state (env-or "AIS_SERVICE" "aisearch")) "mseq" 0)))
+
+;; ---- URI の鍵を隠す ----
+
+;; クエリの api-key=<鍵> を api-key=*** にする（名前は %XX を戻し、大文字小文字を区別しない）。
+;; 鍵が無ければ uri をそのまま返す。
+(defn redact-uri Str [uri: Str]
+  (let [q (str/index-of uri "?")]
+    (if (< q 0) uri
+      (let [parts: Vec(Str) (str/split (subs uri (+ q 1) (count uri)) "&")]
+        (loop [i 0 out: Str (subs uri 0 (+ q 1)) hit false]
+          (if (>= i (count parts)) (if hit out uri)
+            (let [p: Str (nth parts i)
+                  eq (str/index-of p "=")
+                  name: Str (if (< eq 0) p (subs p 0 eq))
+                  key? (= (lower-case (w/url-decode name true)) "api-key")
+                  p2: Str (if key? (str name "=***") p)]
+              (recur (+ i 1) (str out (if (> i 0) "&" "") p2) (or hit key?)))))))))
 
 ;; ---- 永続化 ----
 
@@ -42,30 +73,33 @@
   (let [s: Str (str n)] (str (subs "000000000000" 0 (- 12 (count s))) s)))
 
 (defn- write-log Str [seq: Int method: Str uri: Str body: Str]
-  (io/spit (str (log-dir) "/" (pad12 seq) ".json")
-           (str "{\"seq\":" seq ",\"m\":" (w/jstr method) ",\"u\":" (w/jstr uri) ",\"b\":" (w/jstr body) "}")))
+  (let [file: Str (str (log-dir) "/" (pad12 seq) ".json")
+        e (write-file file (str "{\"seq\":" seq ",\"m\":" (w/jstr method) ",\"u\":" (w/jstr uri) ",\"b\":" (w/jstr body) "}"))]
+    (do (when (> (count e) 0) (eprintln (str "aisearch-server: cannot write log " file ": " e)))
+        e)))
 
 ;; ログの連番（ファイル名から）を集める。番号 → 1 の Map と最大値
 (defn- log-seqs Values(Map Int) []
   (let [[names e] (io/list-dir (log-dir))]
-    (loop [i 0 m: Map (map-empty) mx 0]
+    (loop [i 0 m: Map {} mx 0]
       (if (>= i (count names)) (values m mx)
         (let [n: Str (nth names i)]
           (if (str/ends-with? n ".json")
-            (let [k (parse-long (subs n 0 (- (count n) 5)))]
-              (recur (+ i 1) (assoc m (str k) 1) (if (> k mx) k mx)))
+            (let [[k ke] (parse-long (subs n 0 (- (count n) 5)))]
+              (if (or (> (count ke) 0) (<= k 0)) (recur (+ i 1) m mx)
+                (recur (+ i 1) (assoc m (str k) 1) (if (> k mx) k mx))))
             (recur (+ i 1) m mx)))))))
 
 ;; 起動時の再生。流し直した件数を返す
 (defn replay Int []
   (let [[seqs mx] (log-seqs)]
-    (loop [i 1 st: Map (dyn->map (deref store)) n 0]
+    (loop [i 1 st: Map (deref store) n 0]
       (cond
-        (> i mx) (do (reset! store (map->dyn st)) n)
-        (not (map-contains? seqs (str i))) (recur (+ i 1) st n)
+        (> i mx) (do (reset! store st) n)
+        (not (contains? seqs (str i))) (recur (+ i 1) st n)
         :else
         (let [file: Str (str (log-dir) "/" (pad12 i) ".json")
-              [text e] (io/slurp file)
+              [text e] (read-file file)
               [d pe] (json/parse text)]
           (if (or (> (count e) 0) (> (count pe) 0) (not (dyn-map? d)))
             (do (eprintln (str "aisearch-server: skip unreadable log " file)) (recur (+ i 1) st n))
@@ -74,27 +108,52 @@
 
 ;; ---- 認証 ----
 
-(defn- key-listed? Bool [k: Str keys: Str]
-  (let [parts: Vec(Str) (str/split keys ",")]
-    (loop [i 0]
-      (if (>= i (count parts)) false
-        (if (= (str/trim (nth parts i)) k) true (recur (+ i 1)))))))
+;; on: 認証するか（AIS_API_KEYS が空でないか、AIS_API_KEY_FILE の鍵を足したとき）。keys: 許可する鍵
+(defrecord Auth [on: Bool keys: Vec(Str)])
 
-(defn- auth-ok? Bool [req: Map]
-  (let [keys: Str (getenv "AIS_API_KEYS")]
-    (or (= (count keys) 0)
-        (let [k: Str (http/header req "api-key")]
-          (and (> (count k) 0) (key-listed? k keys))))))
+(defn- split-keys Vec(Str) [s: Str] (w/split-list s))
+
+;; AIS_API_KEY_FILE の鍵。Values(鍵 or "", 起動時に出す注意 or "")。鍵そのものは注意に入れない
+(defn- key-file Values(Str Str) []
+  (let [path: Str (env-or "AIS_API_KEY_FILE" "")]
+    (if (= (count path) 0) (values "" "")
+      (let [[text e] (read-file path)]
+        (cond
+          (> (count e) 0) (values "" (str "AIS_API_KEY_FILE is not readable (" e "); its key is not added"))
+          (= (count (str/trim text)) 0) (values "" (str "AIS_API_KEY_FILE " path " is empty; no key is added"))
+          :else (values (str/trim text) ""))))))
+
+;; Values(認証, 起動時の注意, 起動の行に出す認証の説明)
+(defn- load-auth Values(Auth Str Str) []
+  (let [env: Str (env-or "AIS_API_KEYS" "")
+        ks: Vec(Str) (split-keys env)
+        [fk note] (key-file)]
+    (cond
+      (> (count fk) 0)
+      (values (->Auth true (conj ks fk)) note (if (> (count env) 0) "auth: AIS_API_KEYS + AIS_API_KEY_FILE" "auth: AIS_API_KEY_FILE"))
+      (> (count env) 0) (values (->Auth true ks) note "auth: AIS_API_KEYS")
+      :else (values (->Auth false ks) note "no auth"))))
+
+(defn- key-listed? Bool [k: Str ks: Vec(Str)]
+  (and (> (count k) 0) (w/vec-has? ks k)))
+
+;; 要求の鍵（ヘッダかクエリ）が許可されているか。Values(通すか, 鍵が付いていたか)
+(defn- auth-check Values(Bool Bool) [auth: Auth req: hm/Request]
+  (let [[hk hfound] (hm/header-of (:headers req) "api-key")
+        qk: Str (w/qget (w/parse-query (w/query-of (:uri req))) "api-key")
+        given (or (> (count hk) 0) (> (count qk) 0))]
+    (values (or (not (:on auth)) (key-listed? hk (:keys auth)) (key-listed? qk (:keys auth))) given)))
 
 ;; ---- 要求の要約（ログ用。ベクトルは長さだけ）----
 
 (defn- keys-of Str [d: Dyn]
   (if (not (dyn-map? d)) ""
-    (loop [i 0 acc: Vec(Str) []]
-      (if (>= i (dyn-count d)) (str/join "," acc)
-        (let [v (dyn-val d i)
-              k: Str (dyn-key d i)]
-          (recur (+ i 1) (conj acc (if (dyn-vec? v) (str k "[" (dyn-count v) "]") k))))))))
+    (let [ks: Vec(Str) (w/dkeys d)]
+      (loop [i 0 acc: Vec(Str) []]
+        (if (>= i (count ks)) (str/join "," acc)
+          (let [k: Str (nth ks i)
+                v (w/dget d k)]
+            (recur (+ i 1) (conj acc (if (dyn-vec? v) (str k "[" (w/dcount v) "]") k)))))))))
 
 (defn- describe Str [method: Str body: Str]
   (if (= (count body) 0) ""
@@ -106,18 +165,18 @@
           (str "keys=" (keys-of d)
                (if (dyn-vec? vqs)
                  (loop [i 0 out: Str ""]
-                   (if (>= i (dyn-count vqs)) out
-                     (let [q (dyn-nth vqs i)]
+                   (if (>= i (w/dcount vqs)) out
+                     (let [q (w/dnth vqs i)]
                        (recur (+ i 1) (str out " vq" i "={" (keys-of q) " kind=" (w/dstr q "kind" "")
                                            " fields=" (w/dstr q "fields" "") " k=" (w/dint q "k" -1) "}")))))
                  "")
-               (if (and (dyn-vec? vals) (> (dyn-count vals) 0))
-                 (str " n=" (dyn-count vals) " first={" (keys-of (dyn-nth vals 0)) "}")
+               (if (and (dyn-vec? vals) (> (w/dcount vals) 0))
+                 (str " n=" (w/dcount vals) " first={" (keys-of (w/dnth vals 0)) "}")
                  "")
                (if (dyn-vec? flds)
                  (loop [i 0 out: Str " fields="]
-                   (if (>= i (dyn-count flds)) out
-                     (let [f (dyn-nth flds i)]
+                   (if (>= i (w/dcount flds)) out
+                     (let [f (w/dnth flds i)]
                        (recur (+ i 1) (str out (if (> i 0) "," "") (w/dstr f "name" "?") ":" (w/dstr f "type" "?"))))))
                  "")
                (if (> (count (w/dstr d "filter" "")) 0) (str " filter=" (w/dstr d "filter" "")) "")))))))
@@ -131,50 +190,83 @@
 
 ;; swap! の f の中身。新しい状態を返し、応答・変わったか・連番を out に残す
 ;; （競合でやり直されたときは最後の回の値で上書きされる）
-(defn- apply-change Dyn [s: Dyn method: Str uri: Str body: Str out: &Atom]
-  (let [[st2 resp changed] (en/handle (dyn->map s) method uri body)
-        seq (if (= changed 1) (+ 1 (map-get-int st2 "mseq")) (map-get-int st2 "mseq"))]
-    (do (reset! out (map->dyn (assoc (assoc (assoc (map-empty) "resp" (map->dyn resp)) "changed" changed) "seq" seq)))
-        (map->dyn (assoc st2 "mseq" seq)))))
+(defrecord Change [method: Str uri: Str body: Str])
+
+(defrecord Outcome [resp: Map changed: Int seq: Int])
+
+(defn- apply-change Map [s: Map ch: Change out: Atom(Outcome)]
+  (let [[st2 resp changed] (en/handle s (:method ch) (:uri ch) (:body ch))
+        seq (if (= changed 1) (+ 1 (w/mget-int st2 "mseq")) (w/mget-int st2 "mseq"))]
+    (do (reset! out (->Outcome resp changed seq))
+        (assoc st2 "mseq" seq))))
 
 ;; 1 要求を処理する。Values(応答, 変わったか, 連番)
 (defn- dispatch Values(Map Int Int) [method: Str uri: Str body: Str]
   (if (read-only? method uri)
-    (let [[st resp changed] (en/handle (dyn->map (deref store)) method uri body)]
+    (let [[st resp changed] (en/handle (deref store) method uri body)]
       (values resp 0 0))
-    (let [out (atom (nil->dyn))
-          _ (swap! store (fn: Dyn [s: Dyn] (apply-change s method uri body out)))
-          r: Map (dyn->map (deref out))]
-      (values (dyn->map (map-get-dyn r "resp")) (map-get-int r "changed") (map-get-int r "seq")))))
+    (let [out: Atom(Outcome) (atom (->Outcome {} 0 0))
+          _ (swap! store apply-change (->Change method uri body) out)
+          r: Outcome (deref out)]
+      (values (:resp r) (:changed r) (:seq r)))))
 
-(defn route Map [req: Map]
-  (let [method: Str (map-get-str req "method")
-        uri: Str (map-get-str req "uri")
-        body: Str (map-get-str req "body")
+(defn- to-response hm/Response [r: Map]
+  (let [ct: Str (w/mget-str r "content-type")
+        hs: Vec(hm/Header) (if (= (count ct) 0) [] [(hm/->Header "Content-Type" ct)])]
+    (hm/response (w/mget-int r "status") hs (w/mget-str r "body") false)))
+
+(defn route hm/Response [auth: Auth req: hm/Request]
+  (let [method: Str (:method req)
+        uri: Str (:uri req)
+        body: Str (:body req)
         path: Str (w/path-of uri)
-        t0 (now-us)]
-    (cond
-      (= path "/health") (w/json-resp 200 "{\"status\":\"ok\"}")
-      (not (auth-ok? req))
-      (do (eprintln (str "aisearch-server: 403 " method " " uri " (api-key "
-                         (if (= (count (http/header req "api-key")) 0) "missing" "rejected") ")"))
-          (w/error 403 "" "Access denied: the api-key header is missing or invalid."))
-      :else
-      (let [[resp changed seq] (dispatch method uri body)]
-        (do (when (= changed 1) (write-log seq method uri body))
-            (eprintln (str "aisearch-server: " (map-get-int resp "status") " " method " " uri
-                           " ms=" (/ (- (now-us) t0) 1000)
-                           " ua=" (http/header req "user-agent")
-                           (let [d: Str (describe method body)] (if (= (count d) 0) "" (str " " d)))))
-            resp)))))
+        t0 (mono-ms)]
+    (if (= path "/health") (to-response (w/json-resp 200 "{\"status\":\"ok\"}"))
+      (let [[ok given] (auth-check auth req)
+            luri: Str (redact-uri uri)]
+        (if (not ok)
+          (do (eprintln (str "aisearch-server: 403 " method " " luri " (api-key "
+                             (if given "rejected" "missing") ")"))
+              (to-response (w/error 403 "" "Access denied: the api-key header is missing or invalid.")))
+          (let [[resp changed seq] (dispatch method luri body)]
+            (do (when (= changed 1) (write-log seq method luri body))
+                (eprintln (str "aisearch-server: " (w/mget-int resp "status") " " method " " luri
+                               " ms=" (- (mono-ms) t0)
+                               " ua=" (hm/header req "user-agent" "")
+                               (let [d: Str (describe method body)] (if (= (count d) 0) "" (str " " d)))))
+                (to-response resp))))))))
+
+(defn- handler Fn(hm/Request hm/Response) [auth: Auth]
+  (fn hm/Response [req: hm/Request] (route auth req)))
+
+;; SIGTERM / SIGINT を待って、run-server を止める（処理中の要求は最大 5 秒待つ）
+(defn- stop-on-signal Int [sv: http/Server]
+  (let [sig (sys/wait-signal [(sys/->SigTerm) (sys/->SigInt)])
+        _ (eprintln "aisearch-server: signal received, stopping")
+        stopped (http/stop sv 5000)]
+    0))
 
 (defn main Int []
+  (let [[auth0 note0 how0] (load-auth)]
+    ;; 鍵のファイルを指定したのに読めない・空なら起動しない (Pod で Secret が付かなかったときに、認証なしで公開しないため)
+    (if (> (count note0) 0)
+      (do (eprintln (str "aisearch-server: " note0 "; refusing to start without the key")) 1)
+      (main-run))))
+
+(defn- main-run Int []
   (let [host: Str (env-or "AIS_HOST" "172.23.0.1")
         port (env-int "AIS_PORT" 8897)
-        _ (io/mkdir (data-dir))
-        _ (io/mkdir (log-dir))
-        n (replay)]
-    (do (eprintln (str "aisearch-server: replayed " n " change(s) from " (log-dir)
-                       ", listening on " host ":" port
-                       (if (= (count (getenv "AIS_API_KEYS")) 0) " (no auth)" " (auth: AIS_API_KEYS)")))
-        (http/run-server route (assoc (assoc (assoc (map-empty) "port" port) "host" host) "max-body" 16777216)))))
+        de (io/mkdir-all (log-dir))
+        _ (when (> (count de) 0) (eprintln (str "aisearch-server: cannot create " (log-dir) ": " de)))
+        n (replay)
+        [auth note how] (load-auth)
+        opts (assoc (assoc (assoc (http/default-server-opts) :port port) :host host) :max-body 16777216)
+        ;; シグナルは全スレッドで止めておき、待つスレッドだけが受け取る
+        be: Str (sys/block-signals [(sys/->SigTerm) (sys/->SigInt)])
+        _ (future-detach (future stop-on-signal (:server opts)))
+        _ (eprintln (str "aisearch-server: replayed " n " change(s) from " (log-dir)
+                         ", listening on " host ":" port " (" how ")"))
+        [rc e] (http/run-server (handler auth) opts)]
+    (if (> (count e) 0)
+      (do (eprintln (str "aisearch-server: " e)) 1)
+      (do (eprintln "aisearch-server: stopped") rc))))

@@ -10,13 +10,14 @@
 ;; 構文木は Map（"t" が種類）。parse の失敗は {"t" "err" "msg" ..} で返す。
 (ns ais.odata
   (:require [clay.core]
-            [clay.string :as str]))
+            [clay.string :as str]
+            [ais.web :as w]))
 
-(defn- node Map [t: Str] (assoc (map-empty) "t" t))
+(defn- node Map [t: Str] (assoc {} "t" t))
 
 (defn- err Map [msg: Str] (assoc (node "err") "msg" msg))
 
-(defn err? Bool [n: Map] (= (map-get-str n "t") "err"))
+(defn err? Bool [n: Map] (= (w/mget-str n "t") "err"))
 
 ;; ---- 字句 ----
 
@@ -31,7 +32,7 @@
 (defn- ident-char? Bool [c: Int]
   (or (ident-start? c) (and (>= c 48) (<= c 57)) (= c 47) (= c 46)))
 
-(defn- digit? Bool [c: Int] (and (>= c 48) (<= c 57)))
+(defn- digit-char? Bool [c: Int] (and (>= c 48) (<= c 57)))
 
 ;; i から識別子（a/b/c や search.in も含む）を読む。終わりの位置を返す。
 (defn- ident-end Int [s: Str i: Int]
@@ -60,7 +61,7 @@
   (loop [j (+ i 1)]
     (if (>= j (count s)) j
       (let [c (nth s j)]
-        (if (or (digit? c) (= c 46) (= c 45) (= c 43) (= c 58) (= c 84) (= c 90) (= c 101) (= c 69))
+        (if (or (digit-char? c) (= c 46) (= c 45) (= c 43) (= c 58) (= c 84) (= c 90) (= c 101) (= c 69))
           (recur (+ j 1)) j)))))
 
 (defn- datetime-literal? Bool [t: Str]
@@ -72,18 +73,21 @@
     (cond
       (= c 39) (let [[v e] (read-quoted s i)]
                  (if (< e 0) (values (err "unterminated string literal") -1)
-                   (values (assoc (node "lit") "v" (str->dyn v)) e)))
-      (word-at? s i "true") (values (assoc (node "lit") "v" (bool->dyn true)) (+ i 4))
-      (word-at? s i "false") (values (assoc (node "lit") "v" (bool->dyn false)) (+ i 5))
+                   (values (assoc (node "lit") "v" (->dyn v)) e)))
+      (word-at? s i "true") (values (assoc (node "lit") "v" (->dyn true)) (+ i 4))
+      (word-at? s i "false") (values (assoc (node "lit") "v" (->dyn false)) (+ i 5))
       (word-at? s i "null") (values (assoc (node "lit") "v" (nil->dyn)) (+ i 4))
-      (or (digit? c) (and (= c 45) (< (+ i 1) (count s)) (digit? (nth s (+ i 1)))))
+      (or (digit-char? c) (and (= c 45) (< (+ i 1) (count s)) (digit-char? (nth s (+ i 1)))))
       (let [e (literal-end s i)
             t: Str (subs s i e)]
         (cond
-          (datetime-literal? t) (values (assoc (node "lit") "v" (str->dyn t)) e)
+          (datetime-literal? t) (values (assoc (node "lit") "v" (->dyn t)) e)
           (or (str/includes? t ".") (str/includes? t "e") (str/includes? t "E"))
-          (values (assoc (node "lit") "v" (float->dyn (str-to-float t))) e)
-          :else (values (assoc (node "lit") "v" (int->dyn (parse-long t))) e)))
+          (let [[x xe] (parse-double t)] (values (assoc (node "lit") "v" (->dyn x)) e))
+          :else (let [[n ne] (parse-long t)]
+                  (if (= ne "") (values (assoc (node "lit") "v" (->dyn n)) e)
+                    ;; 64 ビットに入らない整数は Float として比べる
+                    (let [[x xe] (parse-double t)] (values (assoc (node "lit") "v" (->dyn x)) e))))))
       :else (values (node "none") -1))))
 
 (defn- cmp-op Str [s: Str i: Int]
@@ -145,14 +149,14 @@
             (let [o (skip-ws s le)
                   op: Str (if (< o (count s)) (cmp-op s o) "")]
               (if (= op "")
-                (let [v (map-get-dyn lit "v")]
+                (let [v (w/mget lit "v")]
                   (if (dyn-bool? v) (values (assoc (node "const") "b" v) le)
                     (values (err "a constant cannot stand alone as a condition") -1)))
                 (let [f0 (skip-ws s (+ o 2))
                       f1 (ident-end s f0)]
                   (if (= f0 f1) (values (err (str "expected a field name after '" op "'")) -1)
                     (values (assoc (assoc (assoc (node "cmp") "op" (flip-op op)) "f" (subs s f0 f1))
-                                   "v" (map-get-dyn lit "v"))
+                                   "v" (w/mget lit "v"))
                             f1)))))
             ;; 欄が左
             (if (not (ident-start? (nth s i)))
@@ -168,7 +172,7 @@
                         (cond
                           (err? rv) (values rv -1)
                           (< re 0) (values (err (str "expected a constant after '" op "' (comparing two fields is not supported)")) -1)
-                          :else (values (assoc (assoc (assoc (node "cmp") "op" op) "f" field) "v" (map-get-dyn rv "v"))
+                          :else (values (assoc (assoc (assoc (node "cmp") "op" op) "f" field) "v" (w/mget rv "v"))
                                         re))))))))))))))
 
 (defn- parse-unary Values(Map Int) [s: Str i0: Int]
@@ -202,7 +206,7 @@
 
 ;; 式全体を読む。空文字は「条件なし」（{"t" "const" "b" true}）。
 (defn parse Map [s: Str]
-  (if (str/blank? s) (assoc (node "const") "b" (bool->dyn true))
+  (if (str/blank? s) (assoc (node "const") "b" (->dyn true))
     (let [[x e] (parse-or s 0)]
       (if (err? x) x
         (let [z (skip-ws s e)]
@@ -211,24 +215,14 @@
 
 ;; ---- 評価 ----
 
-(defn- dyn-has? Bool [d: Dyn k: Str]
-  (if (not (dyn-map? d)) false
-    (loop [i 0]
-      (if (>= i (dyn-count d)) false
-        (if (= (dyn-key d i) k) true (recur (+ i 1)))))))
-
 ;; a/b/c をたどる。無ければ nil。
 (defn field-value Dyn [doc: Dyn path: Str]
   (let [parts: Vec(Str) (str/split path "/")]
     (loop [i 0 cur: Dyn doc]
       (if (>= i (count parts)) cur
-        (if (dyn-has? cur (nth parts i))
-          (recur (+ i 1) (dyn-get cur (nth parts i)))
+        (if (w/has? cur (nth parts i))
+          (recur (+ i 1) (w/dget cur (nth parts i)))
           (nil->dyn))))))
-
-(defn- num? Bool [d: Dyn] (or (dyn-int? d) (dyn-float? d)))
-
-(defn- as-float Float [d: Dyn] (if (dyn-float? d) (dyn->float d) (int->float (dyn->int d))))
 
 ;; 文字列の大小（バイト順）。-1 / 0 / 1
 (defn- str-compare Int [a: Str b: Str]
@@ -241,8 +235,8 @@
 ;; 比べられないとき（型違い・コレクション）は 2
 (defn- compare-dyn Int [a: Dyn b: Dyn]
   (cond
-    (and (num? a) (num? b))
-    (let [x (as-float a) y (as-float b)] (cond (< x y) -1 (> x y) 1 :else 0))
+    (and (w/num? a) (w/num? b))
+    (let [x (w/to-float a) y (w/to-float b)] (cond (< x y) -1 (> x y) 1 :else 0))
     (and (dyn-str? a) (dyn-str? b)) (str-compare (dyn->str a) (dyn->str b))
     (and (dyn-bool? a) (dyn-bool? b)) (if (= (dyn->bool a) (dyn->bool b)) 0 2)
     :else 2))
@@ -278,13 +272,13 @@
           (if (= (nth parts i) x) true (recur (+ i 1))))))))
 
 (defn matches? Bool [n: Map doc: Dyn]
-  (let [t: Str (map-get-str n "t")]
+  (let [t: Str (w/mget-str n "t")]
     (cond
-      (= t "const") (dyn->bool (map-get-dyn n "b"))
-      (= t "and") (and (matches? (map-get-map n "l") doc) (matches? (map-get-map n "r") doc))
-      (= t "or") (or (matches? (map-get-map n "l") doc) (matches? (map-get-map n "r") doc))
-      (= t "not") (not (matches? (map-get-map n "x") doc))
-      (= t "cmp") (eval-cmp (map-get-str n "op") (field-value doc (map-get-str n "f")) (map-get-dyn n "v"))
-      (= t "in") (eval-in (field-value doc (map-get-str n "f")) (map-get-str n "vals") (map-get-str n "delims"))
-      (= t "field") (let [v (field-value doc (map-get-str n "f"))] (and (dyn-bool? v) (dyn->bool v)))
+      (= t "const") (dyn->bool (w/mget n "b"))
+      (= t "and") (and (matches? (w/mget-map n "l") doc) (matches? (w/mget-map n "r") doc))
+      (= t "or") (or (matches? (w/mget-map n "l") doc) (matches? (w/mget-map n "r") doc))
+      (= t "not") (not (matches? (w/mget-map n "x") doc))
+      (= t "cmp") (eval-cmp (w/mget-str n "op") (field-value doc (w/mget-str n "f")) (w/mget n "v"))
+      (= t "in") (eval-in (field-value doc (w/mget-str n "f")) (w/mget-str n "vals") (w/mget-str n "delims"))
+      (= t "field") (let [v (field-value doc (w/mget-str n "f"))] (and (dyn-bool? v) (dyn->bool v)))
       :else false)))
