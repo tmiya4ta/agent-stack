@@ -9,5 +9,8 @@
         <value><fullName>深掘り</fullName><default>false</default><label>深掘り</label></value>
         <value><fullName>保留</fullName><default>false</default><label>保留</label></value>
         <value><fullName>当局報告</fullName><default>false</default><label>当局報告</label></value>
+        <value><fullName>承認</fullName><default>false</default><label>承認</label></value>
+        <value><fullName>否認</fullName><default>false</default><label>否認</label></value>
+        <value><fullName>追加確認</fullName><default>false</default><label>追加確認</label></value>
     </valueSetDefinition></valueSet>
 </CustomField>

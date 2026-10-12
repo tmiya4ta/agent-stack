@@ -175,3 +175,45 @@ create table orders (
   trade_id    text not null,                    -- 約定の ID (T261012001..)
   created_at  timestamp not null default now()
 );
+
+-- 口座開設の申込み (時計がその日に進むと planned_applications から届く)。規則で問題が無ければ口座を開き、
+-- 引っかかれば口座開設の broker が調べて承認箱に回す
+create table applications (
+  application_id     text primary key,          -- OA-0001..
+  name               text not null,
+  name_kana          text not null,
+  birth_date         date not null,
+  occupation         text not null,
+  employer           text,
+  annual_income      bigint not null,
+  experience_years   int not null,
+  risk_tolerance     text not null,             -- 希望するリスク: 低 / 中 / 高
+  planned_investment bigint not null,           -- 最初に入れるつもりの金額 (円)
+  applied_on         date not null,
+  status             text not null default '受付', -- 受付 / 口座開設 / 確認待ち / 承認待ち / 否認 / 追加確認
+  findings           jsonb not null default '[]', -- 規則の引っかかり [{rule, detail}]
+  customer_id        text references customers(customer_id)
+);
+
+create table planned_applications (
+  application_id     text primary key,
+  name               text not null,
+  name_kana          text not null,
+  birth_date         date not null,
+  occupation         text not null,
+  employer           text,
+  annual_income      bigint not null,
+  experience_years   int not null,
+  risk_tolerance     text not null,
+  planned_investment bigint not null,
+  applied_on         date not null
+);
+
+-- 社内の要注意リスト (口座開設の照合に使う)
+create table watchlist (
+  entry_id    text primary key,                 -- W01..
+  name        text not null,
+  birth_date  date,
+  reason      text not null,
+  listed_on   date not null
+);
