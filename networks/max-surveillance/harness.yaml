@@ -1,0 +1,5 @@
+name: max-surveillance
+kind: network
+runtime: agent-network
+# MCP サーバーは k0 の max-core (mulay) で、harness では配備しない。URL は yc の変数 (max-mcp-url = https://<host>/k/<鍵>) から
+members: {}

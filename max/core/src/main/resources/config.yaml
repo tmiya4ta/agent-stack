@@ -5,7 +5,7 @@ http:
 db:
   url: "jdbc:postgresql://localhost:15432/mulay"
   user: "mulay"
-  password: "mulay"
+  # password は keys.file の方 (k8s では Secret)
 # POST /admin/reset (スキーマと合成データの流し直し) を受けるか。試験のときだけ true にする
 admin:
   reset: "false"

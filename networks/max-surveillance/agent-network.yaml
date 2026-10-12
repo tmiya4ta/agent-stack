@@ -1,0 +1,159 @@
+agentNetwork: 2.0.0
+info:
+  label: Max Securities Trade Surveillance Network
+  version: 1.0.0
+  description: Investigates a trade-surveillance alert of the fictional Max Securities (insider-trading suspicion), drafts the memo and sends the recommendation to the approval inbox, where an employee decides.
+
+registry:
+  mcps:
+    max-surveillance-mcp{{-suffix}}:
+      info:
+        label: Max Surveillance MCP Server
+        description: Surveillance alerts with the customer, the trades, the announcement, the insider registry and past cases, and the approval inbox.
+      metadata:
+        transport:
+          kind: streamableHttp
+          path: /mcp
+        tools:
+          - name: list-alerts
+            description: Lists the surveillance alerts, highest score first.
+            inputSchema:
+              type: object
+              properties:
+                status:
+                  type: string
+          - name: get-alert
+            description: Returns everything about one alert, including past cases of the same kind.
+            inputSchema:
+              type: object
+              properties:
+                alertId:
+                  type: string
+              required:
+                - alertId
+          - name: request-approval
+            description: Saves the investigation and sends the recommendation with the memo to the approval inbox.
+            inputSchema:
+              type: object
+              properties:
+                contextId:
+                  type: string
+                alertId:
+                  type: string
+                recommendation:
+                  type: string
+                facts:
+                  type: string
+                notableTrades:
+                  type: string
+                relations:
+                  type: string
+                similarCases:
+                  type: string
+                gaps:
+                  type: string
+                reasoning:
+                  type: string
+              required:
+                - contextId
+                - alertId
+                - recommendation
+                - facts
+                - reasoning
+
+  llms:
+    max-openai-llm{{-suffix}}:
+      info:
+        label: OpenAI
+        description: OpenAI-compatible LLM provider. The endpoint comes from the max-openai-llm{{-suffix}}.url variable in exchange.json.
+      metadata:
+        platform: AzureOpenai
+        models:
+          - gpt-5-mini
+
+context:
+  policies:
+    # 呼び出し元: HS256 の JWT。sub が会話の持ち主になる (aml-investigation と同じ)
+    max_jwt_validation{{_suffix}}:
+      ref:
+        name: jwt-validation
+        namespace: 68ef9520-24e9-4cf2-b2f5-620025690913
+      configuration:
+        jwtOrigin: httpBearerAuthenticationHeader
+        jwtExpression: "#[attributes.headers['jwt']]"
+        signingMethod: hmac
+        signingKeyLength: 256
+        jwtKeyOrigin: text
+        textKey: ${jwt.hs256Secret}
+        jwksUrl: "http://your-jwks-service.example:80/base/path"
+        jwksServiceTimeToLive: 60
+        jwksServiceConnectionTimeout: 10000
+        customKeyExpression: "#[authentication.properties['key_to_your_public_pem_certificate']]"
+        skipClientIdValidation: true
+        clientIdExpression: "#[vars.claimSet.client_id]"
+        validateAudClaim: false
+        mandatoryAudClaim: false
+        supportedAudiences: aud.example.com
+        mandatoryExpClaim: true
+        mandatoryNbfClaim: false
+        validateCustomClaim: false
+    max_user_context{{_suffix}}:
+      ref:
+        name: user-context-propagation
+        namespace: 68ef9520-24e9-4cf2-b2f5-620025690913
+      configuration:
+        userIdExpression: "#[authentication.properties.claims.sub]"
+
+  connections:
+    max_surveillance_connection{{_suffix}}:
+      kind: mcp
+      ref:
+        name: max-surveillance-mcp{{-suffix}}
+      url: ${max-surveillance-mcp{{-suffix}}.url}
+
+    max_openai_connection{{_suffix}}:
+      kind: llm
+      ref:
+        name: max-openai-llm{{-suffix}}
+      url: ${max-openai-llm{{-suffix}}.url}
+      authentication:
+        kind: apiKey
+        apiKey: ${openAI.apiKey}
+
+brokers:
+  max-surveillance-broker{{-suffix}}:
+    kind: AgentScript
+    implementation: ./brokers/max_surveillance_broker.agent
+    interfaces:
+      a2a:
+        policies:
+          inbound:
+            - ref:
+                name: max_jwt_validation{{_suffix}}
+            - ref:
+                name: max_user_context{{_suffix}}
+        card:
+          name: Max Securities Trade Surveillance Broker{{-suffix}}
+          description: Investigates a trade-surveillance alert (insider-trading suspicion) of the fictional Max Securities and sends the recommendation with the memo to the approval inbox. An employee decides there.
+          version: 1.0.0
+          capabilities:
+            streaming: false
+            pushNotifications: true
+          defaultInputModes:
+            - text/plain
+          defaultOutputModes:
+            - text/plain
+          skills:
+            - id: trade-surveillance-investigation
+              name: Investigate a trade-surveillance alert
+              description: Gathers the customer, the trades around the announcement, the insider registry and similar past cases, drafts the memo, and sends the recommendation to the approval inbox.
+              tags:
+                - surveillance
+                - insider-trading
+              examples:
+                - "アラート SV-0001 を調べて"
+                - "未対応のアラートを見せて"
+              inputModes:
+                - text/plain
+              outputModes:
+                - text/plain
