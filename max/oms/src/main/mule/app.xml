@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  max-oms: マックス証券 (架空) の注文 (OMS)。注文を受け、その日の終値で約定させ (照合のエンジンは持たない)、
+  約定を Anypoint MQ (mq.fillsQueue) に送る。台帳 (max-core) がキューから受ける。
+    GET  /                 このサービスの説明 (鍵なし)
+    GET  /health           死活確認 (鍵なし)
+    POST /orders/day       その日の注文をまとめて約定させる {date, orders: [{customer_id, code, side, qty, channel}], closes: {code: close}}
+                           → {date, fills: [{tradeId, orderId}]}。同じ日を二度送っても、注文と約定は一度だけ (同じ ID)
+    GET  /orders?date=     その日の注文
+    POST /admin/reset      スキーマと合成データを流し直し、約定のキューを空にする (admin.reset=true のときだけ。試験用)
+    POST /admin/peek-fills 約定のキューにあるものを受けて返す (admin.reset=true のときだけ。試験用。台帳には入らない)
+  約定の形と ID は max/fills.dwl (max-core と共用)。鍵: api.key (keys.file)。MQ の認証情報: ${mq.file}。
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd">
+
+    <global-property name="keys.file" value="keys.properties"/>
+    <global-property name="mq.file" value="mq-secret.yaml"/>
+    <configuration-properties file="config.yaml"/>
+    <configuration-properties file="${keys.file}"/>
+    <configuration-properties file="${mq.file}"/>
+
+    <http:listener-config name="Http">
+        <http:listener-connection host="0.0.0.0" port="${http.port}"/>
+    </http:listener-config>
+
+    <db:config name="Db">
+        <db:generic-connection url="${db.url}" driverClassName="org.postgresql.Driver" user="${db.user}" password="${db.password}"/>
+    </db:config>
+
+    <anypoint-mq:config name="Mq">
+        <anypoint-mq:connection url="${mq.url}" clientId="${mq.clientId}" clientSecret="${mq.clientSecret}"/>
+    </anypoint-mq:config>
+
+    <sub-flow name="auth">
+        <choice>
+            <when expression="#[do {
+                var key = p('api.key') default ''
+                var h = attributes.headers
+                var auth = h.authorization default ''
+                var given = if ((auth startsWith 'Bearer ') and (sizeOf(auth) > 7)) auth[7 to -1] else (h.'api-key' default '')
+                ---
+                (key == '') or (given != key)}]">
+                <raise-error type="OMS:UNAUTHORIZED" description="Missing or wrong API key"/>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <sub-flow name="admin-only">
+        <choice>
+            <when expression="#[p('admin.reset') != 'true']">
+                <raise-error type="OMS:FORBIDDEN" description="Reset is turned off (admin.reset)"/>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <sub-flow name="error-body">
+        <set-variable variableName="status" value="#[if (error.errorType.identifier == 'UNAUTHORIZED') 401
+            else if (error.errorType.identifier == 'FORBIDDEN') 403
+            else if (error.errorType.identifier == 'BAD_REQUEST') 400 else 500]"/>
+        <set-payload value="#[output application/json --- {error: error.description}]"/>
+    </sub-flow>
+
+    <flow name="describe">
+        <http:listener config-ref="Http" path="/" allowedMethods="GET"/>
+        <set-payload value="#[output application/json --- {
+            name: 'max-oms', company: 'マックス証券 (架空)',
+            what: 'Order management of the fictional securities firm: fills orders at the day close and sends the fills to Anypoint MQ. All data is synthetic.',
+            endpoints: ['POST /orders/day', 'GET /orders?date='],
+            auth: 'Authorization: Bearer KEY or api-key: KEY'}]"/>
+    </flow>
+
+    <flow name="health">
+        <http:listener config-ref="Http" path="/health" allowedMethods="GET"/>
+        <set-payload value="#[output application/json --- {status: 'ok'}]"/>
+    </flow>
+
+    <flow name="orders-day">
+        <http:listener config-ref="Http" path="/orders/day" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="req" value="#[output application/java --- payload]"/>
+        <choice>
+            <when expression="#[not ((vars.req.date default '') matches /\d{4}-\d{2}-\d{2}/)]">
+                <raise-error type="OMS:BAD_REQUEST" description="date must be yyyy-MM-dd"/>
+            </when>
+            <when expression="#[not isEmpty((vars.req.orders default []) filter ((o) -> (vars.req.closes default {})[o.code] == null))]">
+                <raise-error type="OMS:BAD_REQUEST" description="#['No close for ' ++ (((vars.req.orders default []) filter ((o) -> (vars.req.closes default {})[o.code] == null)) map $.code distinctBy $ joinBy ', ')]"/>
+            </when>
+        </choice>
+        <set-variable variableName="fillMsgs" value="#[output application/java --- max::fills::fills(vars.req.date, vars.req.orders default [], vars.req.closes default {})]"/>
+        <choice>
+            <when expression="#[not isEmpty(vars.fillMsgs)]">
+                <db:bulk-insert config-ref="Db">
+                    <db:bulk-input-parameters>#[vars.fillMsgs]</db:bulk-input-parameters>
+                    <db:sql>insert into max.orders (order_id, customer_id, code, side, qty, trade_date, price, channel, trade_id)
+                            values (:orderId, :customerId, :code, :side, :qty, cast(:tradeDate as date), :price, :channel, :tradeId)
+                            on conflict (order_id) do nothing</db:sql>
+                </db:bulk-insert>
+                <foreach collection="#[vars.fillMsgs]">
+                    <anypoint-mq:publish config-ref="Mq" destination="${mq.fillsQueue}" messageId="#[payload.tradeId]">
+                        <anypoint-mq:body><![CDATA[#[output application/json --- payload]]]></anypoint-mq:body>
+                    </anypoint-mq:publish>
+                </foreach>
+            </when>
+        </choice>
+        <set-payload value="#[output application/json --- {date: vars.req.date, fills: vars.fillMsgs map {tradeId: $.tradeId, orderId: $.orderId}}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="orders-list">
+        <http:listener config-ref="Http" path="/orders" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db">
+            <db:sql>select order_id, customer_id, code, side, qty, price, to_char(trade_date, 'YYYY-MM-DD') as trade_date, channel, trade_id
+                    from max.orders where (:d = '' or trade_date = cast(nullif(:d, '') as date)) order by order_id</db:sql>
+            <db:input-parameters>#[{d: attributes.queryParams.date default ''}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {
+            orderId: $.order_id, customerId: $.customer_id, code: $.code, side: $.side, qty: $.qty, price: $.price,
+            tradeDate: $.trade_date, channel: $.channel, tradeId: $.trade_id}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 試験用: キューを空にする。受けたものの中身を vars.taken に (台帳には入れない) -->
+    <sub-flow name="take-all">
+        <set-variable variableName="taken" value="#[[]]"/>
+        <set-variable variableName="takeDone" value="#[false]"/>
+        <set-variable variableName="takeEmpties" value="#[0]"/>
+        <foreach collection="#[1 to 200]">
+            <choice>
+                <when expression="#[not vars.takeDone]">
+                    <try>
+                        <anypoint-mq:consume config-ref="Mq" destination="${mq.fillsQueue}" pollingTime="1000"/>
+                        <set-variable variableName="taken" value="#[output application/java --- vars.taken + read(payload.^raw as String, 'application/json')]"/>
+                        <error-handler>
+                            <on-error-continue type="ANYPOINT-MQ:TIMEOUT">
+                                <set-variable variableName="takeEmpties" value="#[vars.takeEmpties + 1]"/>
+                                <set-variable variableName="takeDone" value="#[vars.takeEmpties &gt;= 2]"/>
+                            </on-error-continue>
+                        </error-handler>
+                    </try>
+                </when>
+            </choice>
+        </foreach>
+    </sub-flow>
+
+    <flow name="admin-reset">
+        <http:listener config-ref="Http" path="/admin/reset" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <flow-ref name="admin-only"/>
+        <flow-ref name="take-all"/>
+        <db:execute-ddl config-ref="Db">
+            <db:sql>drop schema if exists max cascade</db:sql>
+        </db:execute-ddl>
+        <db:execute-script config-ref="Db" file="max/schema.sql"/>
+        <db:execute-script config-ref="Db" file="max/seed.sql"/>
+        <set-payload value="#[output application/json --- {reset: true}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="admin-peek-fills">
+        <http:listener config-ref="Http" path="/admin/peek-fills" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <flow-ref name="admin-only"/>
+        <flow-ref name="take-all"/>
+        <set-payload value="#[output application/json --- vars.taken orderBy $.tradeId]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+</mule>

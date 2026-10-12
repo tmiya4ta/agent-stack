@@ -1,0 +1,10 @@
+# max-oms の設定。k0 では key=value (mulay の引数) で上書きする。
+http:
+  port: "8083"
+db:
+  url: "jdbc:postgresql://localhost:15432/mulay"
+  user: "mulay"
+mq:
+  fillsQueue: "max-fills"
+admin:
+  reset: "false"

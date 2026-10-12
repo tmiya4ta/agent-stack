@@ -1,0 +1,191 @@
+%%% note
+max-oms (マックス証券、架空): その日の注文をまとめて約定させ、約定を本物の Anypoint MQ (T1/Sandbox、試験用のキュー
+max-test-fills) に送る。鍵の誤り、日付の誤り、終値の無い銘柄、2 件の注文 (並びと ID は max/fills.dwl)、同じ日の二度目
+(注文は増えない)、送った約定をキューから受けて確かめる (/admin/peek-fills)、空の日。
+DB は mulay の試験用の PG (localhost:15432、スキーマ max)。最初に /admin/reset で合成データを流し直し、キューも空にする。
+%%% requires src/main/resources/mq-secret.yaml
+%%% jvm -Dhttp.port=18478 -Dapi.key=test-key -Dadmin.reset=true -Dmq.fillsQueue=max-test-fills
+%%% port 18478
+%%% request GET /health
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "status": "ok"
+}
+%%% request POST /admin/reset
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "reset": true
+}
+%%% request POST /orders/day
+content-type: application/json
+
+{"date":"2026-10-12","orders":[],"closes":{}}
+%%% response 401
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "Missing or wrong API key"
+}
+%%% request POST /orders/day
+authorization: Bearer test-key
+content-type: application/json
+
+{"date":"10/12","orders":[],"closes":{}}
+%%% response 400
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "date must be yyyy-MM-dd"
+}
+%%% request POST /orders/day
+authorization: Bearer test-key
+content-type: application/json
+
+{"date":"2026-10-12","orders":[{"customer_id":"C001","code":"MX99","side":"買","qty":100}],"closes":{"MX01":1000.5}}
+%%% response 400
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "No close for MX99"
+}
+%%% request POST /orders/day
+authorization: Bearer test-key
+content-type: application/json
+
+{"date":"2026-10-12","orders":[{"customer_id":"C015","code":"MX14","side":"買","qty":100,"channel":"対面"},{"customer_id":"C008","code":"MX15","side":"買","qty":1200}],"closes":{"MX14":1476.5,"MX15":1551.7}}
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "date": "2026-10-12",
+  "fills": [
+    {
+      "tradeId": "T261012001",
+      "orderId": "O26101200001"
+    },
+    {
+      "tradeId": "T261012002",
+      "orderId": "O26101200002"
+    }
+  ]
+}
+%%% request POST /orders/day
+authorization: Bearer test-key
+content-type: application/json
+
+{"date":"2026-10-12","orders":[{"customer_id":"C015","code":"MX14","side":"買","qty":100,"channel":"対面"},{"customer_id":"C008","code":"MX15","side":"買","qty":1200}],"closes":{"MX14":1476.5,"MX15":1551.7}}
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "date": "2026-10-12",
+  "fills": [
+    {
+      "tradeId": "T261012001",
+      "orderId": "O26101200001"
+    },
+    {
+      "tradeId": "T261012002",
+      "orderId": "O26101200002"
+    }
+  ]
+}
+%%% request GET /orders?date=2026-10-12
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "orderId": "O26101200001",
+    "customerId": "C008",
+    "code": "MX15",
+    "side": "買",
+    "qty": 1200,
+    "price": 1551.7,
+    "tradeDate": "2026-10-12",
+    "channel": "ネット",
+    "tradeId": "T261012001"
+  },
+  {
+    "orderId": "O26101200002",
+    "customerId": "C015",
+    "code": "MX14",
+    "side": "買",
+    "qty": 100,
+    "price": 1476.5,
+    "tradeDate": "2026-10-12",
+    "channel": "対面",
+    "tradeId": "T261012002"
+  }
+]
+%%% request POST /admin/peek-fills
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "tradeId": "T261012001",
+    "orderId": "O26101200001",
+    "customerId": "C008",
+    "code": "MX15",
+    "side": "買",
+    "qty": 1200,
+    "price": 1551.7,
+    "tradeDate": "2026-10-12",
+    "channel": "ネット"
+  },
+  {
+    "tradeId": "T261012001",
+    "orderId": "O26101200001",
+    "customerId": "C008",
+    "code": "MX15",
+    "side": "買",
+    "qty": 1200,
+    "price": 1551.7,
+    "tradeDate": "2026-10-12",
+    "channel": "ネット"
+  },
+  {
+    "tradeId": "T261012002",
+    "orderId": "O26101200002",
+    "customerId": "C015",
+    "code": "MX14",
+    "side": "買",
+    "qty": 100,
+    "price": 1476.5,
+    "tradeDate": "2026-10-12",
+    "channel": "対面"
+  },
+  {
+    "tradeId": "T261012002",
+    "orderId": "O26101200002",
+    "customerId": "C015",
+    "code": "MX14",
+    "side": "買",
+    "qty": 100,
+    "price": 1476.5,
+    "tradeDate": "2026-10-12",
+    "channel": "対面"
+  }
+]
+%%% request POST /orders/day
+authorization: Bearer test-key
+content-type: application/json
+
+{"date":"2026-10-13","orders":[],"closes":{"MX14":1480}}
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "date": "2026-10-13",
+  "fills": [
+    
+  ]
+}
