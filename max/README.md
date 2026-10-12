@@ -112,3 +112,14 @@ curl -X POST -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:18081/clock/a
 - 注文の画面: `https://order.max.theorems.dev/k/<max-oms の鍵>/` (鍵は `~/.config/max-oms/env`)。お客さま・銘柄・売買・株数を選んで注文すると、
   いまの業務日の終値で約定し (約定 ID は T+yyMMdd+M+連番)、MQ で台帳に届く (max-core が 60 秒ごとに取り込む)。
   画面は外部の資源を読まず、Referrer-Policy は no-referrer (鍵が経路に入っているため)。
+
+## v3: 口座開設の審査 (2 つ目の業務の broker、2026-10-12 に通しで動いた)
+
+- 時計が進むと申込み (planned_applications) が届き、規則 (max/kyc.dwl: 適合性、資金の出どころ、要注意リスト、重複) で確かめる。
+  問題が無ければ人もエージェントも通さずに口座を開く (お客さまを作る)。引っかかれば確認待ちにして、口座開設の broker
+  (networks/max-operations、broker.opsUrl) に「申込み OA-0003 を調べて」と回す。
+- broker は max-core の口座開設の MCP の口 (`/k/<鍵>/ops/mcp`、同じ公開名) で申込みを調べ、承認・否認・追加確認を推して承認箱に依頼する
+  (承認箱の種類は「口座開設」)。社員が承認すると口座が開き、否認・追加確認は申込みの状態になる。どれも監査ログに残る。
+- 仕込んだ申込み (10-26〜10-28): 通るもの OA-0001・0002・0007、引っかかるもの OA-0003 (82 歳・未経験・高リスク・年収の 14 倍)、
+  OA-0004 (要注意リストと名前が部分一致、生年月日は違う)、OA-0005 (既存のお客さま C005 と重複)、OA-0006 (年収の 16 倍)。
+- `GET /applications`、`GET /applications/{id}`。

@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - name: max-core
-        image: max-core:0.2.1
+        image: max-core:0.4.0
         imagePullPolicy: IfNotPresent
         args:
         - http.port=8081
@@ -28,10 +28,14 @@ spec:
         - mq.file=/secrets/max-core/mq.yaml
         # 注文 (同じ名前空間の max-oms)。約定は Anypoint MQ のキュー max-fills で届く
         - oms.url=http://max-oms.max-core.svc.cluster.local
+        # 時計を自動で進めるとき、1 営業日あたりの間隔 (2 分)。進めるかは POST /clock/auto
+        - clock.auto.interval=120000
         - db.url=jdbc:postgresql://max-pg.max-core.svc.cluster.local:5432/max
         - db.user=max_app
         # 調査エージェント (T1/Sandbox の Agent Network。sets/max-demo)
         - broker.url=https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/max-surveillance-broker/
+        # 口座開設の broker (sets/max-demo の max-operations)
+        - broker.opsUrl=https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/max-operations-broker/
         ports:
         - {name: http, containerPort: 8081}
         - {name: mcp, containerPort: 8082}
