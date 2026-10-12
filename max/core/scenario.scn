@@ -6,6 +6,8 @@ DB は mulay の試験用の PG (localhost:15432、スキーマ max)。最初に
 調査の状態 (無い会話、残す、読み直す)、承認の依頼 (誤った推奨、二重の依頼。Salesforce d30 の承認箱 MaxApproval__c に置く。
 ID の前置きは TAP で、本物の依頼と混ぜない)、社員の判断 (誤った判断、二度目の判断)、承認箱からの取り込み
 (承認箱で判断したことにして sync)、監査ログ、過去の事例。Salesforce のレコード ID は隠す。
+点数付けが作ったアラートを調査エージェントに回す (試験用の broker /admin/fake-broker が JWT の署名と A2A 1.0 の形を確かめる。
+dispatch.async=false で順に回す)、手で回す、署名の誤り。
 MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-alert (番号だけの ID、無いアラート)、request-approval
 (調査メモを組み立てて承認箱へ、二重の依頼、判断済み、推奨の誤り)。MCP のセッション ID は capture で渡し、mask で伏せる。
 %%% mask
@@ -13,7 +15,7 @@ MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-al
 [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 "sfId": ?"([0-9A-Za-z]{15,18})"
 %%% requires src/main/resources/sf-secret.yaml
-%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped
+%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped -Dbroker.url=http://localhost:18476/admin/fake-broker -Dbroker.jwtSecret=test-jwt -Ddispatch.async=false
 %%% port 18476
 %%% port 18477
 %%% request GET /
@@ -1027,7 +1029,7 @@ content-type: application/json; charset=UTF-8
 
 [
   {
-    "id": 3,
+    "id": 6,
     "at": "***",
     "actor": "user:審査部 相沢",
     "action": "decide",
@@ -1039,7 +1041,7 @@ content-type: application/json; charset=UTF-8
     }
   },
   {
-    "id": 2,
+    "id": 5,
     "at": "***",
     "actor": "agent:max-surveillance",
     "action": "request-approval",
@@ -1048,6 +1050,19 @@ content-type: application/json; charset=UTF-8
       "sfId": "***",
       "approvalId": "TAP-0001",
       "recommendation": "深掘り"
+    }
+  },
+  {
+    "id": 2,
+    "at": "***",
+    "actor": "system:max-core",
+    "action": "dispatch",
+    "target": "SV-0001",
+    "detail": {
+      "error": null,
+      "reply": "received: アラート SV-0001 を調べて (sub=max-core, ttl=600)",
+      "state": "TASK_STATE_COMPLETED",
+      "contextId": "ctx-fake"
     }
   }
 ]
@@ -1359,3 +1374,91 @@ content-type: application/json; charset=UTF-8
   "recommendation": "問題なし",
   "memo": "【調査メモ (エージェントの下書き)】SV-0003 インサイダー取引の疑い: 遠藤 拓也 / 汐見エナジー\n\n■ アラートと顧客\n会社員 (風見銀行)、投資経験 15 年。汐見エナジーの上方修正 (2026-10-05) の前に 100 株を買った。\n\n■ 注目すべき売買\n2026-10-01 / 買 / 100 株 / 1,396.0 円\n毎月最初の営業日に 100 株 (6 月は 300 株) を買い続けている\n\n■ 内部者の登録・発行会社との関係\n内部者の登録なし\n\n■ 似た過去の事例\nPC-02 / 問題なし / 積み立ての買いが公表の前日に当たった\n\n■ 確認できなかった材料\nなし\n\n■ 推奨 (下書き): 問題なし\n公表の前の買いは、1 年以上続く定型の積み立てと同じ日付・同じ株数で、公表と結び付く点が無い。\n\n※ 推奨は下書きです。判断は承認箱で担当者が行います。"
 }
+%%% request POST /alerts/SV-0002/dispatch
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "alertId": "SV-0002",
+  "state": "TASK_STATE_COMPLETED",
+  "contextId": "ctx-fake",
+  "reply": "received: アラート SV-0002 を調べて (sub=max-core, ttl=600)"
+}
+%%% request POST /alerts/SV-0999/dispatch
+authorization: Bearer test-key
+%%% response 404
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "Alert SV-0999 was not found"
+}
+%%% request POST /admin/fake-broker
+authorization: Bearer eyJhbGciOiAiSFMyNTYiLCJ0eXAiOiAiSldUIn0.eyJzdWIiOiAieCJ9.bad
+a2a-version: 1.0
+content-type: application/json
+
+{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m","role":"ROLE_USER","parts":[{"text":"x"}]}}}
+%%% response 401
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "JWT Token is invalid."
+}
+%%% request GET /audit?target=SV-0002
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "id": 10,
+    "at": "***",
+    "actor": "system:max-core",
+    "action": "dispatch",
+    "target": "SV-0002",
+    "detail": {
+      "error": null,
+      "reply": "received: アラート SV-0002 を調べて (sub=max-core, ttl=600)",
+      "state": "TASK_STATE_COMPLETED",
+      "contextId": "ctx-fake"
+    }
+  },
+  {
+    "id": 8,
+    "at": "***",
+    "actor": "user:Miyashita Tsutomu",
+    "action": "decide",
+    "target": "SV-0002",
+    "detail": {
+      "note": "聞き取りの結果を待つ",
+      "decision": "保留",
+      "approvalId": "TAP-0002"
+    }
+  },
+  {
+    "id": 7,
+    "at": "***",
+    "actor": "agent:max-surveillance",
+    "action": "request-approval",
+    "target": "SV-0002",
+    "detail": {
+      "sfId": "***",
+      "approvalId": "TAP-0002",
+      "recommendation": "保留"
+    }
+  },
+  {
+    "id": 3,
+    "at": "***",
+    "actor": "system:max-core",
+    "action": "dispatch",
+    "target": "SV-0002",
+    "detail": {
+      "error": null,
+      "reply": "received: アラート SV-0002 を調べて (sub=max-core, ttl=600)",
+      "state": "TASK_STATE_COMPLETED",
+      "contextId": "ctx-fake"
+    }
+  }
+]

@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  アラートを調査エージェント (Agent Network の broker) に回す。社員はチャットで頼まない: 点数付けがアラートを作ったら、
+  max-core が broker に A2A 1.0 の SendMessage「アラート SV-0001 を調べて」を送る (JWT は HS256、sub は max-core)。
+  broker は調べて承認箱に依頼し、社員は承認箱で判断する。送った結果 (会話の contextId と状態) は監査ログに残す。
+    POST /alerts/{id}/dispatch   手で回す (同期。broker の応答を待つ)
+    POST /admin/fake-broker      試験用の broker (admin.reset=true のときだけ): JWT の署名と A2A の形を確かめて、定型の応答を返す
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd">
+
+    <!-- 調べるのに数十秒かかる (道具と LLM の往復)。待つのは 15 分まで -->
+    <http:request-config name="Broker" responseTimeout="900000"/>
+
+    <!-- vars.alertId を broker に回し、結果を監査ログに残す。失敗も監査ログに残し、呼び出し元には失敗を返さない -->
+    <sub-flow name="dispatch">
+        <try>
+            <set-variable variableName="jwt" value="#[max::jwt::token('max-core', 600, p('broker.jwtSecret'))]"/>
+            <http:request config-ref="Broker" method="POST" url="${broker.url}">
+                <http:body><![CDATA[#[output application/json --- {
+                    jsonrpc: '2.0', id: uuid(), method: 'SendMessage',
+                    params: {message: {messageId: uuid(), role: 'ROLE_USER', parts: [{text: 'アラート ' ++ vars.alertId ++ ' を調べて'}]}}}]]]></http:body>
+                <http:headers><![CDATA[#[{'Authorization': 'Bearer ' ++ vars.jwt, 'A2A-Version': '1.0'}]]]></http:headers>
+            </http:request>
+            <set-variable variableName="outcome" value="#[do {
+                var task = payload.result.task default (payload.result default {})
+                ---
+                if (payload.error?) {state: 'ERROR', error: (payload.error.message default '') as String}
+                else {state: task.status.state default '', contextId: task.contextId default '',
+                      reply: ((task.status.message.parts default [])[0].text default '') as String}}]"/>
+            <error-handler>
+                <on-error-continue>
+                    <set-variable variableName="outcome" value="#[{state: 'FAILED_TO_SEND', error: error.description}]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.audit_log (actor, action, target, detail) values ('system:max-core', 'dispatch', :target, cast(:detail as jsonb))</db:sql>
+            <db:input-parameters>#[{target: vars.alertId, detail: write({
+                state: vars.outcome.state, contextId: vars.outcome.contextId default null,
+                reply: if (sizeOf(vars.outcome.reply default '') > 200) vars.outcome.reply[0 to 199] else (vars.outcome.reply default null),
+                error: vars.outcome.error default null}, 'application/json', {indent: false})}]</db:input-parameters>
+        </db:insert>
+        <set-payload value="#[output application/json --- {alertId: vars.alertId} ++ vars.outcome]"/>
+    </sub-flow>
+
+    <!-- 点数付けが作ったアラート (vars.raised) を回す。broker.url が空なら何もしない -->
+    <sub-flow name="dispatch-raised">
+        <choice>
+            <when expression="#[(p('broker.url') default '') == '' or isEmpty(vars.raised default [])]">
+                <logger level="DEBUG" message="no dispatch"/>
+            </when>
+            <when expression="#[p('dispatch.async') == 'true']">
+                <async>
+                    <foreach collection="#[vars.raised map $.alert_id]">
+                        <set-variable variableName="alertId" value="#[payload]"/>
+                        <flow-ref name="dispatch"/>
+                    </foreach>
+                </async>
+            </when>
+            <otherwise>
+                <foreach collection="#[vars.raised map $.alert_id]">
+                    <set-variable variableName="alertId" value="#[payload]"/>
+                    <flow-ref name="dispatch"/>
+                </foreach>
+            </otherwise>
+        </choice>
+    </sub-flow>
+
+    <flow name="alert-dispatch">
+        <http:listener config-ref="Http" path="/alerts/{alertId}/dispatch" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="alertId" value="#[attributes.uriParams.alertId]"/>
+        <choice>
+            <when expression="#[(p('broker.url') default '') == '']">
+                <raise-error type="MAX:CONFLICT" description="No broker is configured (broker.url)"/>
+            </when>
+        </choice>
+        <db:select config-ref="Db" target="alert">
+            <db:sql>select alert_id from max.alerts where alert_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.alertId}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[isEmpty(vars.alert)]">
+                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ vars.alertId ++ ' was not found']"/>
+            </when>
+        </choice>
+        <flow-ref name="dispatch"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="admin-fake-broker">
+        <http:listener config-ref="Http" path="/admin/fake-broker" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <choice>
+            <when expression="#[p('admin.reset') != 'true']">
+                <raise-error type="MAX:FORBIDDEN" description="Reset is turned off (admin.reset)"/>
+            </when>
+        </choice>
+        <set-variable variableName="token" value="#[do {
+            var a = attributes.headers.authorization default ''
+            ---
+            if (a startsWith 'Bearer ') a[7 to -1] else ''}]"/>
+        <choice>
+            <when expression="#[not max::jwt::valid(vars.token, p('broker.jwtSecret'))]">
+                <raise-error type="MAX:UNAUTHORIZED" description="JWT Token is invalid."/>
+            </when>
+            <when expression="#[(attributes.headers.'a2a-version' default '') != '1.0']">
+                <raise-error type="MAX:BAD_REQUEST" description="Unsupported A2A version"/>
+            </when>
+            <when expression="#[payload.method != 'SendMessage' or payload.params.message.role != 'ROLE_USER']">
+                <raise-error type="MAX:BAD_REQUEST" description="Not an A2A 1.0 SendMessage"/>
+            </when>
+        </choice>
+        <set-variable variableName="claims" value="#[max::jwt::claims(vars.token)]"/>
+        <set-payload value="#[output application/json --- {jsonrpc: '2.0', id: payload.id, result: {task: {
+            id: 'task-fake', contextId: 'ctx-fake',
+            status: {state: 'TASK_STATE_COMPLETED', message: {role: 'ROLE_AGENT', parts: [{text: 'received: ' ++ (payload.params.message.parts[0].text default '') ++ ' (sub=' ++ (vars.claims.sub default '') ++ ', ttl=' ++ ((vars.claims.exp default 0) - (vars.claims.iat default 0)) as String ++ ')'}]}}}}}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+</mule>

@@ -15,6 +15,7 @@
     POST /approvals/{id}/decision  社員の判断を記録する (アラートの状態、調査、監査ログ)
     POST /approvals/sync   承認箱 (Salesforce の MaxApproval__c) で判断された依頼を取り込む。sync.interval ごとにも回す
     POST /admin/sf-decide  試験用: 承認箱で判断したことにする (admin.reset=true のときだけ)
+  点数付けが作ったアラートは、調査エージェント (broker.url) に回す (dispatch.xml)
     GET  /audit            監査ログ (?target=)
   鍵: api.key (keys.file のファイル。既定は資源の keys.properties で空 = 全部 401)。Bearer か api-key ヘッダ。
   点数付けの規則は max/score.dwl。
@@ -191,6 +192,7 @@ fresh map ((a, i) -> a ++ {
                 </db:insert>
             </when>
         </choice>
+        <flow-ref name="dispatch-raised"/>
         <set-payload value="#[output application/json --- {
             raised: vars.raised map {alertId: $.alert_id, customerId: $.customer_id, code: $.code, announcementId: $.announcement_id, score: $.score},
             alreadyKnown: sizeOf(vars.existing)}]"/>
@@ -633,7 +635,7 @@ fresh map ((a, i) -> a ++ {
         </scheduler>
         <set-variable variableName="decisions" value="#[['問題なし', '深掘り', '保留', '当局報告']]"/>
         <flow-ref name="sync"/>
-        <logger level="INFO" message="#['approvals sync: ' ++ write(payload.synced, 'application/json', {indent: false})]"/>
+        <logger level="INFO" message="#[output text/plain --- 'approvals sync: ' ++ write(payload.synced, 'application/json', {indent: false})]"/>
     </flow>
 
     <!-- 試験用: 社員が承認箱で判断したことにする (admin.reset=true のときだけ) -->

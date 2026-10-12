@@ -19,3 +19,9 @@ sync:
 # MCP の口 (調査エージェントの道具)。外に出すのはこちらだけ
 mcp:
   port: "8082"
+# アラートができたら調査エージェント (Agent Network の broker、A2A 1.0) に調べさせる。url が空なら呼ばない。
+# JWT の鍵 (broker.jwtSecret) は keys.file の方。async=false は試験用 (順に呼ぶ)
+broker:
+  url: ""
+dispatch:
+  async: "true"
