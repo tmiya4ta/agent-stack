@@ -18,13 +18,16 @@ spec:
     spec:
       containers:
       - name: max-core
-        image: max-core:0.1.1
+        image: max-core:0.2.1
         imagePullPolicy: IfNotPresent
         args:
         - http.port=8081
         - mcp.port=8082
         - keys.file=/secrets/max-core/keys.properties
         - sf.file=/secrets/max-core/sf.yaml
+        - mq.file=/secrets/max-core/mq.yaml
+        # 注文 (同じ名前空間の max-oms)。約定は Anypoint MQ のキュー max-fills で届く
+        - oms.url=http://max-oms.max-core.svc.cluster.local
         - db.url=jdbc:postgresql://max-pg.max-core.svc.cluster.local:5432/max
         - db.user=max_app
         # 調査エージェント (T1/Sandbox の Agent Network。sets/max-demo)

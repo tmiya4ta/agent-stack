@@ -1,0 +1,45 @@
+# max-oms (マックス証券の注文)。プログラムは max/oms (mulay build)。中だけ (ClusterIP)。max-core が時計を進めるときに呼ぶ。
+# 秘密: Secret max-oms-secrets (secrets.sh)。keys.properties (api.key と db.password) と mq.yaml (Anypoint MQ)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: max-oms
+  namespace: max-core
+  labels: {app: max-oms}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: max-oms}
+  template:
+    metadata:
+      labels: {app: max-oms}
+    spec:
+      containers:
+      - name: max-oms
+        image: max-oms:0.1.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - http.port=8083
+        - keys.file=/secrets/max-oms/keys.properties
+        - mq.file=/secrets/max-oms/mq.yaml
+        - db.url=jdbc:postgresql://max-pg.max-core.svc.cluster.local:5432/max
+        - db.user=max_app
+        ports: [{name: http, containerPort: 8083}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, runAsNonRoot: true, readOnlyRootFilesystem: true}
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: secrets, mountPath: /secrets/max-oms, readOnly: true}
+      volumes:
+      - name: secrets
+        secret: {secretName: max-oms-secrets}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: max-oms
+  namespace: max-core
+spec:
+  selector: {app: max-oms}
+  ports: [{name: http, port: 80, targetPort: http}]

@@ -37,7 +37,7 @@ curl -X POST -H "Authorization: Bearer $API_KEY" http://127.0.0.1:18081/surveill
 
 API_KEY は `~/.config/max-core/env`。broker にチャットで話しかけることもできる (A2A 1.0、JWT の sub は会話の持ち主)。
 
-v2 で、注文の流れ・模擬の市場・仮想の業務時計・Anypoint MQ を足す。
+
 
 ## データ (`db/`)
 
@@ -78,3 +78,28 @@ tools/mule-oracle/mule-oracle mulay ~/mule/agents/agent-stack/max/core/scenario.
 ```
 
 DB は mulay の試験用の PG (localhost:15432、スキーマ max) を使う。
+
+## v2: 仮想の業務時計と、注文から台帳まで (2026-10-12 に通しで動いた)
+
+```
+POST /clock/advance?days=N (max-core)  1 営業日ごとに:
+  終値 (max/market.dwl。日付と銘柄の MD5 から作る揺れ + 前の営業日の公表の値動き)
+  その日の注文 (普段の売買 + 仕込んだ注文 planned_orders) ──HTTP──▶ max-oms  POST /orders/day
+                                                                      終値で約定 (max/fills.dwl)、orders に記録
+  台帳 (trades) ◀── Anypoint MQ キュー max-fills (約定、tradeId は T+yyMMdd+連番) ──┘
+  その日の公表 (planned_events → announcements)、時計を進める、点数付け → アラート → 調査エージェント → 承認箱
+```
+
+- 業務の日付はいつも business_clock から読む。壁の時計は監査ログの時刻だけ。同じデータから同じ日に進めれば、同じ終値・約定・アラートになる
+  (実 Mule と mulay で一致することをシナリオで確かめている)。
+- 仕込んだ筋書き (v2): C008 工藤 麻衣 (灯台ライフの社員、内部者の登録なし) が業務提携 A101 (MX15、10-16) の前に初めて買い、10-20 に売る。
+  C018 野口 典子 (翠嶺フーズのパート) が決算 A102 (MX05、10-22) の前日に 100 株買う。
+- Anypoint MQ: T1/Sandbox、ap-northeast-1。キュー max-fills (DLQ max-fills-dlq、5 回)、試験用の max-test-fills。client app "max"
+  (認証情報は ~/.config/max-mq/env、k0 では Secret)。受け取りのロックは短く (fills.lockTtl)、同じ約定は台帳に一度だけ入る。
+- 試験: max-core のシナリオは、注文を同じアプリの偽の OMS (/admin/fake-oms、同じ契約) に渡し、約定は本物の MQ の試験用のキューを通る。
+  max-oms は自分のシナリオで確かめる (max/oms/scenario.scn)。
+- k0: max-oms は max-core 名前空間で中だけ (k0/max-oms)。
+
+```bash
+curl -X POST -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:18081/clock/advance?days=5"   # 10-16 に SV-0004 → 承認箱
+```
