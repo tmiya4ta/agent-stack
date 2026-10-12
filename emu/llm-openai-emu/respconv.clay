@@ -1,0 +1,122 @@
+;; Responses API の要求の手直し (llama-server との違いを埋める)。I/O はしない。
+;;   - text.format (json_schema / json_object) を Chat Completions の response_format にして足す。
+;;     llama-server の /v1/responses は受けた本文をほぼそのまま Chat Completions に移すが、text を見ない (2026-10-11 の版)。
+;;   - 道具 (tools) と出力のスキーマ (text.format) を同時に渡すと、llama-server は出力を縛る文法を作れず
+;;     "Failed to initialize samplers: failed to parse grammar" (400) になる。Agent Network の broker は毎回この形で送る
+;;     (2026-10-12)。そこで 2 段に分ける: 1 段目はスキーマを外して道具だけで聞き、関数の呼び出しならそれを返す。
+;;     文の答えなら、2 段目で道具を外しスキーマを付けて聞き直す (OpenAI の「道具を呼ぶか、スキーマに沿った答えか」と同じ結果)。
+;;   - input の assistant の項目で content が文字列のもの ({"role":"assistant","content":"..."}) を、llama-server は
+;;     "Cannot determine type of 'item'" で拒む。broker は道具を呼んだ後にこれを (空文字で) 送る。空なら外し、
+;;     中身があれば正式な形 ({"type":"message","role":"assistant","content":[{"type":"output_text","text":..}]}) にする。
+;;   - reasoning.effort が off のどれか (既定 none、minimal、low) なら、考えない (chat_template_kwargs.enable_thinking = false)。
+;;     OpenAI の low は「軽く考える」だが、Ornith は考えると 1 回に 10 秒を超え、Agent Network の出口のゲートウェイが
+;;     15 秒で切る (2026-10-12)。要求が chat_template_kwargs を持っていればそのまま。
+(ns respconv
+  (:require [clay.core]
+            [clay.json :as json]))
+
+(defn emap Map(Str Dyn) [] (let [m: Map(Str Dyn) {}] m))
+
+(defn json-map Values(Map(Str Dyn) Bool) [body: Str]
+  (let [[d e] (json/parse body)]
+    (if (and (= e "") (dyn-map? d)) (values (dyn->map d) true) (values (emap) false))))
+
+(defn to-json Str [m: Map(Str Dyn)] (let [[s e] (json/stringify (->dyn m))] s))
+
+;; input の assistant の文字列の項目を直す: [直した input 変えたか]
+(defn fix-input Values(Vec(Dyn) Bool) [items: Vec(Dyn)]
+  (loop [out: Vec(Dyn) [] i 0 changed false]
+    (if (>= i (count items)) (values out changed)
+      (let [it (nth items i)
+            m (if (dyn-map? it) (dyn->map it) (emap))
+            role (get m "role" (nil->dyn))
+            ty (get m "type" (nil->dyn))
+            c (get m "content" (nil->dyn))
+            asst (and (dyn-str? role) (= (dyn->str role) "assistant") (or (dyn-nil? ty) (and (dyn-str? ty) (= (dyn->str ty) "message"))))]
+        (cond
+          (not (and asst (dyn-str? c))) (recur (conj out it) (+ i 1) changed)
+          (= (count (dyn->str c)) 0) (recur out (+ i 1) true)
+          :else (let [part (assoc (assoc (emap) "type" (->dyn "output_text")) "text" c)
+                      parts: Vec(Dyn) [(->dyn part)]
+                      msg (-> (emap) (assoc "type" (->dyn "message")) (assoc "role" (->dyn "assistant")) (assoc "content" (->dyn parts)))]
+                  (recur (conj out (->dyn msg)) (+ i 1) true)))))))
+
+;; input を直した Map と、変えたか
+(defn with-fixed-input Values(Map(Str Dyn) Bool) [m: Map(Str Dyn)]
+  (let [in (get m "input" (nil->dyn))]
+    (if (not (dyn-vec? in)) (values m false)
+      (let [[v changed] (fix-input (dyn->vec in))]
+        (if changed (values (assoc m "input" (->dyn v)) true) (values m false))))))
+
+;; reasoning.effort が off のどれかで、chat_template_kwargs が無ければ、考えない指定を足す
+(defn with-thinking Map(Str Dyn) [m: Map(Str Dyn) off: &Vec(Str)]
+  (let [r (get m "reasoning" (nil->dyn))
+        e (if (dyn-map? r) (get (dyn->map r) "effort" (nil->dyn)) (nil->dyn))
+        hit (and (dyn-str? e) (loop [i 0] (if (>= i (count off)) false (if (= (nth off i) (dyn->str e)) true (recur (+ i 1))))))]
+    (if (or (not hit) (contains? m "chat_template_kwargs")) m
+      (assoc m "chat_template_kwargs" (->dyn (assoc (emap) "enable_thinking" (->dyn false)))))))
+
+;; text.format の型 ("json_schema"、"json_object"、"text" など。無ければ "")
+(defn format-type Str [m: &Map(Str Dyn)]
+  (let [t (get m "text" (nil->dyn))
+        f (if (dyn-map? t) (get (dyn->map t) "format" (nil->dyn)) (nil->dyn))
+        tv (if (dyn-map? f) (get (dyn->map f) "type" (nil->dyn)) (nil->dyn))]
+    (if (dyn-str? tv) (dyn->str tv) "")))
+
+;; text.format を response_format にして足した Map
+(defn with-response-format Map(Str Dyn) [m: Map(Str Dyn)]
+  (let [t (get m "text" (nil->dyn))
+        f (if (dyn-map? t) (get (dyn->map t) "format" (nil->dyn)) (nil->dyn))
+        ty (format-type m)]
+    (cond
+      (= ty "json_schema")
+      (let [fm (dyn->map f)
+            js1 (assoc (emap) "name" (get fm "name" (->dyn "response")))
+            js2 (if (contains? fm "schema") (assoc js1 "schema" (get! fm "schema")) js1)
+            js3 (if (contains? fm "strict") (assoc js2 "strict" (get! fm "strict")) js2)
+            rf (assoc (assoc (emap) "type" (->dyn "json_schema")) "json_schema" (->dyn js3))]
+        (assoc m "response_format" (->dyn rf)))
+      (= ty "json_object") (assoc m "response_format" (->dyn (assoc (emap) "type" (->dyn "json_object"))))
+      :else m)))
+
+;; Responses API の text.format を response_format にして足す (ほかはそのまま。変えるものが無ければ受けた本文)
+(defn fix-responses Str [off: Vec(Str) body: Str]
+  (let [[m0 ok] (json-map body)
+        [m1 changed] (if ok (with-fixed-input m0) (values m0 false))
+        m (with-thinking m1 off)
+        ty (if ok (format-type m) "")]
+    (cond (or (= ty "json_schema") (= ty "json_object")) (to-json (with-response-format m))
+          (or changed (not= (count m) (count m1))) (to-json m)
+          :else body)))
+
+(defn has-tools? Bool [m: &Map(Str Dyn)]
+  (let [t (get m "tools" (nil->dyn))] (and (dyn-vec? t) (> (count (let [v: Vec(Dyn) (dyn->vec t)] v)) 0))))
+
+(defn streaming? Bool [m: &Map(Str Dyn)]
+  (let [s (get m "stream" (nil->dyn))] (and (dyn-bool? s) (dyn->bool s))))
+
+;; 道具とスキーマが両方あるなら 2 段に分ける: [1 段目の本文 2 段目の本文 分けたか]。分けないときは ["" "" false]。
+;; 1 段目: text を外す (道具だけ)。2 段目: tools、tool_choice、parallel_tool_calls を外し、response_format を付ける。
+;; ストリーミングの要求は分けない (流しながら 2 段にはできない)
+(defn split-tools-format Values(Str Str Bool) [off: Vec(Str) body: Str]
+  (let [[m0 ok] (json-map body)
+        [m1 changed] (if ok (with-fixed-input m0) (values m0 false))
+        m (with-thinking m1 off)
+        ty (if ok (format-type m) "")]
+    (if (or (not ok) (streaming? m) (not (has-tools? m)) (not (or (= ty "json_schema") (= ty "json_object"))))
+      (values "" "" false)
+      (let [p1 (map-remove m "text")
+            p2 (with-response-format (map-remove (map-remove (map-remove m "tools") "tool_choice") "parallel_tool_calls"))]
+        (values (to-json p1) (to-json (map-remove p2 "text")) true)))))
+
+;; Responses API の応答の output に関数の呼び出しがあるか
+(defn has-function-call? Bool [resp: Str]
+  (let [[m ok] (json-map resp)
+        o (get m "output" (nil->dyn))]
+    (if (not (dyn-vec? o)) false
+      (let [v: Vec(Dyn) (dyn->vec o)]
+        (loop [i 0]
+          (if (>= i (count v)) false
+            (let [it (nth v i)
+                  t (if (dyn-map? it) (get (dyn->map it) "type" (nil->dyn)) (nil->dyn))]
+              (if (and (dyn-str? t) (= (dyn->str t) "function_call")) true (recur (+ i 1))))))))))

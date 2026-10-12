@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - name: llm-openai-emu
-        image: llm-openai-emu:0.1.1
+        image: llm-openai-emu:0.1.4
         imagePullPolicy: IfNotPresent
         env:
         - {name: UPSTREAM, value: "http://llm-ornith-model.ai-model.svc.cluster.local"}

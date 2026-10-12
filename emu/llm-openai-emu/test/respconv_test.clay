@@ -1,0 +1,94 @@
+(ns respconv-test (:require [clay.json :as json] [respconv :as rc]))
+
+(defn jparse Dyn [s: Str] (let [[d e] (json/parse s)] d))
+(defn at Dyn [d: Dyn k: Str] (if (dyn-map? d) (get (dyn->map d) k (nil->dyn)) (nil->dyn)))
+(defn js Str [d: Dyn] (let [[s e] (json/stringify d)] s))
+
+(def schema-fmt "{\"type\":\"json_schema\",\"name\":\"R\",\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"]}}")
+(def tool "{\"type\":\"function\",\"name\":\"get_case\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}")
+
+(def OFF: Vec(Str) ["none" "minimal" "low"])
+
+;; ---- reasoning.effort が OFF のどれかなら考えない (chat_template_kwargs.enable_thinking = false) ----
+
+(deftest low-effort-turns-thinking-off
+  (let [d (jparse (rc/fix-responses OFF "{\"input\":\"x\",\"reasoning\":{\"effort\":\"low\"}}"))
+        e (jparse (rc/fix-responses OFF "{\"input\":\"x\",\"reasoning\":{\"effort\":\"high\"}}"))
+        f (jparse (rc/fix-responses OFF "{\"input\":\"x\",\"reasoning\":{\"effort\":\"low\"},\"chat_template_kwargs\":{\"enable_thinking\":true}}"))]
+    (is (= (js (at d "chat_template_kwargs")) "{\"enable_thinking\":false}"))
+    (is (dyn-nil? (at e "chat_template_kwargs")))
+    (is (= (js (at f "chat_template_kwargs")) "{\"enable_thinking\":true}"))))
+
+(deftest split-bodies-turn-thinking-off-too
+  (let [b (str "{\"input\":\"x\",\"reasoning\":{\"effort\":\"low\"},\"tools\":[" tool "],\"text\":{\"format\":" schema-fmt "}}")
+        [p1 p2 split] (rc/split-tools-format OFF b)]
+    (is split)
+    (is (= (js (at (jparse p1) "chat_template_kwargs")) "{\"enable_thinking\":false}"))
+    (is (= (js (at (jparse p2) "chat_template_kwargs")) "{\"enable_thinking\":false}"))))
+
+;; ---- text.format → response_format (llama-server は text を見ない) ----
+
+(deftest text-format-becomes-response-format
+  (let [out (rc/fix-responses OFF (str "{\"input\":\"x\",\"text\":{\"format\":" schema-fmt "}}"))
+        rf (at (jparse out) "response_format")]
+    (is (= (js (at rf "type")) "\"json_schema\""))
+    (is (= (js (at (at rf "json_schema") "name")) "\"R\""))
+    (is (= (js (at (at (at rf "json_schema") "schema") "required")) "[\"a\"]"))))
+
+(deftest no-format-is-unchanged
+  (is (= (rc/fix-responses OFF "{\"input\":\"x\"}") "{\"input\":\"x\"}")))
+
+;; ---- 道具とスキーマの両方: 2 段に分ける (llama-server は両方を同時に縛れない) ----
+
+(deftest both-tools-and-schema-are-split
+  (let [b (str "{\"model\":\"m\",\"input\":\"x\",\"tools\":[" tool "],\"tool_choice\":\"auto\",\"text\":{\"format\":" schema-fmt "},\"reasoning\":{\"effort\":\"low\"}}")
+        [p1 p2 split] (rc/split-tools-format OFF b)
+        d1 (jparse p1)
+        d2 (jparse p2)]
+    (is split)
+    (is (dyn-nil? (at d1 "text")))
+    (is (dyn-nil? (at d1 "response_format")))
+    
+    (is (dyn-vec? (at d1 "tools")))
+    (is (= (js (at d1 "tool_choice")) "\"auto\""))
+    (is (= (js (at d1 "reasoning")) "{\"effort\":\"low\"}"))
+    (is (dyn-nil? (at d2 "tools")))
+    (is (dyn-nil? (at d2 "tool_choice")))
+    (is (= (js (at (at d2 "response_format") "type")) "\"json_schema\""))
+    (is (= (js (at d2 "input")) "\"x\""))))
+
+(deftest only-one-of-them-is-not-split
+  (let [[a1 a2 s1] (rc/split-tools-format OFF (str "{\"input\":\"x\",\"tools\":[" tool "]}"))
+        [b1 b2 s2] (rc/split-tools-format OFF (str "{\"input\":\"x\",\"text\":{\"format\":" schema-fmt "}}"))
+        [c1 c2 s3] (rc/split-tools-format OFF (str "{\"input\":\"x\",\"tools\":[],\"text\":{\"format\":" schema-fmt "}}"))
+        [e1 e2 s4] (rc/split-tools-format OFF (str "{\"input\":\"x\",\"stream\":true,\"tools\":[" tool "],\"text\":{\"format\":" schema-fmt "}}"))
+        [f1 f2 s5] (rc/split-tools-format OFF (str "{\"input\":\"x\",\"tools\":[" tool "],\"text\":{\"format\":{\"type\":\"text\"}}}"))]
+    (is (not s1)) (is (not s2)) (is (not s3)) (is (not s4)) (is (not s5))))
+
+;; ---- 1 段目の答えが関数の呼び出しか ----
+
+(deftest function-call-output-is-detected
+  (is (rc/has-function-call? "{\"output\":[{\"type\":\"reasoning\"},{\"type\":\"function_call\",\"name\":\"get_case\",\"arguments\":\"{}\"}]}"))
+  (is (not (rc/has-function-call? "{\"output\":[{\"type\":\"reasoning\"},{\"type\":\"message\",\"content\":[]}]}")))
+  (is (not (rc/has-function-call? "not json"))))
+
+;; ---- input の assistant の項目 (llama-server は文字列の content を読めない: "Cannot determine type of 'item'") ----
+
+(deftest assistant-string-items-are-normalized
+  (let [b "{\"input\":[{\"role\":\"user\",\"content\":\"q\"},{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"了解\"},{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"f\",\"arguments\":\"{}\"}]}"
+        out (rc/fix-responses OFF b)
+        in (at (jparse out) "input")]
+    (is (= (js in) (str "[{\"role\":\"user\",\"content\":\"q\"},"
+                        "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"了解\"}]},"
+                        "{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"f\",\"arguments\":\"{}\"}]")))))
+
+(deftest split-bodies-are-normalized-too
+  (let [b (str "{\"input\":[{\"role\":\"assistant\",\"content\":\"\"}],\"tools\":[" tool "],\"text\":{\"format\":" schema-fmt "}}")
+        [p1 p2 split] (rc/split-tools-format OFF b)]
+    (is split)
+    (is (= (js (at (jparse p1) "input")) "[]"))
+    (is (= (js (at (jparse p2) "input")) "[]"))))
+
+(deftest string-input-and-good-items-are-unchanged
+  (is (= (rc/fix-responses OFF "{\"input\":\"x\"}") "{\"input\":\"x\"}"))
+  (is (= (rc/fix-responses OFF "{\"input\":[{\"role\":\"user\",\"content\":\"q\"}]}") "{\"input\":[{\"role\":\"user\",\"content\":\"q\"}]}")))
