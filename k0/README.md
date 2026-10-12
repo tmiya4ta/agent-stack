@@ -63,7 +63,7 @@ AI の HTTPRoute には全部 `timeouts: {request: 900s}` を書く。書かな�
 
 ## Mule のコネクタから埋め込みを使う
 
-MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここに向けられるのは 2 つ (jar の中で確かめた)。
+MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここに向けられるのは 2 つ (jar の中で確かめ、実 Mule 4.11.3 で動かした)。
 
 | 接続 | 設定 | 呼ばれる所 |
 |---|---|---|
@@ -99,3 +99,6 @@ MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここ
 - 埋め込みの 3 つの口: 公開名に証明書が付き、各社の形の 401 を返す。OpenAI (float と base64)、Azure (deployment と `api-key`)、
   Ollama (`/api/embed`、`/k/<鍵>/api/embeddings`) の返すベクトルが、エンジンの値と順序どおりにコサイン 0.9997 以上で合う。
   `embed.openai.emu` に 600 件を一度に送り、113 秒で 600 件 (19.6 MB) が index の順に返る。
+- 実 Mule 4.11.3 + Vectors 1.0.0 の embedding-generate-from-text が、公開名 (HTTPS) に向けた Azure OpenAI の接続 (3 件) と
+  Ollama の接続 (`/k/<鍵>`、末尾の `/` ありも) で 1536 次元を返す。同じ文の値は両方で同じ。鍵の誤りは
+  `MS-VECTORS:EMBEDDING_OPERATIONS_FAILURE` (文言は 401 の本文を含む)。Mule のログに鍵は出ない。
