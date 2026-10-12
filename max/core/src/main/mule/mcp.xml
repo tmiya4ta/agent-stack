@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  max-core の MCP サーバー (売買審査の調査エージェントの道具)。業務の API とは別のポート (mcp.port) で待ち受け、外に出すのはこちらだけ。
+  鍵は経路に入れる: /k/${api.key}/mcp (broker の接続の URL は https://<host>/k/<鍵>。MCP の initialize にはヘッダが乗らないため)。
+  道具の失敗は MCP の誤りにせず、普通の結果 ({found: false}、{status: "already_pending"} など) で返す (broker の executor が止まらないように)。
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:mcp="http://www.mulesoft.org/schema/mule/mcp"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/mcp http://www.mulesoft.org/schema/mule/mcp/current/mule-mcp.xsd">
+
+    <http:listener-config name="McpHttp">
+        <http:listener-connection host="0.0.0.0" port="${mcp.port}"/>
+    </http:listener-config>
+
+    <mcp:server-config name="Mcp" serverName="Max Surveillance MCP" serverVersion="1.0.0">
+        <mcp:streamable-http-server-connection listenerConfig="McpHttp" mcpEndpointPath="/k/${api.key}/mcp"/>
+    </mcp:server-config>
+
+    <!-- 鍵が空なら道具を使わせない (経路が /k//mcp になるため) -->
+    <sub-flow name="mcp-guard">
+        <set-variable variableName="decisions" value="#[['問題なし', '深掘り', '保留', '当局報告']]"/>
+        <choice>
+            <when expression="#[(p('api.key') default '') == '']">
+                <raise-error type="MAX:UNAUTHORIZED" description="The MCP server has no key (api.key)"/>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <flow name="mcp-list-alerts">
+        <mcp:tool-listener config-ref="Mcp" name="list-alerts">
+            <mcp:description><![CDATA[Lists the surveillance alerts (insider-trading suspicions), highest score first: alert ID, score (0-100),
+status (未対応 / 調査中 / 承認待ち / 問題なし / 深掘り / 保留 / 当局報告), raised date, customer and instrument.
+Give status to list only the alerts in that status.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "description": "Only alerts in this status, e.g. 未対応. Empty or missing for all."}
+  }
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="statusFilter" value="#[payload.status default '']"/>
+        <flow-ref name="alerts-query"/>
+    </flow>
+
+    <flow name="mcp-get-alert">
+        <mcp:tool-listener config-ref="Mcp" name="get-alert">
+            <mcp:description><![CDATA[Returns everything about one surveillance alert in a single call: the score and its reasons,
+the customer profile (occupation, employer, income, experience), the instrument, the announcement (material fact) the trades
+came before, every trade of the customer in that instrument, the customer's 10 latest trades, the customer's entries in the
+insider registry, and past surveillance cases of the same kind with their decisions.
+The alert ID looks like SV-0001; "0001" or "1" is accepted too. Returns {"found": false} when there is no such alert.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "alertId": {"type": "string", "description": "Alert ID such as SV-0001"}
+  },
+  "required": ["alertId"]
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="alertId" value="#[do {
+            var raw = trim(payload.alertId default '')
+            var digits = raw replace /^(?i)SV-?/ with ''
+            ---
+            if (digits matches /\d{1,4}/) 'SV-' ++ ((digits as Number) as String {format: '0000'}) else raw}]"/>
+        <try>
+            <flow-ref name="alert-detail"/>
+            <set-variable variableName="detail" value="#[payload]"/>
+            <set-variable variableName="kind" value="#[vars.detail.kind]"/>
+            <flow-ref name="past-cases-query"/>
+            <set-payload value="#[output application/json --- {found: true} ++ vars.detail ++ {pastCasesOfSameKind: payload}]"/>
+            <error-handler>
+                <on-error-continue type="MAX:NOT_FOUND">
+                    <set-payload value="#[output application/json --- {found: false, alertId: vars.alertId}]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <flow name="mcp-request-approval">
+        <mcp:tool-listener config-ref="Mcp" name="request-approval">
+            <mcp:description><![CDATA[Saves the investigation of this conversation and sends the recommendation with the investigation memo
+to the approval inbox, where an employee decides. The memo is built from the fields given here, so give facts only.
+Returns {"status": "requested", "approvalId": ...}, or "already_pending" / "already_decided" / "not_found" / "failed" with the reason.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "contextId": {"type": "string", "description": "The conversation (A2A contextId)"},
+    "alertId": {"type": "string", "description": "Alert ID such as SV-0001"},
+    "recommendation": {"type": "string", "enum": ["問題なし", "深掘り", "保留", "当局報告"]},
+    "facts": {"type": "string", "description": "The alert, the customer and the announcement, 3 to 5 lines"},
+    "notableTrades": {"type": "string", "description": "Related trades, one per line"},
+    "relations": {"type": "string", "description": "Insider registry entries and the customer's link to the issuer"},
+    "similarCases": {"type": "string", "description": "Similar past cases, one per line"},
+    "gaps": {"type": "string", "description": "What could not be checked"},
+    "reasoning": {"type": "string", "description": "Why this recommendation, 2 to 4 sentences"}
+  },
+  "required": ["contextId", "alertId", "recommendation", "facts", "reasoning"]
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="args" value="#[payload]"/>
+        <try>
+            <db:select config-ref="Db" target="alert">
+                <db:sql>select a.alert_id, a.kind, a.status, c.name as customer_name, i.name as instrument_name
+                        from max.alerts a join max.customers c using (customer_id) join max.instruments i using (code) where a.alert_id = :id</db:sql>
+                <db:input-parameters>#[{id: vars.args.alertId}]</db:input-parameters>
+            </db:select>
+            <db:select config-ref="Db" target="pending">
+                <db:sql>select approval_id from max.approvals where target_id = :id and status = '承認待ち'</db:sql>
+                <db:input-parameters>#[{id: vars.args.alertId}]</db:input-parameters>
+            </db:select>
+            <choice>
+                <when expression="#[isEmpty(vars.alert)]">
+                    <set-payload value="#[output application/json --- {status: 'not_found', alertId: vars.args.alertId}]"/>
+                </when>
+                <when expression="#[vars.decisions contains vars.alert[0].status]">
+                    <set-payload value="#[output application/json --- {status: 'already_decided', alertId: vars.args.alertId, decision: vars.alert[0].status}]"/>
+                </when>
+                <when expression="#[not isEmpty(vars.pending)]">
+                    <set-payload value="#[output application/json --- {status: 'already_pending', alertId: vars.args.alertId, approvalId: vars.pending[0].approval_id}]"/>
+                </when>
+                <otherwise>
+                    <set-variable variableName="memo" value="#[do {
+                        var a = vars.args
+                        var al = vars.alert[0]
+                        fun section(title, text) = if (isEmpty(trim(text default ''))) '' else '■ ' ++ title ++ '\n' ++ trim(text) ++ '\n\n'
+                        ---
+                        '【調査メモ (エージェントの下書き)】' ++ al.alert_id ++ ' ' ++ al.kind ++ ': ' ++ al.customer_name ++ ' / ' ++ al.instrument_name ++ '\n\n'
+                        ++ section('アラートと顧客', a.facts)
+                        ++ section('注目すべき売買', a.notableTrades)
+                        ++ section('内部者の登録・発行会社との関係', a.relations)
+                        ++ section('似た過去の事例', a.similarCases)
+                        ++ section('確認できなかった材料', a.gaps)
+                        ++ '■ 推奨 (下書き): ' ++ a.recommendation ++ '\n' ++ trim(a.reasoning default '') ++ '\n\n'
+                        ++ '※ 推奨は下書きです。判断は承認箱で担当者が行います。'}]"/>
+                    <set-variable variableName="ctx" value="#[vars.args.contextId]"/>
+                    <set-variable variableName="req" value="#[{alertId: vars.args.alertId, step: 'awaiting_decision',
+                        recommendation: vars.args.recommendation, memo: vars.memo}]"/>
+                    <flow-ref name="save-investigation"/>
+                    <set-variable variableName="req" value="#[{targetId: vars.args.alertId, contextId: vars.args.contextId,
+                        recommendation: vars.args.recommendation, memo: vars.memo, requestedBy: 'agent:max-surveillance', kind: '売買審査'}]"/>
+                    <flow-ref name="create-approval"/>
+                    <set-payload value="#[output application/json --- {status: 'requested', approvalId: payload.approvalId, alertId: payload.targetId, title: payload.title}]"/>
+                </otherwise>
+            </choice>
+            <error-handler>
+                <on-error-continue>
+                    <set-payload value="#[output application/json --- {status: 'failed', alertId: vars.args.alertId default '', reason: error.description}]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+</mule>

@@ -6,12 +6,16 @@ DB は mulay の試験用の PG (localhost:15432、スキーマ max)。最初に
 調査の状態 (無い会話、残す、読み直す)、承認の依頼 (誤った推奨、二重の依頼。Salesforce d30 の承認箱 MaxApproval__c に置く。
 ID の前置きは TAP で、本物の依頼と混ぜない)、社員の判断 (誤った判断、二度目の判断)、承認箱からの取り込み
 (承認箱で判断したことにして sync)、監査ログ、過去の事例。Salesforce のレコード ID は隠す。
+MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-alert (番号だけの ID、無いアラート)、request-approval
+(調査メモを組み立てて承認箱へ、二重の依頼、判断済み、推奨の誤り)。MCP のセッション ID は capture で渡し、mask で伏せる。
 %%% mask
 "at": ?"([0-9T:-]+)"
+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 "sfId": ?"([0-9A-Za-z]{15,18})"
 %%% requires src/main/resources/sf-secret.yaml
-%%% jvm -Dhttp.port=18476 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped
+%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped
 %%% port 18476
+%%% port 18477
 %%% request GET /
 %%% response 200
 content-type: application/json; charset=UTF-8
@@ -1186,3 +1190,172 @@ content-type: application/json; charset=UTF-8
     "announcementId": "A008"
   }
 ]
+%%% request POST :18477/k/wrong/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}
+%%% response 404
+content-type: text/plain
+
+No listener for endpoint: /k/wrong/mcp
+%%% capture SID header:mcp-session-id
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"experimental":{},"logging":{},"prompts":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false},"tools":{"listChanged":false}},"serverInfo":{"name":"Max Surveillance MCP","version":"1.0.0"}}}
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+%%% response 202
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list-alerts", "arguments": {"status": "未対応"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"[{\"alertId\": \"SV-0003\",\"kind\": \"インサイダー取引の疑い\",\"score\": 30,\"status\": \"未対応\",\"raisedOn\": \"2026-10-09\",\"customerId\": \"C004\",\"customerName\": \"遠藤 拓也\",\"code\": \"MX12\",\"instrumentName\": \"汐見エナジー\",\"announcementId\": \"A008\"}]"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get-alert", "arguments": {"alertId": "3"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"found\": true,\"alertId\": \"SV-0003\",\"kind\": \"インサイダー取引の疑い\",\"score\": 30,\"status\": \"未対応\",\"raisedOn\": \"2026-10-09\",\"reasons\": [{\"rule\": \"公表前の売買\",\"points\": 30,\"detail\": \"公表 (2026-10-05 15:00 業績修正、翌日 7.3%) の前 5 営業日に 1 回、計 139,600 円 の買\"}],\"customer\": {\"customer_id\": \"C004\",\"name\": \"遠藤 拓也\",\"name_kana\": \"エンドウ タクヤ\",\"birth_date\": \"1975-05-21\",\"occupation\": \"会社員\",\"employer\": \"風見銀行\",\"annual_income\": 11800000,\"experience_years\": 15,\"risk_tolerance\": \"中\",\"opened_on\": \"2011-09-01\"},\"instrument\": {\"code\": \"MX12\",\"name\": \"汐見エナジー\",\"sector\": \"電気・ガス\",\"market\": \"プライム\"},\"announcement\": {\"announcement_id\": \"A008\",\"code\": \"MX12\",\"published_at\": \"2026-10-05 15:00\",\"kind\": \"業績修正\",\"title\": \"通期業績予想および配当予想の上方修正\",\"price_move_pct\": 7.3},\"tradesInThisInstrument\": [{\"trade_id\": \"T000001\",\"side\": \"買\",\"qty\": 300,\"price\": 1351.9,\"trade_date\": \"2026-06-01\",\"channel\": \"ネット\"},{\"trade_id\": \"T000045\",\"side\": \"買\",\"qty\": 100,\"price\": 1258.8,\"trade_date\": \"2026-07-01\",\"channel\": \"ネット\"},{\"trade_id\": \"T000090\",\"side\": \"買\",\"qty\": 100,\"price\": 1151.2,\"trade_date\": \"2026-08-03\",\"channel\": \"コールセンター\"},{\"trade_id\": \"T000129\",\"side\": \"買\",\"qty\": 100,\"price\": 1270.5,\"trade_date\": \"2026-09-01\",\"channel\": \"ネット\"},{\"trade_id\": \"T000167\",\"side\": \"買\",\"qty\": 100,\"price\": 1396,\"trade_date\": \"2026-10-01\",\"channel\": \"コールセンター\"}],\"recentTrades\": [{\"trade_id\": \"T000167\",\"code\": \"MX12\",\"instrument_name\": \"汐見エナジー\",\"side\": \"買\",\"qty\": 100,\"price\": 1396,\"trade_date\": \"2026-10-01\"},{\"trade_id\": \"T000139\",\"code\": \"MX06\",\"instrument_name\": \"暁星マテリアル\",\"side\": \"買\",\"qty\": 200,\"price\": 1686.5,\"trade_date\": \"2026-09-11\"},{\"trade_id\": \"T000129\",\"code\": \"MX12\",\"instrument_name\": \"汐見エナジー\",\"side\": \"買\",\"qty\": 100,\"price\": 1270.5,\"trade_date\": \"2026-09-01\"},{\"trade_id\": \"T000090\",\"code\": \"MX12\",\"instrument_name\": \"汐見エナジー\",\"side\": \"買\",\"qty\": 100,\"price\": 1151.2,\"trade_date\": \"2026-08-03\"},{\"trade_id\": \"T000068\",\"code\": \"MX09\",\"instrument_name\": \"千早建設\",\"side\": \"買\",\"qty\": 100,\"price\": 2084.9,\"trade_date\": \"2026-07-15\"},{\"trade_id\": \"T000045\",\"code\": \"MX12\",\"instrument_name\": \"汐見エナジー\",\"side\": \"買\",\"qty\": 100,\"price\": 1258.8,\"trade_date\": \"2026-07-01\"},{\"trade_id\": \"T000001\",\"code\": \"MX12\",\"instrument_name\": \"汐見エナジー\",\"side\": \"買\",\"qty\": 300,\"price\": 1351.9,\"trade_date\": \"2026-06-01\"}],\"insiderRegistry\": [],\"pastCasesOfSameKind\": [{\"caseId\": \"PC-01\",\"kind\": \"インサイダー取引の疑い\",\"summary\": \"取引先の社員が、業務提携の公表の 4 日前に初めての銘柄を 600 万円買い、公表後すぐに売った\",\"decision\": \"当局報告\",\"reason\": \"勤務先と発行会社の取引関係があり、初めての銘柄で普段の 20 倍の金額。本人の説明 (雑誌の記事) は裏付けが取れなかった\",\"decidedOn\": \"2025-11-20\"},{\"caseId\": \"PC-02\",\"kind\": \"インサイダー取引の疑い\",\"summary\": \"毎月の積み立ての買いが、決算の公表の前日に当たった\",\"decision\": \"問題なし\",\"reason\": \"1 年以上同じ日付・同じ株数で買っており、公表と無関係の定型の注文\",\"decidedOn\": \"2026-02-05\"},{\"caseId\": \"PC-03\",\"kind\": \"インサイダー取引の疑い\",\"summary\": \"役員が自社株を、決算の公表の 2 週間前に買った\",\"decision\": \"問題なし\",\"reason\": \"役員持株会の拠出で、売買の時期は会社の規程 (公表前の禁止期間の外) どおり\",\"decidedOn\": \"2026-03-18\"},{\"caseId\": \"PC-04\",\"kind\": \"インサイダー取引の疑い\",\"summary\": \"自営業の顧客が、業務提携の公表の 3 日前に初めての銘柄を買った。登録上の関係は無い\",\"decision\": \"保留\",\"reason\": \"情報源が分からず、営業担当による本人への聞き取りを依頼。回答を待って再判断\",\"decidedOn\": \"2026-05-27\"}]}"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "get-alert", "arguments": {"alertId": "SV-0999"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"{\"found\": false,\"alertId\": \"SV-0999\"}"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "request-approval", "arguments": {"contextId": "ctx-9", "alertId": "SV-0003", "recommendation": "たぶん", "facts": "f", "reasoning": "r"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"Invalid tool parameters: /recommendation: does not have a value in the enumeration [\"問題なし\", \"深掘り\", \"保留\", \"当局報告\"]"}}
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "request-approval", "arguments": {"contextId": "ctx-9", "alertId": "SV-0003", "recommendation": "問題なし", "facts": "会社員 (風見銀行)、投資経験 15 年。汐見エナジーの上方修正 (2026-10-05) の前に 100 株を買った。", "notableTrades": "2026-10-01 / 買 / 100 株 / 1,396.0 円\n毎月最初の営業日に 100 株 (6 月は 300 株) を買い続けている", "relations": "内部者の登録なし", "similarCases": "PC-02 / 問題なし / 積み立ての買いが公表の前日に当たった", "gaps": "なし", "reasoning": "公表の前の買いは、1 年以上続く定型の積み立てと同じ日付・同じ株数で、公表と結び付く点が無い。"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"{\"status\": \"requested\",\"approvalId\": \"TAP-0003\",\"alertId\": \"SV-0003\",\"title\": \"SV-0003 インサイダー取引の疑い: 遠藤 拓也 / 汐見エナジー (30 点)\"}"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "request-approval", "arguments": {"contextId": "ctx-9", "alertId": "SV-0003", "recommendation": "問題なし", "facts": "f", "reasoning": "r"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\"status\": \"already_pending\",\"alertId\": \"SV-0003\",\"approvalId\": \"TAP-0003\"}"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "request-approval", "arguments": {"contextId": "ctx-1", "alertId": "SV-0001", "recommendation": "深掘り", "facts": "f", "reasoning": "r"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":8,"result":{"content":[{"type":"text","text":"{\"status\": \"already_decided\",\"alertId\": \"SV-0001\",\"decision\": \"深掘り\"}"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID}}
+
+{"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "request-approval", "arguments": {"contextId": "ctx-9", "alertId": "SV-0999", "recommendation": "深掘り", "facts": "f", "reasoning": "r"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":9,"result":{"content":[{"type":"text","text":"{\"status\": \"not_found\",\"alertId\": \"SV-0999\"}"}],"isError":false}}
+
+
+%%% request GET /approvals?status=%E6%89%BF%E8%AA%8D%E5%BE%85%E3%81%A1
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "approvalId": "TAP-0003",
+    "kind": "売買審査",
+    "targetId": "SV-0003",
+    "contextId": "ctx-9",
+    "sfId": "***",
+    "recommendation": "問題なし",
+    "memo": "【調査メモ (エージェントの下書き)】SV-0003 インサイダー取引の疑い: 遠藤 拓也 / 汐見エナジー\n\n■ アラートと顧客\n会社員 (風見銀行)、投資経験 15 年。汐見エナジーの上方修正 (2026-10-05) の前に 100 株を買った。\n\n■ 注目すべき売買\n2026-10-01 / 買 / 100 株 / 1,396.0 円\n毎月最初の営業日に 100 株 (6 月は 300 株) を買い続けている\n\n■ 内部者の登録・発行会社との関係\n内部者の登録なし\n\n■ 似た過去の事例\nPC-02 / 問題なし / 積み立ての買いが公表の前日に当たった\n\n■ 確認できなかった材料\nなし\n\n■ 推奨 (下書き): 問題なし\n公表の前の買いは、1 年以上続く定型の積み立てと同じ日付・同じ株数で、公表と結び付く点が無い。\n\n※ 推奨は下書きです。判断は承認箱で担当者が行います。",
+    "requestedBy": "agent:max-surveillance",
+    "status": "承認待ち",
+    "decision": null,
+    "note": null,
+    "decidedBy": null
+  }
+]
+%%% request GET /investigations/ctx-9
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "found": true,
+  "contextId": "ctx-9",
+  "alertId": "SV-0003",
+  "step": "awaiting_decision",
+  "recommendation": "問題なし",
+  "memo": "【調査メモ (エージェントの下書き)】SV-0003 インサイダー取引の疑い: 遠藤 拓也 / 汐見エナジー\n\n■ アラートと顧客\n会社員 (風見銀行)、投資経験 15 年。汐見エナジーの上方修正 (2026-10-05) の前に 100 株を買った。\n\n■ 注目すべき売買\n2026-10-01 / 買 / 100 株 / 1,396.0 円\n毎月最初の営業日に 100 株 (6 月は 300 株) を買い続けている\n\n■ 内部者の登録・発行会社との関係\n内部者の登録なし\n\n■ 似た過去の事例\nPC-02 / 問題なし / 積み立ての買いが公表の前日に当たった\n\n■ 確認できなかった材料\nなし\n\n■ 推奨 (下書き): 問題なし\n公表の前の買いは、1 年以上続く定型の積み立てと同じ日付・同じ株数で、公表と結び付く点が無い。\n\n※ 推奨は下書きです。判断は承認箱で担当者が行います。"
+}

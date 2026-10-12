@@ -45,6 +45,12 @@
         </dependency>
         <dependency>
             <groupId>com.mulesoft.connectors</groupId>
+            <artifactId>mule-mcp-connector</artifactId>
+            <version>1.5.0</version>
+            <classifier>mule-plugin</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.mulesoft.connectors</groupId>
             <artifactId>mule-salesforce-connector</artifactId>
             <version>11.3.4</version>
             <classifier>mule-plugin</classifier>

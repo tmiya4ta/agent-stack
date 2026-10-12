@@ -16,3 +16,6 @@ approval:
 sync:
   interval: "30000"
   state: "started"
+# MCP の口 (調査エージェントの道具)。外に出すのはこちらだけ
+mcp:
+  port: "8082"
