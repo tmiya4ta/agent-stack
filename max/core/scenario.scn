@@ -13,6 +13,9 @@ dispatch.async=false で順に回す)、手で回す、署名の誤り。
 仕込んだ筋書き C008 / MX15 と C018 / MX05 がアラートになり、試験用の broker に回る)。
 時計を自動で進める: 値の誤り、10-28 まで自動で (2 秒ごとに 1 営業日)、着いたら止まる、切る。
 進行中の古い印 (止まったプロセスの残り) は取り直して進められる。
+口座開設 (v3): 10-26〜10-28 に届く 7 件の申込みのうち、規則に通る 3 件は口座が開き、引っかかる 4 件は確認待ちになって
+口座開設の broker (試験用の broker) に回る。申込みの照会、口座開設の MCP の口 (/k/<鍵>/ops/mcp: 一覧、中身、承認の依頼、
+推奨の誤り)、社員の判断 (承認で口座が開く、否認、売買審査の判断の値は使えない)。
 MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-alert (番号だけの ID、無いアラート)、request-approval
 (調査メモを組み立てて承認箱へ、二重の依頼、判断済み、推奨の誤り)。MCP のセッション ID は capture で渡し、mask で伏せる。
 %%% mask
@@ -20,7 +23,7 @@ MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-al
 [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 "sfId": ?"([0-9A-Za-z]{15,18})"
 %%% requires src/main/resources/sf-secret.yaml src/main/resources/mq-secret.yaml
-%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped -Dbroker.url=http://localhost:18476/admin/fake-broker -Dbroker.jwtSecret=test-jwt -Ddispatch.async=false -Dmq.fillsQueue=max-test-fills -Dfills.state=stopped -Dfills.maxEmpty=8 -Doms.url=http://localhost:18476/admin/fake-oms -Dclock.auto.interval=2000
+%%% jvm -Dhttp.port=18476 -Dmcp.port=18477 -Dapi.key=test-key -Dadmin.reset=true -Dapproval.prefix=TAP -Dsync.state=stopped -Dbroker.url=http://localhost:18476/admin/fake-broker -Dbroker.jwtSecret=test-jwt -Ddispatch.async=false -Dmq.fillsQueue=max-test-fills -Dfills.state=stopped -Dfills.maxEmpty=8 -Doms.url=http://localhost:18476/admin/fake-oms -Dclock.auto.interval=2000 -Dbroker.opsUrl=http://localhost:18476/admin/fake-broker
 %%% port 18476
 %%% port 18477
 %%% request GET /
@@ -1503,6 +1506,12 @@ content-type: application/json; charset=UTF-8
       "missingFills": [
         
       ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
+        
+      ],
       "announcements": [
         
       ],
@@ -1518,6 +1527,12 @@ content-type: application/json; charset=UTF-8
         "T261013002 C010 MX28 買 100 @ 3175.5"
       ],
       "missingFills": [
+        
+      ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
         
       ],
       "announcements": [
@@ -1537,6 +1552,12 @@ content-type: application/json; charset=UTF-8
       "missingFills": [
         
       ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
+        
+      ],
       "announcements": [
         
       ],
@@ -1554,6 +1575,12 @@ content-type: application/json; charset=UTF-8
       "missingFills": [
         
       ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
+        
+      ],
       "announcements": [
         
       ],
@@ -1568,6 +1595,12 @@ content-type: application/json; charset=UTF-8
         "T261016001 C010 MX28 買 100 @ 3230"
       ],
       "missingFills": [
+        
+      ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
         
       ],
       "announcements": [
@@ -1597,6 +1630,12 @@ content-type: application/json; charset=UTF-8
       "missingFills": [
         
       ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
+        
+      ],
       "announcements": [
         
       ],
@@ -1613,6 +1652,12 @@ content-type: application/json; charset=UTF-8
         "T261020003 C013 MX25 買 700 @ 922.5"
       ],
       "missingFills": [
+        
+      ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
         
       ],
       "announcements": [
@@ -1632,6 +1677,12 @@ content-type: application/json; charset=UTF-8
       "missingFills": [
         
       ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
+        
+      ],
       "announcements": [
         
       ],
@@ -1646,6 +1697,12 @@ content-type: application/json; charset=UTF-8
         "T261022001 C002 MX27 買 100 @ 2913.6"
       ],
       "missingFills": [
+        
+      ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
         
       ],
       "announcements": [
@@ -1664,6 +1721,12 @@ content-type: application/json; charset=UTF-8
         "T261023003 C014 MX13 買 100 @ 1952.7"
       ],
       "missingFills": [
+        
+      ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
         
       ],
       "announcements": [
@@ -1979,7 +2042,7 @@ content-type: application/json; charset=UTF-8
 
 [
   {
-    "id": 27,
+    "id": 29,
     "at": "***",
     "actor": "system:clock",
     "action": "advance",
@@ -2019,6 +2082,12 @@ content-type: application/json; charset=UTF-8
       "missingFills": [
         
       ],
+      "applicationsOpened": [
+        
+      ],
+      "applicationsFlagged": [
+        
+      ],
       "announcements": [
         
       ],
@@ -2040,3 +2109,470 @@ content-type: application/json; charset=UTF-8
   "autoUntil": null,
   "busy": false
 }
+%%% request GET /applications
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "applicationId": "OA-0001",
+    "name": "青木 陽菜",
+    "appliedOn": "2026-10-26",
+    "status": "口座開設",
+    "findings": [
+      
+    ],
+    "customerId": "C021"
+  },
+  {
+    "applicationId": "OA-0002",
+    "name": "松尾 大和",
+    "appliedOn": "2026-10-26",
+    "status": "口座開設",
+    "findings": [
+      
+    ],
+    "customerId": "C022"
+  },
+  {
+    "applicationId": "OA-0003",
+    "name": "石井 冬子",
+    "appliedOn": "2026-10-27",
+    "status": "確認待ち",
+    "findings": [
+      "適合性",
+      "適合性",
+      "資金の出どころ"
+    ],
+    "customerId": null
+  },
+  {
+    "applicationId": "OA-0004",
+    "name": "黒川 仁",
+    "appliedOn": "2026-10-27",
+    "status": "確認待ち",
+    "findings": [
+      "要注意リスト"
+    ],
+    "customerId": null
+  },
+  {
+    "applicationId": "OA-0005",
+    "name": "大西 由紀子",
+    "appliedOn": "2026-10-28",
+    "status": "確認待ち",
+    "findings": [
+      "重複の申込み"
+    ],
+    "customerId": null
+  },
+  {
+    "applicationId": "OA-0006",
+    "name": "中村 蓮",
+    "appliedOn": "2026-10-28",
+    "status": "確認待ち",
+    "findings": [
+      "資金の出どころ"
+    ],
+    "customerId": null
+  },
+  {
+    "applicationId": "OA-0007",
+    "name": "森 さくら",
+    "appliedOn": "2026-10-28",
+    "status": "口座開設",
+    "findings": [
+      
+    ],
+    "customerId": "C023"
+  }
+]
+%%% request GET /applications/OA-0004
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "applicationId": "OA-0004",
+  "name": "黒川 仁",
+  "nameKana": "クロカワ ジン",
+  "birthDate": "1979-08-21",
+  "age": 47,
+  "occupation": "自営業",
+  "employer": null,
+  "annualIncome": 9600000,
+  "experienceYears": 12,
+  "riskTolerance": "高",
+  "plannedInvestment": 8000000,
+  "appliedOn": "2026-10-27",
+  "status": "確認待ち",
+  "customerId": null,
+  "findings": [
+    {
+      "rule": "要注意リスト",
+      "detail": "W01 黒川 仁志 に部分一致。生年月日は不一致 (リストは 1966-03-02)。理由: 2023 年に他社で相場操縦の疑いにより口座を閉鎖 (社内の要注意リスト)"
+    }
+  ],
+  "similarCustomers": [
+    
+  ],
+  "watchlist": [
+    {
+      "entryId": "W01",
+      "name": "黒川 仁志",
+      "birthDate": "1966-03-02",
+      "reason": "2023 年に他社で相場操縦の疑いにより口座を閉鎖 (社内の要注意リスト)",
+      "listedOn": "2023-07-14"
+    }
+  ]
+}
+%%% request GET /applications/OA-0099
+authorization: Bearer test-key
+%%% response 404
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "Application OA-0099 was not found"
+}
+%%% request GET /audit?target=OA-0003
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "id": 30,
+    "at": "***",
+    "actor": "system:max-core",
+    "action": "dispatch",
+    "target": "OA-0003",
+    "detail": {
+      "error": null,
+      "reply": "received: 申込み OA-0003 を調べて (sub=max-core, ttl=600)",
+      "state": "TASK_STATE_COMPLETED",
+      "contextId": "ctx-fake"
+    }
+  }
+]
+%%% capture SID2 header:mcp-session-id
+%%% request POST :18477/k/test-key/ops/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"experimental":{},"logging":{},"prompts":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false},"tools":{"listChanged":false}},"serverInfo":{"name":"Max Operations MCP","version":"1.0.0"}}}
+
+
+%%% request POST :18477/k/test-key/ops/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID2}}
+
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+%%% response 202
+
+
+%%% request POST :18477/k/test-key/ops/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID2}}
+
+{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list-applications", "arguments": {"status": "確認待ち"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"[{\"applicationId\": \"OA-0003\",\"name\": \"石井 冬子\",\"appliedOn\": \"2026-10-27\",\"status\": \"確認待ち\",\"findings\": [\"適合性\",\"適合性\",\"資金の出どころ\"],\"customerId\": null},{\"applicationId\": \"OA-0004\",\"name\": \"黒川 仁\",\"appliedOn\": \"2026-10-27\",\"status\": \"確認待ち\",\"findings\": [\"要注意リスト\"],\"customerId\": null},{\"applicationId\": \"OA-0005\",\"name\": \"大西 由紀子\",\"appliedOn\": \"2026-10-28\",\"status\": \"確認待ち\",\"findings\": [\"重複の申込み\"],\"customerId\": null},{\"applicationId\": \"OA-0006\",\"name\": \"中村 蓮\",\"appliedOn\": \"2026-10-28\",\"status\": \"確認待ち\",\"findings\": [\"資金の出どころ\"],\"customerId\": null}]"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/ops/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID2}}
+
+{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get-application", "arguments": {"applicationId": "5"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"found\": true,\"applicationId\": \"OA-0005\",\"name\": \"大西 由紀子\",\"nameKana\": \"オオニシ ユキコ\",\"birthDate\": \"1948-12-09\",\"age\": 77,\"occupation\": \"無職\",\"employer\": null,\"annualIncome\": 2400000,\"experienceYears\": 30,\"riskTolerance\": \"低\",\"plannedInvestment\": 2000000,\"appliedOn\": \"2026-10-28\",\"status\": \"確認待ち\",\"customerId\": null,\"findings\": [{\"rule\": \"重複の申込み\",\"detail\": \"既存のお客さま C005 と名前と生年月日が同じ\"}],\"similarCustomers\": [{\"customerId\": \"C005\",\"name\": \"大西 由紀子\",\"birthDate\": \"1948-12-09\",\"occupation\": \"無職\",\"openedOn\": \"2003-03-20\"}],\"watchlist\": []}"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/ops/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID2}}
+
+{"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "request-account-approval", "arguments": {"contextId": "ctx-oa", "applicationId": "OA-0004", "recommendation": "深掘り", "facts": "f", "reasoning": "r"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Invalid tool parameters: /recommendation: does not have a value in the enumeration [\"承認\", \"否認\", \"追加確認\"]"}}
+
+
+%%% request POST :18477/k/test-key/ops/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID2}}
+
+{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "request-account-approval", "arguments": {"contextId": "ctx-oa4", "applicationId": "OA-0004", "recommendation": "承認", "facts": "自営業、47 歳、年収 960 万円、投資経験 12 年。", "findings": "要注意リスト: W01 黒川 仁志 に部分一致。生年月日が違う (1966-03-02 と 1979-08-21)", "gaps": "なし", "reasoning": "名前の一部が重なるだけで生年月日が違う別人。ほかに問題は無い。"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"{\"status\": \"requested\",\"approvalId\": \"TAP-0004\",\"applicationId\": \"OA-0004\",\"title\": \"OA-0004 口座開設: 黒川 仁 (規則の引っかかり 1 件)\"}"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/ops/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID2}}
+
+{"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "request-account-approval", "arguments": {"contextId": "ctx-oa5", "applicationId": "OA-0005", "recommendation": "否認", "facts": "77 歳、無職。", "findings": "重複の申込み: 既存のお客さま C005", "reasoning": "既存のお客さまと同じ人の二重の申込み。"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"{\"status\": \"requested\",\"approvalId\": \"TAP-0005\",\"applicationId\": \"OA-0005\",\"title\": \"OA-0005 口座開設: 大西 由紀子 (規則の引っかかり 1 件)\"}"}],"isError":false}}
+
+
+%%% request POST :18477/k/test-key/ops/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{SID2}}
+
+{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "request-account-approval", "arguments": {"contextId": "ctx-oa4", "applicationId": "OA-0004", "recommendation": "承認", "facts": "f", "reasoning": "r"}}}
+%%% response 200
+content-type: text/event-stream
+
+event: message
+data: {"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\"status\": \"already_pending\",\"applicationId\": \"OA-0004\",\"approvalId\": \"TAP-0004\"}"}],"isError":false}}
+
+
+%%% request GET /approvals?status=%E6%89%BF%E8%AA%8D%E5%BE%85%E3%81%A1
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "approvalId": "TAP-0003",
+    "kind": "売買審査",
+    "targetId": "SV-0003",
+    "contextId": "ctx-9",
+    "sfId": "***",
+    "recommendation": "問題なし",
+    "memo": "【調査メモ (エージェントの下書き)】SV-0003 インサイダー取引の疑い: 遠藤 拓也 / 汐見エナジー\n\n■ アラートと顧客\n会社員 (風見銀行)、投資経験 15 年。汐見エナジーの上方修正 (2026-10-05) の前に 100 株を買った。\n\n■ 注目すべき売買\n2026-10-01 / 買 / 100 株 / 1,396.0 円\n毎月最初の営業日に 100 株 (6 月は 300 株) を買い続けている\n\n■ 内部者の登録・発行会社との関係\n内部者の登録なし\n\n■ 似た過去の事例\nPC-02 / 問題なし / 積み立ての買いが公表の前日に当たった\n\n■ 確認できなかった材料\nなし\n\n■ 推奨 (下書き): 問題なし\n公表の前の買いは、1 年以上続く定型の積み立てと同じ日付・同じ株数で、公表と結び付く点が無い。\n\n※ 推奨は下書きです。判断は承認箱で担当者が行います。",
+    "requestedBy": "agent:max-surveillance",
+    "status": "承認待ち",
+    "decision": null,
+    "note": null,
+    "decidedBy": null
+  },
+  {
+    "approvalId": "TAP-0004",
+    "kind": "口座開設",
+    "targetId": "OA-0004",
+    "contextId": "ctx-oa4",
+    "sfId": "***",
+    "recommendation": "承認",
+    "memo": "【口座開設の審査メモ (エージェントの下書き)】OA-0004 黒川 仁\n\n■ 申込者\n自営業、47 歳、年収 960 万円、投資経験 12 年。\n\n■ 規則の引っかかり\n要注意リスト: W01 黒川 仁志 に部分一致。生年月日が違う (1966-03-02 と 1979-08-21)\n\n■ 確認できなかった材料\nなし\n\n■ 推奨 (下書き): 承認\n名前の一部が重なるだけで生年月日が違う別人。ほかに問題は無い。\n\n※ 推奨は下書きです。判断は承認箱で担当者が行います (承認で口座を開き、否認で断り、追加確認でお客さまに確かめます)。",
+    "requestedBy": "agent:max-operations",
+    "status": "承認待ち",
+    "decision": null,
+    "note": null,
+    "decidedBy": null
+  },
+  {
+    "approvalId": "TAP-0005",
+    "kind": "口座開設",
+    "targetId": "OA-0005",
+    "contextId": "ctx-oa5",
+    "sfId": "***",
+    "recommendation": "否認",
+    "memo": "【口座開設の審査メモ (エージェントの下書き)】OA-0005 大西 由紀子\n\n■ 申込者\n77 歳、無職。\n\n■ 規則の引っかかり\n重複の申込み: 既存のお客さま C005\n\n■ 推奨 (下書き): 否認\n既存のお客さまと同じ人の二重の申込み。\n\n※ 推奨は下書きです。判断は承認箱で担当者が行います (承認で口座を開き、否認で断り、追加確認でお客さまに確かめます)。",
+    "requestedBy": "agent:max-operations",
+    "status": "承認待ち",
+    "decision": null,
+    "note": null,
+    "decidedBy": null
+  }
+]
+%%% request POST /approvals/TAP-0004/decision
+authorization: Bearer test-key
+content-type: application/json
+
+{"decision":"問題なし","decidedBy":"口座管理部 森"}
+%%% response 400
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "decision must be one of 承認, 否認, 追加確認"
+}
+%%% request POST /approvals/TAP-0004/decision
+authorization: Bearer test-key
+content-type: application/json
+
+{"decision":"承認","note":"生年月日が違う別人","decidedBy":"口座管理部 森"}
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "approvalId": "TAP-0004",
+  "targetId": "OA-0004",
+  "decision": "承認",
+  "status": "判断済み"
+}
+%%% request POST /approvals/TAP-0005/decision
+authorization: Bearer test-key
+content-type: application/json
+
+{"decision":"否認","decidedBy":"口座管理部 森"}
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "approvalId": "TAP-0005",
+  "targetId": "OA-0005",
+  "decision": "否認",
+  "status": "判断済み"
+}
+%%% request GET /applications
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "applicationId": "OA-0001",
+    "name": "青木 陽菜",
+    "appliedOn": "2026-10-26",
+    "status": "口座開設",
+    "findings": [
+      
+    ],
+    "customerId": "C021"
+  },
+  {
+    "applicationId": "OA-0002",
+    "name": "松尾 大和",
+    "appliedOn": "2026-10-26",
+    "status": "口座開設",
+    "findings": [
+      
+    ],
+    "customerId": "C022"
+  },
+  {
+    "applicationId": "OA-0003",
+    "name": "石井 冬子",
+    "appliedOn": "2026-10-27",
+    "status": "確認待ち",
+    "findings": [
+      "適合性",
+      "適合性",
+      "資金の出どころ"
+    ],
+    "customerId": null
+  },
+  {
+    "applicationId": "OA-0004",
+    "name": "黒川 仁",
+    "appliedOn": "2026-10-27",
+    "status": "口座開設",
+    "findings": [
+      "要注意リスト"
+    ],
+    "customerId": "C024"
+  },
+  {
+    "applicationId": "OA-0005",
+    "name": "大西 由紀子",
+    "appliedOn": "2026-10-28",
+    "status": "否認",
+    "findings": [
+      "重複の申込み"
+    ],
+    "customerId": null
+  },
+  {
+    "applicationId": "OA-0006",
+    "name": "中村 蓮",
+    "appliedOn": "2026-10-28",
+    "status": "確認待ち",
+    "findings": [
+      "資金の出どころ"
+    ],
+    "customerId": null
+  },
+  {
+    "applicationId": "OA-0007",
+    "name": "森 さくら",
+    "appliedOn": "2026-10-28",
+    "status": "口座開設",
+    "findings": [
+      
+    ],
+    "customerId": "C023"
+  }
+]
+%%% request GET /audit?target=OA-0004
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "id": 41,
+    "at": "***",
+    "actor": "user:口座管理部 森",
+    "action": "decide",
+    "target": "OA-0004",
+    "detail": {
+      "note": "生年月日が違う別人",
+      "decision": "承認",
+      "approvalId": "TAP-0004"
+    }
+  },
+  {
+    "id": 40,
+    "at": "***",
+    "actor": "user:口座管理部 森",
+    "action": "open-account",
+    "target": "OA-0004",
+    "detail": {
+      "customerId": "C024"
+    }
+  },
+  {
+    "id": 38,
+    "at": "***",
+    "actor": "agent:max-operations",
+    "action": "request-approval",
+    "target": "OA-0004",
+    "detail": {
+      "sfId": "***",
+      "approvalId": "TAP-0004",
+      "recommendation": "承認"
+    }
+  },
+  {
+    "id": 31,
+    "at": "***",
+    "actor": "system:max-core",
+    "action": "dispatch",
+    "target": "OA-0004",
+    "detail": {
+      "error": null,
+      "reply": "received: 申込み OA-0004 を調べて (sub=max-core, ttl=600)",
+      "state": "TASK_STATE_COMPLETED",
+      "contextId": "ctx-fake"
+    }
+  }
+]

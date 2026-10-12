@@ -179,6 +179,45 @@
         </error-handler>
     </flow>
 
+    <!-- vars.day に届く申込みを受け付ける。vars.opened / vars.flagged に ID -->
+    <sub-flow name="intake-applications">
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.applications (application_id, name, name_kana, birth_date, occupation, employer, annual_income,
+                        experience_years, risk_tolerance, planned_investment, applied_on)
+                    select application_id, name, name_kana, birth_date, occupation, employer, annual_income,
+                           experience_years, risk_tolerance, planned_investment, applied_on
+                    from max.planned_applications where applied_on = cast(:d as date)
+                    on conflict (application_id) do nothing</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:insert>
+        <db:select config-ref="Db" target="newApps">
+            <db:sql>select application_id, name, to_char(birth_date, 'YYYY-MM-DD') as birth_date, occupation, annual_income, experience_years,
+                           risk_tolerance, planned_investment from max.applications where applied_on = cast(:d as date) and status = '受付'
+                    order by application_id</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="kycCustomers">
+            <db:sql>select customer_id, name, to_char(birth_date, 'YYYY-MM-DD') as birth_date from max.customers order by customer_id</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="kycWatchlist">
+            <db:sql>select entry_id, name, to_char(birth_date, 'YYYY-MM-DD') as birth_date, reason from max.watchlist order by entry_id</db:sql>
+        </db:select>
+        <set-variable variableName="checked" value="#[output application/java --- vars.newApps map ((a) -> {id: a.application_id} ++ max::kyc::check(a, vars.kycCustomers, vars.kycWatchlist, vars.day))]"/>
+        <set-variable variableName="opened" value="#[output application/java --- (vars.checked filter ($.result == 'pass')) map $.id]"/>
+        <set-variable variableName="flagged" value="#[output application/java --- (vars.checked filter ($.result == 'exception')) map $.id]"/>
+        <foreach collection="#[vars.checked filter ($.result == 'exception')]">
+            <db:update config-ref="Db">
+                <db:sql>update max.applications set status = '確認待ち', findings = cast(:f as jsonb) where application_id = :id</db:sql>
+                <db:input-parameters>#[{id: payload.id, f: write(payload.findings, 'application/json', {indent: false})}]</db:input-parameters>
+            </db:update>
+        </foreach>
+        <foreach collection="#[vars.opened]">
+            <set-variable variableName="appId" value="#[payload]"/>
+            <set-variable variableName="openedBy" value="system:onboarding-rules"/>
+            <flow-ref name="open-account"/>
+        </foreach>
+    </sub-flow>
+
     <!-- 1 営業日進める。payload は {date, prices, trades, announcements, raised}。
          変数の名前は surveillance (vars.trades、vars.days など) と重ねない -->
     <sub-flow name="advance-one-day">
@@ -268,6 +307,8 @@ output application/java
                     where cast(published_at as date) = cast(:d as date)</db:sql>
             <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
         </db:insert>
+        <!-- 今日の口座開設の申込み: 規則で確かめ、問題が無ければ口座を開き、引っかかれば確認待ちにして口座開設の broker に回す -->
+        <flow-ref name="intake-applications"/>
         <db:update config-ref="Db">
             <db:sql>update max.business_clock set today = cast(:d as date)</db:sql>
             <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
@@ -278,8 +319,10 @@ output application/java
                 announcements: vars.todays map $.announcement_id}, 'application/json', {indent: false})}]</db:input-parameters>
         </db:insert>
         <flow-ref name="surveillance"/>
+        <flow-ref name="dispatch-flagged"/>
         <set-payload value="#[{date: vars.day, prices: sizeOf(vars.dayPriceRows), trades: vars.dayTrades map ($.trade_id ++ ' ' ++ $.customer_id ++ ' ' ++ $.code ++ ' ' ++ $.side ++ ' ' ++ ($.qty as String) ++ ' @ ' ++ ($.price as String)),
             missingFills: vars.fillResult.missing,
+            applicationsOpened: vars.opened, applicationsFlagged: vars.flagged,
             announcements: vars.todays map $.announcement_id, raised: vars.raised map $.alert_id}]"/>
     </sub-flow>
 </mule>

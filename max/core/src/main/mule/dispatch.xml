@@ -18,14 +18,15 @@
     <!-- 調べるのに数十秒かかる (道具と LLM の往復)。待つのは 15 分まで -->
     <http:request-config name="Broker" responseTimeout="900000"/>
 
-    <!-- vars.alertId を broker に回し、結果を監査ログに残す。失敗も監査ログに残し、呼び出し元には失敗を返さない -->
+    <!-- vars.alertId (対象の ID) を broker に回し、結果を監査ログに残す。broker は vars.brokerUrl (無ければ broker.url)、
+         頼む文は vars.dispatchText (無ければ「アラート <ID> を調べて」)。失敗も監査ログに残し、呼び出し元には失敗を返さない -->
     <sub-flow name="dispatch">
         <try>
             <set-variable variableName="jwt" value="#[max::jwt::token('max-core', 600, p('broker.jwtSecret'))]"/>
-            <http:request config-ref="Broker" method="POST" url="${broker.url}">
+            <http:request config-ref="Broker" method="POST" url="#[vars.brokerUrl default p('broker.url')]">
                 <http:body><![CDATA[#[output application/json --- {
                     jsonrpc: '2.0', id: uuid(), method: 'SendMessage',
-                    params: {message: {messageId: uuid(), role: 'ROLE_USER', parts: [{text: 'アラート ' ++ vars.alertId ++ ' を調べて'}]}}}]]]></http:body>
+                    params: {message: {messageId: uuid(), role: 'ROLE_USER', parts: [{text: vars.dispatchText default ('アラート ' ++ vars.alertId ++ ' を調べて')}]}}}]]]></http:body>
                 <http:headers><![CDATA[#[{'Authorization': 'Bearer ' ++ vars.jwt, 'A2A-Version': '1.0'}]]]></http:headers>
             </http:request>
             <set-variable variableName="outcome" value="#[do {
@@ -60,6 +61,8 @@
                 <async>
                     <foreach collection="#[vars.raised map $.alert_id]">
                         <set-variable variableName="alertId" value="#[payload]"/>
+                        <set-variable variableName="brokerUrl" value="#[p('broker.url')]"/>
+                        <set-variable variableName="dispatchText" value="#['アラート ' ++ payload ++ ' を調べて']"/>
                         <flow-ref name="dispatch"/>
                     </foreach>
                 </async>
@@ -67,6 +70,35 @@
             <otherwise>
                 <foreach collection="#[vars.raised map $.alert_id]">
                     <set-variable variableName="alertId" value="#[payload]"/>
+                    <set-variable variableName="brokerUrl" value="#[p('broker.url')]"/>
+                    <set-variable variableName="dispatchText" value="#['アラート ' ++ payload ++ ' を調べて']"/>
+                    <flow-ref name="dispatch"/>
+                </foreach>
+            </otherwise>
+        </choice>
+    </sub-flow>
+
+    <!-- 規則に引っかかった申込み (vars.flagged: [application_id]) を口座開設の broker (broker.opsUrl) に回す -->
+    <sub-flow name="dispatch-flagged">
+        <choice>
+            <when expression="#[(p('broker.opsUrl') default '') == '' or isEmpty(vars.flagged default [])]">
+                <logger level="DEBUG" message="no dispatch"/>
+            </when>
+            <when expression="#[p('dispatch.async') == 'true']">
+                <async>
+                    <foreach collection="#[vars.flagged]">
+                        <set-variable variableName="alertId" value="#[payload]"/>
+                        <set-variable variableName="brokerUrl" value="#[p('broker.opsUrl')]"/>
+                        <set-variable variableName="dispatchText" value="#['申込み ' ++ payload ++ ' を調べて']"/>
+                        <flow-ref name="dispatch"/>
+                    </foreach>
+                </async>
+            </when>
+            <otherwise>
+                <foreach collection="#[vars.flagged]">
+                    <set-variable variableName="alertId" value="#[payload]"/>
+                    <set-variable variableName="brokerUrl" value="#[p('broker.opsUrl')]"/>
+                    <set-variable variableName="dispatchText" value="#['申込み ' ++ payload ++ ' を調べて']"/>
                     <flow-ref name="dispatch"/>
                 </foreach>
             </otherwise>
@@ -93,6 +125,8 @@
                 <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ vars.alertId ++ ' was not found']"/>
             </when>
         </choice>
+        <set-variable variableName="brokerUrl" value="#[p('broker.url')]"/>
+        <set-variable variableName="dispatchText" value="#['アラート ' ++ vars.alertId ++ ' を調べて']"/>
         <flow-ref name="dispatch"/>
         <error-handler>
             <on-error-continue>

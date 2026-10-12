@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  口座開設の申込み。時計が進むと届き (clock.xml の intake-applications)、規則 (max/kyc.dwl) で問題が無ければ口座を開き、
+  引っかかれば確認待ちにして口座開設の broker に回す。broker は承認箱に依頼し、社員の判断で口座を開くか断る。
+    GET  /applications           申込みの一覧 (?status=)
+    GET  /applications/{id}      申込みの中身 (規則の引っかかり、名前の似たお客さま、要注意リストの該当)
+  MCP (口座開設の broker の道具。MCP の口と同じポート、別の経路 /k/<api.key>/ops/mcp):
+    list-applications、get-application、request-account-approval
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:mcp="http://www.mulesoft.org/schema/mule/mcp"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/mcp http://www.mulesoft.org/schema/mule/mcp/current/mule-mcp.xsd">
+
+    <mcp:server-config name="OpsMcp" serverName="Max Operations MCP" serverVersion="1.0.0">
+        <mcp:streamable-http-server-connection listenerConfig="McpHttp" mcpEndpointPath="/k/${api.key}/ops/mcp"/>
+    </mcp:server-config>
+
+    <!-- 申込みの一覧: vars.statusFilter -->
+    <sub-flow name="applications-query">
+        <db:select config-ref="Db">
+            <db:sql>select application_id, name, to_char(applied_on, 'YYYY-MM-DD') as applied_on, status, cast(findings as text) as findings, customer_id
+                    from max.applications where (:status = '' or status = :status) order by application_id</db:sql>
+            <db:input-parameters>#[{status: vars.statusFilter}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {applicationId: $.application_id, name: $.name, appliedOn: $.applied_on,
+            status: $.status, findings: read($.findings, 'application/json') map $.rule, customerId: $.customer_id}]"/>
+    </sub-flow>
+
+    <!-- 申込みの中身: vars.appId。無ければ MAX:NOT_FOUND -->
+    <sub-flow name="application-detail">
+        <db:select config-ref="Db" target="app">
+            <db:sql>select application_id, name, name_kana, to_char(birth_date, 'YYYY-MM-DD') as birth_date, occupation, employer, annual_income,
+                           experience_years, risk_tolerance, planned_investment, to_char(applied_on, 'YYYY-MM-DD') as applied_on, status,
+                           cast(findings as text) as findings, customer_id
+                    from max.applications where application_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.appId}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[isEmpty(vars.app)]">
+                <raise-error type="MAX:NOT_FOUND" description="#['Application ' ++ vars.appId ++ ' was not found']"/>
+            </when>
+        </choice>
+        <!-- 名前の似たお客さま (姓か名が同じ) と、名前が重なる要注意リスト -->
+        <db:select config-ref="Db" target="similar">
+            <db:sql>select customer_id, name, to_char(birth_date, 'YYYY-MM-DD') as birth_date, occupation, to_char(opened_on, 'YYYY-MM-DD') as opened_on
+                    from max.customers where split_part(name, ' ', 1) = split_part(:n, ' ', 1) or split_part(name, ' ', 2) = split_part(:n, ' ', 2)
+                    order by customer_id</db:sql>
+            <db:input-parameters>#[{n: vars.app[0].name}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="listed">
+            <db:sql>select entry_id, name, to_char(birth_date, 'YYYY-MM-DD') as birth_date, reason, to_char(listed_on, 'YYYY-MM-DD') as listed_on
+                    from max.watchlist where position(replace(name, ' ', '') in replace(:n, ' ', '')) > 0
+                       or position(replace(:n, ' ', '') in replace(name, ' ', '')) > 0 order by entry_id</db:sql>
+            <db:input-parameters>#[{n: vars.app[0].name}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- do {
+            var a = vars.app[0]
+            ---
+            {applicationId: a.application_id, name: a.name, nameKana: a.name_kana, birthDate: a.birth_date,
+             age: max::kyc::age(a.birth_date, a.applied_on), occupation: a.occupation, employer: a.employer,
+             annualIncome: a.annual_income, experienceYears: a.experience_years, riskTolerance: a.risk_tolerance,
+             plannedInvestment: a.planned_investment, appliedOn: a.applied_on, status: a.status, customerId: a.customer_id,
+             findings: read(a.findings, 'application/json'),
+             similarCustomers: vars.similar map {customerId: $.customer_id, name: $.name, birthDate: $.birth_date, occupation: $.occupation, openedOn: $.opened_on},
+             watchlist: vars.listed map {entryId: $.entry_id, name: $.name, birthDate: $.birth_date, reason: $.reason, listedOn: $.listed_on}}}]"/>
+    </sub-flow>
+
+    <flow name="applications-list">
+        <http:listener config-ref="Http" path="/applications" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="statusFilter" value="#[attributes.queryParams.status default '']"/>
+        <flow-ref name="applications-query"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <flow name="application-get">
+        <http:listener config-ref="Http" path="/applications/{id}" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="appId" value="#[attributes.uriParams.id]"/>
+        <flow-ref name="application-detail"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <!-- MCP -->
+    <flow name="ops-list-applications">
+        <mcp:tool-listener config-ref="OpsMcp" name="list-applications">
+            <mcp:description><![CDATA[Lists the account-opening applications: ID, applied date, applicant, status
+(受付 / 口座開設 / 確認待ち / 承認待ち / 否認 / 追加確認) and the rules they tripped. Give status to list only that status.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "description": "Only applications in this status, e.g. 確認待ち. Empty or missing for all."}
+  }
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="statusFilter" value="#[payload.status default '']"/>
+        <flow-ref name="applications-query"/>
+    </flow>
+
+    <flow name="ops-get-application">
+        <mcp:tool-listener config-ref="OpsMcp" name="get-application">
+            <mcp:description><![CDATA[Returns one account-opening application in a single call: the applicant (age, occupation, income,
+experience, requested risk, planned first deposit), the rules it tripped with details, existing customers with the same family or
+given name (to spot duplicates), and watch-list entries whose name overlaps (with birth dates to tell people apart).
+The ID looks like OA-0003; "0003" or "3" is accepted too. Returns {"found": false} when there is no such application.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "applicationId": {"type": "string", "description": "Application ID such as OA-0003"}
+  },
+  "required": ["applicationId"]
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="appId" value="#[do {
+            var raw = trim(payload.applicationId default '')
+            var digits = raw replace /^(?i)OA-?/ with ''
+            ---
+            if (digits matches /\d{1,4}/) 'OA-' ++ ((digits as Number) as String {format: '0000'}) else raw}]"/>
+        <try>
+            <flow-ref name="application-detail"/>
+            <set-payload value="#[output application/json --- {found: true} ++ payload]"/>
+            <error-handler>
+                <on-error-continue type="MAX:NOT_FOUND">
+                    <set-payload value="#[output application/json --- {found: false, applicationId: vars.appId}]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <flow name="ops-request-account-approval">
+        <mcp:tool-listener config-ref="OpsMcp" name="request-account-approval">
+            <mcp:description><![CDATA[Sends the recommendation with the review memo to the approval
+inbox, where an employee decides (承認 opens the account, 否認 rejects it, 追加確認 asks the applicant for more).
+Returns {"status": "requested", "approvalId": ...}, or "already_pending" / "already_decided" / "not_found" / "failed" with the reason.]]></mcp:description>
+            <mcp:parameters-schema><![CDATA[{
+  "type": "object",
+  "properties": {
+    "contextId": {"type": "string", "description": "The conversation (A2A contextId)"},
+    "applicationId": {"type": "string", "description": "Application ID such as OA-0003"},
+    "recommendation": {"type": "string", "enum": ["承認", "否認", "追加確認"]},
+    "facts": {"type": "string", "description": "The applicant, 2 to 4 lines"},
+    "findings": {"type": "string", "description": "The rules tripped and what was found, one per line"},
+    "gaps": {"type": "string", "description": "What could not be checked"},
+    "reasoning": {"type": "string", "description": "Why this recommendation, 2 to 4 sentences"}
+  },
+  "required": ["contextId", "applicationId", "recommendation", "facts", "reasoning"]
+}]]></mcp:parameters-schema>
+            <mcp:responses>
+                <mcp:text-tool-response-content text="#[write(payload, 'application/json', {indent: false})]"/>
+            </mcp:responses>
+        </mcp:tool-listener>
+        <flow-ref name="mcp-guard"/>
+        <set-variable variableName="args" value="#[payload]"/>
+        <try>
+            <db:select config-ref="Db" target="app">
+                <db:sql>select application_id, name, status from max.applications where application_id = :id</db:sql>
+                <db:input-parameters>#[{id: vars.args.applicationId}]</db:input-parameters>
+            </db:select>
+            <db:select config-ref="Db" target="pending">
+                <db:sql>select approval_id from max.approvals where target_id = :id and status = '承認待ち'</db:sql>
+                <db:input-parameters>#[{id: vars.args.applicationId}]</db:input-parameters>
+            </db:select>
+            <choice>
+                <when expression="#[isEmpty(vars.app)]">
+                    <set-payload value="#[output application/json --- {status: 'not_found', applicationId: vars.args.applicationId}]"/>
+                </when>
+                <when expression="#[['口座開設', '否認', '追加確認'] contains vars.app[0].status]">
+                    <set-payload value="#[output application/json --- {status: 'already_decided', applicationId: vars.args.applicationId, decision: vars.app[0].status}]"/>
+                </when>
+                <when expression="#[not isEmpty(vars.pending)]">
+                    <set-payload value="#[output application/json --- {status: 'already_pending', applicationId: vars.args.applicationId, approvalId: vars.pending[0].approval_id}]"/>
+                </when>
+                <otherwise>
+                    <set-variable variableName="memo" value="#[do {
+                        var a = vars.args
+                        fun section(title, text) = if (isEmpty(trim(text default ''))) '' else '■ ' ++ title ++ '\n' ++ trim(text) ++ '\n\n'
+                        ---
+                        '【口座開設の審査メモ (エージェントの下書き)】' ++ vars.app[0].application_id ++ ' ' ++ vars.app[0].name ++ '\n\n'
+                        ++ section('申込者', a.facts)
+                        ++ section('規則の引っかかり', a.findings)
+                        ++ section('確認できなかった材料', a.gaps)
+                        ++ '■ 推奨 (下書き): ' ++ a.recommendation ++ '\n' ++ trim(a.reasoning default '') ++ '\n\n'
+                        ++ '※ 推奨は下書きです。判断は承認箱で担当者が行います (承認で口座を開き、否認で断り、追加確認でお客さまに確かめます)。'}]"/>
+                    <!-- 会話 (contextId) と調査メモは承認に残る (investigations は売買審査のアラートのためのもの) -->
+                    <set-variable variableName="req" value="#[{targetId: vars.args.applicationId, contextId: vars.args.contextId,
+                        recommendation: vars.args.recommendation, memo: vars.memo, requestedBy: 'agent:max-operations', kind: '口座開設'}]"/>
+                    <flow-ref name="create-approval"/>
+                    <set-payload value="#[output application/json --- {status: 'requested', approvalId: payload.approvalId, applicationId: payload.targetId, title: payload.title}]"/>
+                </otherwise>
+            </choice>
+            <error-handler>
+                <on-error-continue>
+                    <set-payload value="#[output application/json --- {status: 'failed', applicationId: vars.args.applicationId default '', reason: error.description}]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+</mule>
