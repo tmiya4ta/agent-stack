@@ -1,0 +1,297 @@
+(ns gemconv-test (:require [clay.json :as json] [clay.string :as str] [gemconv :as gc]))
+
+(defn jparse Dyn [s: Str] (let [[d e] (json/parse s)] d))
+(defn at Dyn [d: Dyn k: Str] (if (dyn-map? d) (get (dyn->map d) k (nil->dyn)) (nil->dyn)))
+(defn nth-of Dyn [d: Dyn i: Int] (if (dyn-vec? d) (let [v: Vec(Dyn) (dyn->vec d)] (nth v i)) (nil->dyn)))
+(defn len Int [d: Dyn] (if (dyn-vec? d) (let [v: Vec(Dyn) (dyn->vec d)] (count v)) -1))
+(defn js Str [d: Dyn] (let [[s e] (json/stringify d)] s))
+(defn s-of Str [d: Dyn] (if (dyn-str? d) (dyn->str d) "<not a string>"))
+
+;; ---- パス ----
+
+(deftest path-is-split-into-model-and-method
+  (let [[m1 a1] (gc/split-path "/v1beta/models/gemini-2.5-flash:generateContent")
+        [m2 a2] (gc/split-path "/v1/models/gemini-2.5-pro:streamGenerateContent")
+        [m3 a3] (gc/split-path "/models/x:countTokens")
+        [m4 a4] (gc/split-path "/v1beta/models")
+        [m5 a5] (gc/split-path "/v1beta/models/gemini-2.5-flash")]
+    (is (= m1 "gemini-2.5-flash")) (is (= a1 "generateContent"))
+    (is (= m2 "gemini-2.5-pro")) (is (= a2 "streamGenerateContent"))
+    (is (= m3 "x")) (is (= a3 "countTokens"))
+    (is (= m4 "")) (is (= a4 "list"))
+    (is (= m5 "gemini-2.5-flash")) (is (= a5 "get"))))
+
+(deftest query-key-is-read
+  (is (= (gc/query-param "/v1beta/models/m:generateContent?alt=sse&key=abc" "key") "abc"))
+  (is (= (gc/query-param "/v1beta/models/m:generateContent?key=abc&alt=sse" "alt") "sse"))
+  (is (= (gc/query-param "/v1beta/models/m:generateContent" "key") "")))
+
+;; ---- スキーマ ----
+
+(deftest gemini-schema-becomes-json-schema
+  (let [s (gc/convert-schema (jparse "{\"type\":\"OBJECT\",\"properties\":{\"agent\":{\"type\":\"STRING\",\"enum\":[\"a\",\"b\"]},\"reason\":{\"type\":\"STRING\",\"nullable\":true},\"n\":{\"type\":\"INTEGER\",\"format\":\"int32\"},\"tags\":{\"type\":\"ARRAY\",\"items\":{\"type\":\"STRING\"}}},\"required\":[\"agent\"],\"propertyOrdering\":[\"agent\",\"reason\"]}"))]
+    (is (= (s-of (at s "type")) "object"))
+    (is (= (js (at (at (at s "properties") "reason") "type")) "[\"string\",\"null\"]"))
+    (is (dyn-nil? (at (at (at s "properties") "reason") "nullable")))
+    (is (dyn-nil? (at s "propertyOrdering")))
+    (is (dyn-nil? (at (at (at s "properties") "n") "format")))
+    (is (= (s-of (at (at (at s "properties") "n") "type")) "integer"))
+    (is (= (s-of (at (at (at (at s "properties") "tags") "items") "type")) "string"))
+    (is (= (js (at (at (at s "properties") "agent") "enum")) "[\"a\",\"b\"]"))
+    (is (= (js (at s "required")) "[\"agent\"]"))))
+
+;; ---- 要求 ----
+
+(def tools-json ",\"tools\":[{\"functionDeclarations\":[{\"name\":\"get_order\",\"description\":\"Look up an order by id\",\"parameters\":{\"type\":\"OBJECT\",\"properties\":{\"order_id\":{\"type\":\"STRING\"}},\"required\":[\"order_id\"]}}]},{\"googleSearch\":{}}]")
+
+(deftest request-maps-system-text-and-config
+  (let [[b th err] (gc/gem->chat (str "{\"systemInstruction\":{\"parts\":[{\"text\":\"Be brief.\"},{\"text\":\"Use English.\"}]},"
+                                      "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Hi\"},{\"text\":\"there\"}]}],"
+                                      "\"generationConfig\":{\"temperature\":0.2,\"topP\":0.9,\"topK\":40,\"maxOutputTokens\":100,\"stopSequences\":[\"END\"],\"seed\":7}}")
+                                 "gemini-2.5-flash" false)
+        d (jparse b)
+        ms (at d "messages")]
+    (is (= err "")) (is (= th false))
+    (is (= (s-of (at d "model")) "gemini-2.5-flash"))
+    (is (= (len ms) 2))
+    (is (= (s-of (at (nth-of ms 0) "role")) "system"))
+    (is (= (s-of (at (nth-of ms 0) "content")) "Be brief.\nUse English."))
+    (is (= (s-of (at (nth-of ms 1) "content")) "Hi\nthere"))
+    (is (= (dyn->float (at d "temperature")) 0.2))
+    (is (= (dyn->float (at d "top_p")) 0.9))
+    (is (= (dyn->int (at d "top_k")) 40))
+    (is (= (dyn->int (at d "max_tokens")) 100))
+    (is (= (js (at d "stop")) "[\"END\"]"))
+    (is (= (dyn->int (at d "seed")) 7))
+    (is (dyn-nil? (at d "stream")))))
+
+(deftest request-maps-function-calls-and-responses
+  (let [[b th err] (gc/gem->chat (str "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"Where is order A100?\"}]},"
+                                      "{\"role\":\"model\",\"parts\":[{\"text\":\"thinking...\",\"thought\":true},{\"functionCall\":{\"name\":\"get_order\",\"args\":{\"order_id\":\"A100\"}},\"thoughtSignature\":\"xyz\"}]},"
+                                      "{\"role\":\"user\",\"parts\":[{\"functionResponse\":{\"name\":\"get_order\",\"response\":{\"status\":\"shipped\"}}}]}]"
+                                      tools-json ",\"toolConfig\":{\"functionCallingConfig\":{\"mode\":\"ANY\"}}}")
+                                 "m" false)
+        d (jparse b)
+        ms (at d "messages")
+        asst (nth-of ms 1)
+        tc (nth-of (at asst "tool_calls") 0)
+        tool (nth-of ms 2)
+        f (at (nth-of (at d "tools") 0) "function")]
+    (is (= err ""))
+    (is (= (len ms) 3))
+    (is (= (s-of (at asst "role")) "assistant"))
+    (is (= (s-of (at asst "content")) ""))
+    (is (= (s-of (at tc "id")) "call_0"))
+    (is (= (s-of (at tc "type")) "function"))
+    (is (= (s-of (at (at tc "function") "name")) "get_order"))
+    (is (= (s-of (at (at tc "function") "arguments")) "{\"order_id\":\"A100\"}"))
+    (is (= (s-of (at tool "role")) "tool"))
+    (is (= (s-of (at tool "tool_call_id")) "call_0"))
+    (is (= (s-of (at tool "content")) "{\"status\":\"shipped\"}"))
+    (is (= (len (at d "tools")) 1))
+    (is (= (s-of (at f "name")) "get_order"))
+    (is (= (s-of (at (at f "parameters") "type")) "object"))
+    (is (= (s-of (at d "tool_choice")) "required"))))
+
+(deftest request-matches-repeated-calls-by-name-in-order
+  (let [[b th err] (gc/gem->chat (str "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"q\"}]},"
+                                      "{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"a\",\"args\":{}}},{\"functionCall\":{\"name\":\"b\",\"args\":{}}},{\"functionCall\":{\"name\":\"a\",\"args\":{\"x\":1}}}]},"
+                                      "{\"role\":\"user\",\"parts\":[{\"functionResponse\":{\"name\":\"a\",\"response\":{\"r\":1}}},{\"functionResponse\":{\"name\":\"a\",\"response\":{\"r\":2}}},{\"functionResponse\":{\"name\":\"b\",\"response\":{\"r\":3}}},{\"text\":\"and?\"}]}]}")
+                                 "m" false)
+        ms (at (jparse b) "messages")]
+    (is (= err ""))
+    (is (= (len ms) 6))
+    (is (= (s-of (at (nth-of ms 2) "tool_call_id")) "call_0"))
+    (is (= (s-of (at (nth-of ms 3) "tool_call_id")) "call_2"))
+    (is (= (s-of (at (nth-of ms 4) "tool_call_id")) "call_1"))
+    (is (= (s-of (at (nth-of ms 5) "role")) "user"))
+    (is (= (s-of (at (nth-of ms 5) "content")) "and?"))))
+
+(deftest request-maps-json-output-and-thinking
+  (let [[b th err] (gc/gem->chat (str "{\"contents\":[{\"parts\":[{\"text\":\"x\"}]}],\"generationConfig\":{\"responseMimeType\":\"application/json\","
+                                      "\"responseSchema\":{\"type\":\"OBJECT\",\"properties\":{\"a\":{\"type\":\"STRING\"}}},"
+                                      "\"thinkingConfig\":{\"thinkingBudget\":0}}}")
+                                 "m" true)
+        d (jparse b)
+        rf (at d "response_format")
+        [b2 th2 e2] (gc/gem->chat "{\"contents\":[{\"parts\":[{\"text\":\"x\"}]}],\"generationConfig\":{\"responseMimeType\":\"application/json\",\"responseJsonSchema\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}},\"thinkingConfig\":{\"thinkingBudget\":512,\"includeThoughts\":true}}}" "m" false)
+        d2 (jparse b2)
+        [b3 th3 e3] (gc/gem->chat "{\"contents\":[{\"parts\":[{\"text\":\"x\"}]}],\"generationConfig\":{\"responseMimeType\":\"application/json\"}}" "m" false)]
+    (is (= err ""))
+    (is (= (s-of (at rf "type")) "json_schema"))
+    (is (= (s-of (at (at (at rf "json_schema") "schema") "type")) "object"))
+    (is (= (js (at d "chat_template_kwargs")) "{\"enable_thinking\":false}"))
+    (is (= (js (at d "stream")) "true"))
+    (is (= (js (at d "stream_options")) "{\"include_usage\":true}"))
+    (is (= th false))
+    (is (= e2 "")) (is (= th2 true))
+    (is (dyn-nil? (at d2 "chat_template_kwargs")))
+    (is (= (s-of (at (at (at (at d2 "response_format") "json_schema") "schema") "type")) "object"))
+    (is (= (s-of (at (at (jparse b3) "response_format") "type")) "json_object"))))
+
+(deftest request-errors
+  (let [[b1 t1 e1] (gc/gem->chat "{\"contents\":[{\"parts\":[{\"text\":\"x\"}]}],\"generationConfig\":{\"candidateCount\":2}}" "m" false)
+        [b2 t2 e2] (gc/gem->chat "{\"contents\":[]}" "m" false)
+        [b3 t3 e3] (gc/gem->chat "{\"contents\":[{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"AA==\"}}]}]}" "m" false)
+        [b4 t4 e4] (gc/gem->chat "nope" "m" false)]
+    (is (= e1 "* GenerateContentRequest.generation_config.candidate_count: only 1 candidate is supported by this emulator\n"))
+    (is (= e2 "* GenerateContentRequest.contents: contents is not specified\n"))
+    (is (= e3 "* GenerateContentRequest.contents: only text, functionCall and functionResponse parts are supported by this emulator\n"))
+    (is (str/starts-with? e4 "Invalid JSON payload received."))))
+
+;; ---- 応答 ----
+
+(def up-text "{\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"No.\",\"reasoning_content\":\"91 = 7*13\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":30,\"total_tokens\":40}}")
+(def up-tool "{\"id\":\"chatcmpl-2\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"x\",\"type\":\"function\",\"function\":{\"name\":\"get_order\",\"arguments\":\"{\\\"order_id\\\":\\\"A100\\\"}\"}}]}}],\"usage\":{\"prompt_tokens\":51,\"completion_tokens\":20,\"total_tokens\":71}}")
+(def up-len "{\"id\":\"chatcmpl-3\",\"choices\":[{\"index\":0,\"finish_reason\":\"length\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"hmm\"}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":8,\"total_tokens\":13}}")
+
+(deftest response-text-with-and-without-thoughts
+  (let [[o1 e1] (gc/chat->gem up-text "gemini-2.5-flash" false)
+        c1 (nth-of (at (jparse o1) "candidates") 0)
+        [o2 e2] (gc/chat->gem up-text "gemini-2.5-flash" true)
+        p2 (at (at (nth-of (at (jparse o2) "candidates") 0) "content") "parts")
+        u (at (jparse o1) "usageMetadata")]
+    (is (= e1 ""))
+    (is (= (js (at (at c1 "content") "parts")) "[{\"text\":\"No.\"}]"))
+    (is (= (s-of (at (at c1 "content") "role")) "model"))
+    (is (= (s-of (at c1 "finishReason")) "STOP"))
+    (is (= (dyn->int (at c1 "index")) 0))
+    (is (= (dyn->int (at u "promptTokenCount")) 10))
+    (is (= (dyn->int (at u "candidatesTokenCount")) 30))
+    (is (= (dyn->int (at u "totalTokenCount")) 40))
+    (is (= (s-of (at (jparse o1) "modelVersion")) "gemini-2.5-flash"))
+    (is (= (s-of (at (jparse o1) "responseId")) "chatcmpl-1"))
+    (is (= (len p2) 2))
+    (is (= (js (nth-of p2 0)) "{\"text\":\"91 = 7*13\",\"thought\":true}"))))
+
+(deftest response-function-call
+  (let [[o e] (gc/chat->gem up-tool "m" false)
+        c (nth-of (at (jparse o) "candidates") 0)
+        fc (at (nth-of (at (at c "content") "parts") 0) "functionCall")]
+    (is (= e ""))
+    (is (= (s-of (at fc "name")) "get_order"))
+    (is (= (js (at fc "args")) "{\"order_id\":\"A100\"}"))
+    (is (dyn-nil? (at fc "id")))
+    (is (= (s-of (at c "finishReason")) "STOP"))
+    (is (= (s-of (at c "finishMessage")) "Model generated function call(s)."))))
+
+(deftest response-max-tokens-without-text
+  (let [[o e] (gc/chat->gem up-len "m" false)
+        c (nth-of (at (jparse o) "candidates") 0)]
+    (is (= e ""))
+    (is (= (s-of (at c "finishReason")) "MAX_TOKENS"))
+    (is (dyn-nil? (at (at c "content") "parts")))))
+
+;; ---- 誤り ----
+
+(deftest errors-have-the-gemini-shape
+  (is (= (gc/gem-error 400 "bad") "{\"error\":{\"code\":400,\"message\":\"bad\",\"status\":\"INVALID_ARGUMENT\"}}"))
+  (is (= (gc/gem-error 403 "no") "{\"error\":{\"code\":403,\"message\":\"no\",\"status\":\"PERMISSION_DENIED\"}}"))
+  (is (= (gc/gem-error 404 "x") "{\"error\":{\"code\":404,\"message\":\"x\",\"status\":\"NOT_FOUND\"}}"))
+  (is (= (gc/gem-error 502 "x") "{\"error\":{\"code\":502,\"message\":\"x\",\"status\":\"UNAVAILABLE\"}}"))
+  (is (= (gc/gem-error 500 "x") "{\"error\":{\"code\":500,\"message\":\"x\",\"status\":\"INTERNAL\"}}"))
+  (is (= (gc/upstream-message "{\"error\":{\"code\":400,\"message\":\"too long\"}}") "too long")))
+
+;; ---- ストリーミング ----
+
+(def sse-up (str "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null}}]}\n\n"
+                 "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n"
+                 "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n"
+                 "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n"
+                 "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"t\",\"type\":\"function\",\"function\":{\"name\":\"get_order\",\"arguments\":\"{\\\"order\"}}]}}]}\n\n"
+                 "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"_id\\\":\\\"A1\\\"}\"}}]}}]}\n\n"
+                 "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{}}]}\n\n"
+                 "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":12,\"total_tokens\":21}}\n\n"
+                 "data: [DONE]\n\n"))
+
+;; 上流の SSE を size バイトずつに切って流す
+(defn run-stream Str [up: Str size: Int thoughts: Bool]
+  (loop [st (gc/stream-start "gemini-2.5-flash" thoughts) i 0 out ""]
+    (if (>= i (count up)) out
+      (let [j (min (+ i size) (count up))
+            [st2 o] (gc/stream-step st (subs up i j))]
+        (recur st2 j (str out o))))))
+
+(defn sse-chunks Vec(Dyn) [s: Str]
+  (loop [acc: Vec(Dyn) [] parts (str/split s "\r\n\r\n") i 0]
+    (if (>= i (count parts)) acc
+      (let [p (nth parts i)]
+        (if (str/starts-with? p "data: ") (recur (conj acc (jparse (subs p 6 (count p)))) parts (+ i 1)) (recur acc parts (+ i 1)))))))
+
+(deftest stream-converts-and-holds-the-last-part-for-finish
+  (let [out (run-stream sse-up 100000 false)
+        cs (sse-chunks out)
+        last-c (nth cs (- (count cs) 1))
+        lc (nth-of (at last-c "candidates") 0)
+        first-c (nth-of (at (nth cs 0) "candidates") 0)]
+    (is (str/ends-with? out "\r\n\r\n"))
+    (is (= (count cs) 2))
+    (is (= (js (at (at first-c "content") "parts")) "[{\"text\":\"Hel\"}]"))
+    (is (dyn-nil? (at first-c "finishReason")))
+    (is (= (js (at (at lc "content") "parts")) "[{\"text\":\"lo\"},{\"functionCall\":{\"name\":\"get_order\",\"args\":{\"order_id\":\"A1\"}}}]"))
+    (is (= (s-of (at lc "finishReason")) "STOP"))
+    (is (= (dyn->int (at (at last-c "usageMetadata") "totalTokenCount")) 21))
+    (is (= (s-of (at last-c "modelVersion")) "gemini-2.5-flash"))
+    (is (= (s-of (at last-c "responseId")) "c1"))))
+
+(deftest stream-shows-thoughts-when-asked
+  (let [cs (sse-chunks (run-stream sse-up 100000 true))
+        p0 (at (at (nth-of (at (nth cs 0) "candidates") 0) "content") "parts")]
+    (is (= (count cs) 3))
+    (is (= (js p0) "[{\"text\":\"hmm\",\"thought\":true}]"))))
+
+(deftest stream-is-the-same-at-any-split
+  (let [whole (run-stream sse-up 100000 true)]
+    (is (= (run-stream sse-up 1 true) whole))
+    (is (= (run-stream sse-up 7 true) whole))
+    (is (= (run-stream sse-up 64 true) whole))))
+
+(deftest stream-of-text-only-ends-with-stop
+  (let [up (str "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\n"
+                "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"finish_reason\":\"length\",\"delta\":{}}]}\n\n"
+                "data: [DONE]\n\n")
+        cs (sse-chunks (run-stream up 5 false))
+        c (nth-of (at (nth cs 0) "candidates") 0)]
+    (is (= (count cs) 1))
+    (is (= (js (at (at c "content") "parts")) "[{\"text\":\"OK\"}]"))
+    (is (= (s-of (at c "finishReason")) "MAX_TOKENS"))))
+
+(deftest stream-of-nothing-still-ends
+  (let [cs (sse-chunks (run-stream "data: [DONE]\n\n" 3 false))
+        c (nth-of (at (nth cs 0) "candidates") 0)]
+    (is (= (count cs) 1))
+    (is (= (js (at (at c "content") "parts")) "[{\"text\":\"\"}]"))
+    (is (= (s-of (at c "finishReason")) "STOP"))))
+
+;; ---- snake_case (公式の Python SDK はこちらで送る。API は両方を受ける) ----
+
+(deftest request-accepts-snake-case-fields
+  (let [[b th err] (gc/gem->chat (str "{\"system_instruction\":{\"parts\":[{\"text\":\"S\"}]},"
+                                      "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"q\"}]},"
+                                      "{\"role\":\"model\",\"parts\":[{\"function_call\":{\"name\":\"get_order\",\"args\":{\"order_id\":\"A1\"}}}]},"
+                                      "{\"role\":\"user\",\"parts\":[{\"function_response\":{\"name\":\"get_order\",\"response\":{\"some_key\":1}}}]}],"
+                                      "\"tools\":[{\"function_declarations\":[{\"name\":\"get_order\",\"parameters_json_schema\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"}}}}]}],"
+                                      "\"tool_config\":{\"function_calling_config\":{\"mode\":\"NONE\"}},"
+                                      "\"generation_config\":{\"max_output_tokens\":50,\"top_p\":0.5,\"stop_sequences\":[\"X\"],"
+                                      "\"thinking_config\":{\"include_thoughts\":true,\"thinking_budget\":0},"
+                                      "\"response_mime_type\":\"application/json\",\"response_schema\":{\"type\":\"OBJECT\",\"property_ordering\":[\"a\"],\"properties\":{\"a_b\":{\"type\":\"ARRAY\",\"max_items\":2,\"items\":{\"type\":\"STRING\"}}}}}}")
+                                 "m" false)
+        d (jparse b)
+        ms (at d "messages")
+        f (at (nth-of (at d "tools") 0) "function")
+        sch (at (at (at d "response_format") "json_schema") "schema")
+        ab (at (at sch "properties") "a_b")]
+    (is (= err ""))
+    (is (= th true))
+    (is (= (s-of (at (nth-of ms 0) "content")) "S"))
+    (is (= (s-of (at (at (nth-of (at (nth-of ms 2) "tool_calls") 0) "function") "arguments")) "{\"order_id\":\"A1\"}"))
+    (is (= (s-of (at (nth-of ms 3) "content")) "{\"some_key\":1}"))
+    (is (= (s-of (at (nth-of ms 3) "tool_call_id")) "call_0"))
+    (is (= (js (at (at f "parameters") "properties")) "{\"order_id\":{\"type\":\"string\"}}"))
+    (is (= (s-of (at d "tool_choice")) "none"))
+    (is (= (dyn->int (at d "max_tokens")) 50))
+    (is (= (js (at d "stop")) "[\"X\"]"))
+    (is (= (js (at d "chat_template_kwargs")) "{\"enable_thinking\":false}"))
+    (is (dyn-nil? (at sch "property_ordering")))
+    (is (= (s-of (at ab "type")) "array"))
+    (is (= (dyn->int (at ab "maxItems")) 2))))

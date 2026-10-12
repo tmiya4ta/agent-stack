@@ -1,0 +1,189 @@
+;; llm.gemini.emu.theorems.dev — Gemini API (generateContent) の真似。中身は k0 の llm.ornith.model (llama-server + Ornith 1.5 35B)。
+;; Agent Network の broker の Gemini の接続 (v2、url を設定できる) から使う。Mule の Inference コネクタの Gemini の接続は
+;; 行き先が generativelanguage.googleapis.com に固定なので使えない。
+;;
+;;   GET  /                                                  このサービスの説明 (認証なし)
+;;   GET  /health                                            死活確認 (認証なし)
+;;   GET  /v1beta/models、/v1beta/models/<model>             モデルの一覧と 1 つ
+;;   POST /v1beta/models/<model>:generateContent
+;;   POST /v1beta/models/<model>:streamGenerateContent      ?alt=sse なら SSE、無ければ JSON の配列 (流さずに 1 つ)
+;;   POST /v1beta/models/<model>:countTokens
+;;   /v1beta の代わりに /v1、あるいは無しでもよい。<model> は何でもよい (応答の modelVersion に返すだけ)
+;;
+;; 変換は gemconv.clay。本物と違うところ: thinkingBudget は 0 (考えない) か、それ以外 (考える) かだけを見る。
+;; thoughtsTokenCount は出さない (llama-server は考えた分のトークン数を分けない。candidatesTokenCount に入る)。
+;; googleSearch などの組み込みの道具は捨てる。candidateCount は 1 だけ。部品は text、functionCall、functionResponse だけ。
+;;
+;; 認証: x-goog-api-key: <鍵>、?key=<鍵>、Authorization: Bearer <鍵> のどれか。鍵が URL に入りうるので、ログに URI は出さない。
+;; 鍵が無ければ全部断る。llama-server へは UPSTREAM_KEY_FILE の鍵で行く。
+;; LOG_BODIES=1 なら要求の本文をログに出す (broker が何を送るかを見るため)。
+;;
+;; 環境変数: PORT (既定 8080)、UPSTREAM (既定 http://llm-ornith-model.ai-model.svc.cluster.local)、
+;;           API_KEY_FILE (既定 /secrets/self/api-key)、UPSTREAM_KEY_FILE (既定 /secrets/upstream/api-key)、
+;;           MODEL (一覧に出す名前、既定 gemini-2.5-flash)、LOG_BODIES
+(ns llm-gemini-emu
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]
+            [clay.http :as http]
+            [clay.httpmsg :as hm]
+            [gemconv :as gc]))
+
+(defrecord Cfg [upstream: Str upstream-key: Str key: Str model: Str log-bodies: Bool])
+
+(defn env-or Str [name: Str dflt: Str]
+  (let [[v found] (getenv name)] (if (or (not found) (= (count v) 0)) dflt v)))
+
+(defn read-key Str [path: Str]
+  (let [[s e] (read-file path)] (if (not= e "") "" (str/trim s))))
+
+(defn log-line Int [line: Str] (do (eprintln line) 0))
+
+;; ---- 応答 ----
+
+(defn jresp hm/Response [status: Int body: Str]
+  (hm/response status [(hm/->Header "Content-Type" "application/json; charset=UTF-8")] body false))
+
+(defn err-resp hm/Response [status: Int msg: Str] (jresp status (gc/gem-error status msg)))
+
+(defn describe hm/Response [cfg: &Cfg]
+  (jresp 200 (str "{\"name\":\"llm.gemini.emu.theorems.dev\","
+                  "\"what\":\"An emulation of the Gemini API (generateContent, streamGenerateContent) for Agent Fabric brokers.\","
+                  "\"backend\":\"llm.ornith.model.theorems.dev (llama-server + Ornith 1.5 35B, local iGPU)\","
+                  "\"model\":" (gc/jstr (:model cfg)) ","
+                  "\"endpoints\":[\"POST /v1beta/models/{model}:generateContent\",\"POST /v1beta/models/{model}:streamGenerateContent?alt=sse\","
+                  "\"POST /v1beta/models/{model}:countTokens\",\"GET /v1beta/models\"],"
+                  "\"auth\":\"x-goog-api-key: <key> (or ?key=<key>, or Authorization: Bearer <key>)\","
+                  "\"source\":\"agent-stack/emu/llm-gemini-emu\"}")))
+
+(defn model-json Str [name: Str]
+  (str "{\"name\":" (gc/jstr (str "models/" name)) ",\"version\":\"001\",\"displayName\":" (gc/jstr name) ","
+       "\"description\":\"Served by llm.gemini.emu (Ornith 1.5 35B on llama-server)\","
+       "\"inputTokenLimit\":32768,\"outputTokenLimit\":32768,"
+       "\"supportedGenerationMethods\":[\"generateContent\",\"countTokens\"],\"thinking\":true}"))
+
+;; ---- 要求 ----
+
+(defn path-of Str [uri: Str]
+  (let [q (str/index-of uri "?")] (if (< q 0) uri (subs uri 0 q))))
+
+;; 鍵: "" (無い)、"ok"、"bad"
+(defn auth-state Str [cfg: &Cfg req: &hm/Request]
+  (let [k (:key cfg)
+        [g fg] (hm/header-of (:headers req) "x-goog-api-key")
+        [a fa] (hm/header-of (:headers req) "authorization")
+        q (gc/query-param (:uri req) "key")
+        given (cond fg g (and fa (str/starts-with? a "Bearer ")) (subs a 7 (count a)) :else q)]
+    (cond (= given "") "" (and (> (count k) 0) (= given k)) "ok" :else "bad")))
+
+;; ---- llama-server へ ----
+
+(defn upstream-opts http/RequestOpts [cfg: &Cfg method: Str path: Str body: Str]
+  (let [o (http/request-opts (str (:upstream cfg) path))
+        hs [(hm/->Header "Authorization" (str "Bearer " (:upstream-key cfg))) (hm/->Header "Content-Type" "application/json")]]
+    (assoc (assoc (assoc (assoc o :method method) :headers hs) :body body) :timeout-ms 900000)))
+
+(defn call-upstream Values(hm/Resp Str) [cfg: &Cfg path: Str body: Str]
+  (let [t0 (mono-ms)
+        [r e] (http/request (upstream-opts cfg "POST" path body))
+        z (log-line (str "upstream POST " path " -> " (if (= e "") (str (:status r)) e) " " (- (mono-ms) t0) "ms"))]
+    (values r e)))
+
+;; 流さない: [Gemini の応答の本文 状態]
+(defn generate Values(Str Int) [cfg: &Cfg body: Str model: Str]
+  (let [[up th err] (gc/gem->chat body model false)]
+    (if (not= err "") (values (gc/gem-error 400 err) 400)
+      (let [[r e] (call-upstream cfg "/v1/chat/completions" up)]
+        (cond (not= e "") (values (gc/gem-error 502 (str "upstream: " e)) 502)
+              (>= (:status r) 400) (values (gc/gem-error (:status r) (gc/upstream-message (:body r))) (:status r))
+              :else (let [[out oe] (gc/chat->gem (:body r) model th)]
+                      (if (= oe "") (values out 200) (values (gc/gem-error 502 oe) 502))))))))
+
+;; 流す (alt=sse)。SSE をすぐ開き、上流の断片を gemconv の状態機械に通して書く (別のスレッド)。
+;; 上流が誤りを返したら、その誤りを Gemini の形で 1 つの data: にして書く (状態は 200 のまま)
+(defn on-head-to http/Flow [status: &Atom(Int) r: &hm/Resp]
+  (do (reset! status (:status r)) (http/->Continue)))
+
+(defn on-chunk-to http/Flow [sk: &hm/Sink st: &Atom(gc/Stream) status: &Atom(Int) errbuf: &Atom(Str) c: &Str]
+  (if (>= (deref status) 400)
+    (do (reset! errbuf (str (deref errbuf) c)) (http/->Continue))
+    (let [[s2 out] (gc/stream-step (deref st) c)
+          z (reset! st s2)]
+      (if (or (= out "") (= (hm/sink-write sk out) "")) (http/->Continue) (http/->Stop)))))
+
+(defn stream-generate hm/Response [cfg: Cfg up: Str model: Str thoughts: Bool path: Str]
+  (let [[resp sk] (hm/stream-response 200 [(hm/->Header "Content-Type" "text/event-stream") (hm/->Header "Cache-Control" "no-cache")])
+        st (atom (gc/stream-start model thoughts))
+        status (atom 0)
+        errbuf (atom "")
+        o0 (upstream-opts cfg "POST" "/v1/chat/completions" up)
+        o (assoc o0 :as (http/->ChunkStream (fn http/Flow [r: hm/Resp] (on-head-to status r))
+                                            (fn http/Flow [c: Str] (on-chunk-to sk st status errbuf c))))
+        z (future-detach (future (fn Int [k: Int]
+                                   (let [t0 (mono-ms)
+                                         [r e] (http/request o)
+                                         l (log-line (str "upstream POST /v1/chat/completions (stream) -> " (if (= e "") (str (deref status)) e) " " (- (mono-ms) t0) "ms"))
+                                         tail (cond (not= e "") (gc/sse (gc/gem-error 502 (str "upstream: " e)))
+                                                    (>= (deref status) 400) (gc/sse (gc/gem-error (deref status) (gc/upstream-message (deref errbuf))))
+                                                    :else (gc/stream-end (deref st)))
+                                         w (if (= tail "") "" (hm/sink-write sk tail))
+                                         c (hm/sink-close sk)]
+                                     0)) 1))]
+    resp))
+
+(defn stream-route hm/Response [cfg: Cfg uri: Str body: Str model: Str]
+  (if (= (gc/query-param uri "alt") "sse")
+    (let [[up th err] (gc/gem->chat body model true)]
+      (if (not= err "") (err-resp 400 err) (stream-generate cfg up model th "")))
+    (let [[out st] (generate cfg body model)]
+      (if (= st 200) (jresp 200 (str "[" out "]")) (jresp st out)))))
+
+;; countTokens: llama-server のテンプレートを当ててから数える
+(defn count-tokens hm/Response [cfg: &Cfg body: Str model: Str]
+  (let [[m0 ok] (gc/json-map body)
+        inner (if (gc/has m0 "generateContentRequest") (gc/to-json (gc/dget m0 "generateContentRequest")) body)
+        [up th err] (gc/gem->chat inner model false)]
+    (if (not= err "") (err-resp 400 err)
+      (let [[r e] (call-upstream cfg "/apply-template" up)]
+        (if (or (not= e "") (>= (:status r) 400)) (err-resp 502 (str "upstream: " (if (not= e "") e (gc/upstream-message (:body r)))))
+          (let [[tm tok] (gc/json-map (:body r))
+                prompt (gc/dstr (gc/dget tm "prompt"))
+                tb (gc/to-json (->dyn (assoc (assoc (gc/emap) "content" (->dyn prompt)) "add_special" (->dyn true))))
+                [r2 e2] (call-upstream cfg "/tokenize" tb)
+                [km kok] (gc/json-map (if (= e2 "") (:body r2) ""))
+                n (count (gc/as-vec (gc/dget km "tokens")))]
+            (if (not kok) (err-resp 502 "upstream: tokenize failed")
+              (jresp 200 (str "{\"totalTokens\":" n "}")))))))))
+
+(defn handle hm/Response [cfg: Cfg req: hm/Request]
+  (let [p (path-of (:uri req))
+        m (:method req)
+        [model act] (gc/split-path p)
+        au (auth-state cfg req)]
+    (cond
+      (and (= m "GET") (= p "/")) (describe cfg)
+      (and (= m "GET") (= p "/health")) (jresp 200 "{\"status\":\"ok\"}")
+      (= au "") (err-resp 403 "Method doesn't allow unregistered callers (callers without established identity). Please use API Key or other form of API consumer identity to call this API.")
+      (= au "bad") (err-resp 400 "API key not valid. Please pass a valid API key.")
+      (and (= m "GET") (= act "list")) (jresp 200 (str "{\"models\":[" (model-json (:model cfg)) "]}"))
+      (and (= m "GET") (= act "get")) (jresp 200 (model-json model))
+      (and (= m "POST") (not= model "") (or (= act "generateContent") (= act "streamGenerateContent") (= act "countTokens")))
+      (let [z (if (:log-bodies cfg) (log-line (str "request " act " " model " " (:body req))) 0)]
+        (cond (= act "generateContent") (let [[out st] (generate cfg (:body req) model)] (jresp st out))
+              (= act "countTokens") (count-tokens cfg (:body req) model)
+              :else (stream-route cfg (:uri req) (:body req) model)))
+      :else (err-resp 404 (str "Unknown request: " m " " p)))))
+
+(defn main Int []
+  (let [cfg (->Cfg (env-or "UPSTREAM" "http://llm-ornith-model.ai-model.svc.cluster.local")
+                   (read-key (env-or "UPSTREAM_KEY_FILE" "/secrets/upstream/api-key"))
+                   (read-key (env-or "API_KEY_FILE" "/secrets/self/api-key"))
+                   (env-or "MODEL" "gemini-2.5-flash")
+                   (= (env-or "LOG_BODIES" "") "1"))
+        [port pe] (parse-long (env-or "PORT" "8080"))
+        o (assoc (assoc (http/default-server-opts) :port port) :max-body 16777216)
+        z (log-line (str "llm-gemini-emu: listening on " port ", upstream " (:upstream cfg)
+                         (if (= (count (:key cfg)) 0) " (no API key: every request is refused)" "")
+                         (if (:log-bodies cfg) " (logging request bodies)" "")))
+        [rc e] (http/run-server (fn hm/Response [req: hm/Request] (handle cfg req)) o)]
+    (if (not= e "") (do (eprintln (str "llm-gemini-emu: " e)) 1) rc)))

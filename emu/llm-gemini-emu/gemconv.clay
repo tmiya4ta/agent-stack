@@ -1,0 +1,460 @@
+;; Gemini API (generateContent) ⇔ OpenAI Chat Completions (llama-server) の変換。I/O はしない。
+;; 応答の形は本物の Gemini (gemini-2.5-flash、2026-10-12) の記録に合わせた。キーの順も本物と同じにする (Map は入れた順に書き出される)。
+;;
+;;   要求: contents (user / model / functionCall / functionResponse)、systemInstruction、tools.functionDeclarations、
+;;         toolConfig.functionCallingConfig、generationConfig (temperature、topP、topK、maxOutputTokens、stopSequences、seed、
+;;         presencePenalty、frequencyPenalty、responseMimeType + responseSchema / responseJsonSchema、thinkingConfig)
+;;   応答: candidates[0] (text、thought、functionCall、finishReason)、usageMetadata、modelVersion、responseId
+;;   流す: stream-start / stream-step で、上流の SSE の断片を Gemini の SSE (data: {..}\r\n\r\n) にする
+(ns gemconv
+  (:require [clay.core]
+            [clay.string :as str]
+            [clay.json :as json]))
+
+;; ---- 小物 ----
+
+(defn jstr Str [s: Str]
+  (let [[j e] (json/stringify (->dyn s))] j))
+
+(defn emap Map(Str Dyn) [] (let [m: Map(Str Dyn) {}] m))
+
+;; 項目名は camelCase と snake_case のどちらでも来る (API は両方を受け、公式の Python SDK は snake_case で送る)。
+;; Gemini の項目はここを通して読む。利用者のデータ (args、response、スキーマのプロパティ名) の中は変えない
+
+;; camelCase → snake_case
+(defn snake Str [k: Str]
+  (loop [out "" i 0]
+    (if (>= i (count k)) out
+      (let [c (subs k i (+ i 1)) l (lower-case c)]
+        (recur (if (not= c l) (str out "_" l) (str out c)) (+ i 1))))))
+
+;; snake_case → camelCase
+(defn camel Str [k: Str]
+  (loop [out "" i 0 up false]
+    (if (>= i (count k)) out
+      (let [c (subs k i (+ i 1))]
+        (cond (and (= c "_") (> i 0)) (recur out (+ i 1) true)
+              up (recur (str out (str/upper-case c)) (+ i 1) false)
+              :else (recur (str out c) (+ i 1) false))))))
+
+(defn dget Dyn [m: &Map(Str Dyn) k: Str]
+  (if (contains? m k) (get! m k)
+    (let [s (snake k)] (if (= s k) (nil->dyn) (get m s (nil->dyn))))))
+
+(defn has Bool [m: &Map(Str Dyn) k: Str] (or (contains? m k) (contains? m (snake k))))
+
+(defn as-map Map(Str Dyn) [d: Dyn] (if (dyn-map? d) (dyn->map d) (emap)))
+
+(defn as-vec Vec(Dyn) [d: Dyn] (if (dyn-vec? d) (dyn->vec d) (let [v: Vec(Dyn) []] v)))
+
+(defn dstr Str [d: Dyn] (if (dyn-str? d) (dyn->str d) ""))
+
+(defn json-map Values(Map(Str Dyn) Bool) [body: Str]
+  (let [[d e] (json/parse body)]
+    (if (and (= e "") (dyn-map? d)) (values (dyn->map d) true) (values (emap) false))))
+
+(defn to-json Str [d: Dyn] (let [[s e] (json/stringify d)] s))
+
+;; 値があれば入れる
+(defn put-some Map(Str Dyn) [m: Map(Str Dyn) k: Str v: Dyn]
+  (if (dyn-nil? v) m (assoc m k v)))
+
+;; ---- パスとクエリ ----
+
+;; /v1beta/models/<model>:<method> → [model method]。/v1beta/models は ["" "list"]、/v1beta/models/<model> は [model "get"]。
+;; 先頭の /v1beta、/v1 は無くてもよい。合わなければ ["" ""]
+(defn split-path Values(Str Str) [path: Str]
+  (let [p (cond (str/starts-with? path "/v1beta/") (subs path 7 (count path))
+                (str/starts-with? path "/v1/") (subs path 3 (count path))
+                :else path)]
+    (cond
+      (or (= p "/models") (= p "/models/")) (values "" "list")
+      (not (str/starts-with? p "/models/")) (values "" "")
+      :else (let [rest (subs p 8 (count p))
+                  c (str/index-of rest ":")]
+              (cond (= (count rest) 0) (values "" "list")
+                    (< c 0) (values rest "get")
+                    :else (values (subs rest 0 c) (subs rest (+ c 1) (count rest))))))))
+
+;; uri の ?a=b&c=d から name の値 (無ければ "")。値のパーセントエンコードは解かない (鍵は英数字)
+(defn query-param Str [uri: Str name: Str]
+  (let [q (str/index-of uri "?")]
+    (if (< q 0) ""
+      (let [parts (str/split (subs uri (+ q 1) (count uri)) "&")
+            pre (str name "=")]
+        (loop [i 0]
+          (if (>= i (count parts)) ""
+            (let [p (nth parts i)]
+              (if (str/starts-with? p pre) (subs p (count pre) (count p)) (recur (+ i 1))))))))))
+
+;; ---- スキーマ (Gemini の OpenAPI の部分集合 → JSON Schema) ----
+;; type を小文字にし、nullable は type を [t, "null"] にする。propertyOrdering と JSON Schema に無い format (int32 など) は外す
+
+(defn drop-format? Bool [f: Str]
+  (or (= f "int32") (= f "int64") (= f "float") (= f "double") (= f "enum")))
+
+(defn convert-schema Dyn [d: Dyn]
+  (if (not (dyn-map? d)) d
+    (let [m (dyn->map d)
+          nullable (let [n (dget m "nullable")] (and (dyn-bool? n) (dyn->bool n)))
+          ks (keys m)]
+      (loop [out (emap) i 0]
+        (if (>= i (count ks)) (->dyn out)
+          (let [k (camel (nth ks i))
+                v (get! m (nth ks i))]
+            (cond
+              (or (= k "nullable") (= k "propertyOrdering")) (recur out (+ i 1))
+              (and (= k "format") (dyn-str? v) (drop-format? (dyn->str v))) (recur out (+ i 1))
+              (and (= k "type") (dyn-str? v))
+              (let [t (lower-case (dyn->str v))]
+                (if nullable
+                  (let [tv: Vec(Dyn) [(->dyn t) (->dyn "null")]] (recur (assoc out k (->dyn tv)) (+ i 1)))
+                  (recur (assoc out k (->dyn t)) (+ i 1))))
+              (and (= k "properties") (dyn-map? v)) (recur (assoc out k (convert-props (dyn->map v))) (+ i 1))
+              (or (= k "items") (= k "not")) (recur (assoc out k (convert-schema v)) (+ i 1))
+              (and (or (= k "anyOf") (= k "oneOf") (= k "allOf") (= k "prefixItems")) (dyn-vec? v))
+              (recur (assoc out k (convert-list (dyn->vec v))) (+ i 1))
+              :else (recur (assoc out k v) (+ i 1)))))))))
+
+(defn convert-props Dyn [m: Map(Str Dyn)]
+  (let [ks (keys m)]
+    (loop [out (emap) i 0]
+      (if (>= i (count ks)) (->dyn out)
+        (let [k (nth ks i)] (recur (assoc out k (convert-schema (get! m k))) (+ i 1)))))))
+
+(defn convert-list Dyn [v: Vec(Dyn)]
+  (loop [out: Vec(Dyn) [] i 0]
+    (if (>= i (count v)) (->dyn out) (recur (conj out (convert-schema (nth v i))) (+ i 1)))))
+
+;; ---- 要求 ----
+
+(defn bad-arg Str [field: Str msg: Str] (str "* GenerateContentRequest." field ": " msg "\n"))
+
+;; parts の text (thought でないもの) を改行でつなぐ
+(defn parts-text Str [parts: &Vec(Dyn)]
+  (loop [out "" i 0 n 0]
+    (if (>= i (count parts)) out
+      (let [p (as-map (nth parts i))
+            t (dget p "text")
+            th (let [x (dget p "thought")] (and (dyn-bool? x) (dyn->bool x)))]
+        (if (or (not (dyn-str? t)) th) (recur out (+ i 1) n)
+          (recur (if (= n 0) (str out (dyn->str t)) (str out "\n" (dyn->str t))) (+ i 1) (+ n 1)))))))
+
+(defn supported-part? Bool [p: &Map(Str Dyn)]
+  (or (has p "text") (has p "functionCall") (has p "functionResponse")))
+
+(defn all-supported? Bool [parts: &Vec(Dyn)]
+  (loop [i 0]
+    (if (>= i (count parts)) true
+      (let [p (as-map (nth parts i))] (if (supported-part? p) (recur (+ i 1)) false)))))
+
+(defn msg Dyn [role: Str content: Str]
+  (->dyn (assoc (assoc (emap) "role" (->dyn role)) "content" (->dyn content))))
+
+;; 会話の変換の途中の状態: 出来たメッセージ、前の model の番の関数呼び出しのうち、まだ結果の来ていないもの (名前と id)、通し番号
+(defrecord Conv [msgs: Vec(Dyn) names: Vec(Str) ids: Vec(Str) next: Int])
+
+;; model の番: 文と関数呼び出しを assistant のメッセージ 1 つにする
+(defn model-turn Conv [c: Conv parts: Vec(Dyn)]
+  (loop [tcs: Vec(Dyn) [] names: Vec(Str) [] ids: Vec(Str) [] n (:next c) i 0]
+    (if (>= i (count parts))
+      (let [m0 (assoc (assoc (emap) "role" (->dyn "assistant")) "content" (->dyn (parts-text parts)))
+            m (if (> (count tcs) 0) (assoc m0 "tool_calls" (->dyn tcs)) m0)]
+        (->Conv (conj (:msgs c) (->dyn m)) names ids n))
+      (let [p (as-map (nth parts i))
+            fc (dget p "functionCall")]
+        (if (not (dyn-map? fc)) (recur tcs names ids n (+ i 1))
+          (let [f (dyn->map fc)
+                name (dstr (dget f "name"))
+                args (let [a (dget f "args")] (if (dyn-nil? a) (->dyn (emap)) a))
+                id (str "call_" n)
+                fn-m (assoc (assoc (emap) "name" (->dyn name)) "arguments" (->dyn (to-json args)))
+                tc (-> (emap) (assoc "id" (->dyn id)) (assoc "type" (->dyn "function")) (assoc "function" (->dyn fn-m)))]
+            (recur (conj tcs (->dyn tc)) (conj names name) (conj ids id) (+ n 1) (+ i 1))))))))
+
+;; 名前の合う最初の未使用の呼び出しの位置 (無ければ -1)
+(defn find-name Int [names: &Vec(Str) name: Str]
+  (loop [i 0] (if (>= i (count names)) -1 (if (= (nth names i) name) i (recur (+ i 1))))))
+
+(defn remove-at Vec(Str) [v: Vec(Str) k: Int]
+  (loop [out: Vec(Str) [] i 0] (if (>= i (count v)) out (recur (if (= i k) out (conj out (nth v i))) (+ i 1)))))
+
+;; user の番: functionResponse を tool のメッセージに (前の呼び出しに名前の順で対応させる)、残りの文を user のメッセージに
+(defn user-turn Conv [c: Conv parts: Vec(Dyn)]
+  (loop [msgs (:msgs c) names (:names c) ids (:ids c) n (:next c) i 0]
+    (if (>= i (count parts))
+      (let [t (parts-text parts)
+            msgs2 (if (> (count t) 0) (conj msgs (msg "user" t)) msgs)]
+        (->Conv msgs2 names ids n))
+      (let [p (as-map (nth parts i))
+            fr (dget p "functionResponse")]
+        (if (not (dyn-map? fr)) (recur msgs names ids n (+ i 1))
+          (let [f (dyn->map fr)
+                name (dstr (dget f "name"))
+                k (find-name names name)
+                id (if (>= k 0) (nth ids k) (str "call_" n))
+                resp (let [r (dget f "response")] (if (dyn-nil? r) (->dyn (emap)) r))
+                tm (-> (emap) (assoc "role" (->dyn "tool")) (assoc "tool_call_id" (->dyn id)) (assoc "content" (->dyn (to-json resp))))]
+            (if (>= k 0)
+              (recur (conj msgs (->dyn tm)) (remove-at names k) (remove-at ids k) n (+ i 1))
+              (recur (conj msgs (->dyn tm)) names ids (+ n 1) (+ i 1)))))))))
+
+;; [メッセージの列 誤り]
+(defn contents->messages Values(Vec(Dyn) Str) [m: &Map(Str Dyn)]
+  (let [cs (as-vec (dget m "contents"))
+        none: Vec(Dyn) []
+        sys (parts-text (as-vec (dget (as-map (dget m "systemInstruction")) "parts")))
+        start: Vec(Dyn) (if (> (count sys) 0) [(msg "system" sys)] [])]
+    (if (= (count cs) 0) (values none (bad-arg "contents" "contents is not specified"))
+      (loop [c (->Conv start [] [] 0) i 0]
+        (if (>= i (count cs)) (values (:msgs c) "")
+          (let [ct (as-map (nth cs i))
+                role (dstr (dget ct "role"))
+                parts (as-vec (dget ct "parts"))]
+            (if (not (all-supported? parts))
+              (values none (bad-arg "contents" "only text, functionCall and functionResponse parts are supported by this emulator"))
+              (recur (if (= role "model") (model-turn c parts) (user-turn c parts)) (+ i 1)))))))))
+
+;; tools[].functionDeclarations → OpenAI の tools (googleSearch、codeExecution、urlContext などは捨てる)
+(defn convert-tools Vec(Dyn) [tools: Vec(Dyn)]
+  (loop [out: Vec(Dyn) [] i 0]
+    (if (>= i (count tools)) out
+      (let [fds (as-vec (dget (as-map (nth tools i)) "functionDeclarations"))
+            out2 (loop [o: Vec(Dyn) out j 0]
+                   (if (>= j (count fds)) o
+                     (let [fd (as-map (nth fds j))
+                           params (cond (has fd "parametersJsonSchema") (dget fd "parametersJsonSchema")
+                                        (has fd "parameters") (convert-schema (dget fd "parameters"))
+                                        :else (->dyn (assoc (assoc (emap) "type" (->dyn "object")) "properties" (->dyn (emap)))))
+                           f (-> (emap) (assoc "name" (dget fd "name")) (put-some "description" (dget fd "description")) (assoc "parameters" params))]
+                       (recur (conj o (->dyn (assoc (assoc (emap) "type" (->dyn "function")) "function" (->dyn f)))) (+ j 1)))))]
+        (recur out2 (+ i 1))))))
+
+;; toolConfig.functionCallingConfig → tool_choice (無ければ nil)
+(defn tool-choice Dyn [m: &Map(Str Dyn)]
+  (let [fcc (as-map (dget (as-map (dget m "toolConfig")) "functionCallingConfig"))
+        mode (dstr (dget fcc "mode"))
+        allowed (as-vec (dget fcc "allowedFunctionNames"))]
+    (cond
+      (= mode "NONE") (->dyn "none")
+      (and (= mode "ANY") (= (count allowed) 1))
+      (->dyn (assoc (assoc (emap) "type" (->dyn "function")) "function" (->dyn (assoc (emap) "name" (nth allowed 0)))))
+      (= mode "ANY") (->dyn "required")
+      (or (= mode "AUTO") (= mode "VALIDATED")) (->dyn "auto")
+      :else (nil->dyn))))
+
+;; generationConfig の出力の形 → response_format (無ければ nil)
+(defn response-format Dyn [gc: &Map(Str Dyn)]
+  (let [mt (dstr (dget gc "responseMimeType"))
+        schema (cond (has gc "responseJsonSchema") (dget gc "responseJsonSchema")
+                     (has gc "responseSchema") (convert-schema (dget gc "responseSchema"))
+                     :else (nil->dyn))]
+    (cond
+      (not (dyn-nil? schema))
+      (let [js (assoc (assoc (emap) "name" (->dyn "response")) "schema" schema)]
+        (->dyn (assoc (assoc (emap) "type" (->dyn "json_schema")) "json_schema" (->dyn js))))
+      (= mt "application/json") (->dyn (assoc (emap) "type" (->dyn "json_object")))
+      :else (nil->dyn))))
+
+;; Gemini の要求 → [Chat Completions の本文 includeThoughts 誤り]
+(defn gem->chat Values(Str Bool Str) [body: Str model: Str stream: Bool]
+  (let [[m ok] (json-map body)]
+    (if (not ok) (values "" false (str "Invalid JSON payload received. Unexpected token."))
+      (let [gc (as-map (dget m "generationConfig"))
+            tc (as-map (dget gc "thinkingConfig"))
+            cc (dget gc "candidateCount")
+            [msgs err] (contents->messages m)]
+        (cond
+          (and (dyn-int? cc) (> (dyn->int cc) 1))
+          (values "" false (bad-arg "generation_config.candidate_count" "only 1 candidate is supported by this emulator"))
+          (not= err "") (values "" false err)
+          :else
+          (let [tools (convert-tools (as-vec (dget m "tools")))
+                budget (dget tc "thinkingBudget")
+                no-think (and (dyn-int? budget) (= (dyn->int budget) 0))
+                inc-th (let [x (dget tc "includeThoughts")] (and (dyn-bool? x) (dyn->bool x)))
+                o (-> (emap)
+                      (assoc "model" (->dyn model))
+                      (assoc "messages" (->dyn msgs))
+                      (put-some "tools" (if (> (count tools) 0) (->dyn tools) (nil->dyn)))
+                      (put-some "tool_choice" (if (> (count tools) 0) (tool-choice m) (nil->dyn)))
+                      (put-some "temperature" (dget gc "temperature"))
+                      (put-some "top_p" (dget gc "topP"))
+                      (put-some "top_k" (dget gc "topK"))
+                      (put-some "max_tokens" (dget gc "maxOutputTokens"))
+                      (put-some "stop" (dget gc "stopSequences"))
+                      (put-some "seed" (dget gc "seed"))
+                      (put-some "presence_penalty" (dget gc "presencePenalty"))
+                      (put-some "frequency_penalty" (dget gc "frequencyPenalty"))
+                      (put-some "response_format" (response-format gc))
+                      (put-some "chat_template_kwargs" (if no-think (->dyn (assoc (emap) "enable_thinking" (->dyn false))) (nil->dyn)))
+                      (put-some "stream" (if stream (->dyn true) (nil->dyn)))
+                      (put-some "stream_options" (if stream (->dyn (assoc (emap) "include_usage" (->dyn true))) (nil->dyn))))]
+            (values (to-json (->dyn o)) inc-th "")))))))
+
+;; ---- 応答 ----
+
+(defn finish-reason Str [r: Str]
+  (cond (or (= r "stop") (= r "tool_calls") (= r "function_call") (= r "")) "STOP"
+        (= r "length") "MAX_TOKENS"
+        (= r "content_filter") "SAFETY"
+        :else "OTHER"))
+
+(defn text-part Dyn [t: Str thought: Bool]
+  (let [m (assoc (emap) "text" (->dyn t))] (->dyn (if thought (assoc m "thought" (->dyn true)) m))))
+
+;; 引数の JSON の文字列 → args (読めなければ空のオブジェクト)
+(defn call-part Dyn [name: Str args: Str]
+  (let [[a e] (json/parse args)
+        av (if (and (= e "") (dyn-map? a)) a (->dyn (emap)))]
+    (->dyn (assoc (emap) "functionCall" (->dyn (assoc (assoc (emap) "name" (->dyn name)) "args" av))))))
+
+(defn usage-meta Dyn [p: Int c: Int t: Int]
+  (->dyn (-> (emap) (assoc "promptTokenCount" (->dyn p)) (assoc "candidatesTokenCount" (->dyn c)) (assoc "totalTokenCount" (->dyn t)))))
+
+;; candidates[0] を含む応答 1 つ。parts が空なら content に parts を書かない (本物も MAX_TOKENS で文が無いときはそう)
+(defn gem-response Str [parts: Vec(Dyn) finish: Str calls: Bool usage: Dyn model: Str rid: Str]
+  (let [content (let [c0 (emap)] (if (> (count parts) 0) (assoc (assoc c0 "parts" (->dyn parts)) "role" (->dyn "model")) (assoc c0 "role" (->dyn "model"))))
+        cand (-> (emap) (assoc "content" (->dyn content))
+                 (put-some "finishReason" (if (= finish "") (nil->dyn) (->dyn finish)))
+                 (assoc "index" (->dyn 0))
+                 (put-some "finishMessage" (if (and calls (not= finish "")) (->dyn "Model generated function call(s).") (nil->dyn))))
+        cands: Vec(Dyn) [(->dyn cand)]
+        r (-> (emap) (assoc "candidates" (->dyn cands)) (put-some "usageMetadata" usage)
+              (assoc "modelVersion" (->dyn model)) (assoc "responseId" (->dyn rid)))]
+    (to-json (->dyn r))))
+
+(defn int-of Int [m: &Map(Str Dyn) k: Str] (let [v (dget m k)] (if (dyn-int? v) (dyn->int v) 0)))
+
+;; Chat Completions の応答 → Gemini の応答: [本文 誤り]
+(defn chat->gem Values(Str Str) [up: Str model: Str thoughts: Bool]
+  (let [[m ok] (json-map up)
+        ch (as-map (let [cs (as-vec (dget m "choices"))] (if (> (count cs) 0) (nth cs 0) (nil->dyn))))
+        msg (as-map (dget ch "message"))]
+    (if (or (not ok) (not (contains? ch "message"))) (values "" "upstream: unexpected response")
+      (let [rc (dstr (dget msg "reasoning_content"))
+            ct (dstr (dget msg "content"))
+            tcs (as-vec (dget msg "tool_calls"))
+            p1: Vec(Dyn) (if (and thoughts (> (count rc) 0)) [(text-part rc true)] [])
+            p2 (if (> (count ct) 0) (conj p1 (text-part ct false)) p1)
+            parts (loop [ps: Vec(Dyn) p2 i 0]
+                    (if (>= i (count tcs)) ps
+                      (let [f (as-map (dget (as-map (nth tcs i)) "function"))]
+                        (recur (conj ps (call-part (dstr (dget f "name")) (dstr (dget f "arguments")))) (+ i 1)))))
+            u (as-map (dget m "usage"))]
+        (values (gem-response parts (finish-reason (dstr (dget ch "finish_reason"))) (> (count tcs) 0)
+                              (usage-meta (int-of u "prompt_tokens") (int-of u "completion_tokens") (int-of u "total_tokens"))
+                              model (dstr (dget m "id")))
+                "")))))
+
+;; ---- 誤り ----
+
+(defn status-name Str [code: Int]
+  (cond (= code 400) "INVALID_ARGUMENT" (= code 401) "UNAUTHENTICATED" (= code 403) "PERMISSION_DENIED"
+        (= code 404) "NOT_FOUND" (= code 429) "RESOURCE_EXHAUSTED" (= code 503) "UNAVAILABLE" (= code 502) "UNAVAILABLE"
+        (= code 504) "DEADLINE_EXCEEDED" (< code 500) "INVALID_ARGUMENT" :else "INTERNAL"))
+
+(defn gem-error Str [code: Int msg: Str]
+  (str "{\"error\":{\"code\":" code ",\"message\":" (jstr msg) ",\"status\":\"" (status-name code) "\"}}"))
+
+;; llama-server の誤りの本文から文言を取り出す
+(defn upstream-message Str [up: Str]
+  (let [[m ok] (json-map up)
+        er (dget m "error")]
+    (cond (not ok) (str/trim up)
+          (dyn-str? er) (dyn->str er)
+          (dyn-map? er) (let [s (dstr (dget (dyn->map er) "message"))] (if (= s "") (str/trim up) s))
+          :else (str/trim up))))
+
+;; ---- 流す ----
+;; 上流の SSE を行に切り、delta を 1 つ遅らせて出す (最後の部品に finishReason を付けるため。本物も最後の文の断片に付く)。
+;; 関数呼び出しは引数を溜め、最後にまとめて出す。状態は小さく保つ (出した文は持たない)
+
+(defrecord Call [name: Str args: Str])
+
+(defrecord Stream [model: Str thoughts: Bool buf: Str pending: Str pending-thought: Bool calls: Vec(Call)
+                   finish: Str prompt: Int completion: Int total: Int rid: Str done: Bool])
+
+(defn stream-start Stream [model: Str thoughts: Bool]
+  (->Stream model thoughts "" "" false [] "" 0 0 0 "" false))
+
+(defn sse Str [json-s: Str] (str "data: " json-s "\r\n\r\n"))
+
+;; 溜めていた部品を出す (無ければ "")
+(defn flush-pending Str [st: &Stream]
+  (if (= (count (:pending st)) 0) ""
+    (let [ps: Vec(Dyn) [(text-part (:pending st) (:pending-thought st))]]
+      (sse (gem-response ps "" false (nil->dyn) (:model st) (:rid st))))))
+
+(defn set-pending Stream [st: Stream t: Str thought: Bool]
+  (assoc (assoc st :pending t) :pending-thought thought))
+
+;; 最後の応答: 溜めていた部品、関数呼び出し、finishReason、usageMetadata
+(defn final-chunk Str [st: &Stream]
+  (let [p0: Vec(Dyn) (if (> (count (:pending st)) 0) [(text-part (:pending st) (:pending-thought st))] [])
+        calls (:calls st)
+        ps (loop [ps: Vec(Dyn) p0 i 0]
+             (if (>= i (count calls)) ps
+               (let [c (nth calls i)] (recur (conj ps (call-part (:name c) (:args c))) (+ i 1)))))
+        ps2: Vec(Dyn) (if (= (count ps) 0) [(text-part "" false)] ps)]
+    (sse (gem-response ps2 (finish-reason (:finish st)) (> (count calls) 0)
+                       (usage-meta (:prompt st) (:completion st) (:total st)) (:model st) (:rid st)))))
+
+;; tool_calls の delta を溜める (index ごと。name は最初に来たもの、arguments はつなぐ)
+(defn add-calls Vec(Call) [calls: Vec(Call) tcs: Vec(Dyn)]
+  (loop [cs calls i 0]
+    (if (>= i (count tcs)) cs
+      (let [t (as-map (nth tcs i))
+            ix (int-of t "index")
+            f (as-map (dget t "function"))
+            nm (dstr (dget f "name"))
+            ar (dstr (dget f "arguments"))
+            cs2 (loop [c: Vec(Call) cs] (if (> (count c) ix) c (recur (conj c (->Call "" "")))))
+            old (nth cs2 ix)
+            nw (->Call (if (= (:name old) "") nm (:name old)) (str (:args old) ar))]
+        (recur (assoc cs2 ix nw) (+ i 1))))))
+
+;; data: の 1 行を処理する: [状態 出力]
+(defn stream-line Values(Stream Str) [st: Stream line: Str]
+  (cond
+    (:done st) (values st "")
+    (not (str/starts-with? line "data:")) (values st "")
+    :else
+    (let [payload (str/trim (subs line 5 (count line)))]
+      (if (= payload "[DONE]")
+        (let [out (final-chunk st)] (values (assoc st :done true) out))
+        (let [[m ok] (json-map payload)]
+          (if (not ok) (values st "")
+            (let [st1 (if (and (= (:rid st) "") (dyn-str? (dget m "id"))) (assoc st :rid (dyn->str (dget m "id"))) st)
+                  u (as-map (dget m "usage"))
+                  st2 (if (contains? m "usage")
+                        (assoc (assoc (assoc st1 :prompt (int-of u "prompt_tokens")) :completion (int-of u "completion_tokens")) :total (int-of u "total_tokens"))
+                        st1)
+                  cs (as-vec (dget m "choices"))
+                  ch (as-map (if (> (count cs) 0) (nth cs 0) (nil->dyn)))
+                  fr (dget ch "finish_reason")
+                  st3 (if (dyn-str? fr) (assoc st2 :finish (dyn->str fr)) st2)
+                  d (as-map (dget ch "delta"))
+                  rc (dstr (dget d "reasoning_content"))
+                  ct (dstr (dget d "content"))
+                  tcs (as-vec (dget d "tool_calls"))
+                  st4 (if (> (count tcs) 0) (assoc st3 :calls (add-calls (:calls st3) tcs)) st3)]
+              (cond
+                (and (> (count rc) 0) (:thoughts st4))
+                (let [out (flush-pending st4)] (values (set-pending st4 rc true) out))
+                (> (count ct) 0)
+                (let [out (flush-pending st4)] (values (set-pending st4 ct false) out))
+                :else (values st4 "")))))))))
+
+;; 上流の SSE の断片を 1 つ受ける: [状態 出力]。断片の切れ目はどこでもよい
+(defn stream-step Values(Stream Str) [st0: Stream chunk: Str]
+  (let [buf (str (:buf st0) chunk)]
+    (loop [st (assoc st0 :buf "") start 0 out ""]
+      (let [nl (str/index-of-after buf "\n" start)]
+        (if (< nl 0) (values (assoc st :buf (subs buf start (count buf))) out)
+          (let [[st2 o] (stream-line st (subs buf start nl))]
+            (recur st2 (+ nl 1) (str out o))))))))
+
+;; 上流が [DONE] を送らずに終わったときの締め
+(defn stream-end Str [st: &Stream]
+  (if (:done st) "" (final-chunk st)))
