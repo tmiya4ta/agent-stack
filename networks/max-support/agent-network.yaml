@@ -1,0 +1,152 @@
+agentNetwork: 2.0.0
+info:
+  label: Max Securities Customer Support Network
+  version: 1.0.0
+  description: Drafts replies to customer inquiries of the fictional Max Securities from the FAQ; routine replies are sent, sensitive ones go to the approval inbox first.
+
+registry:
+  mcps:
+    max-support-mcp{{-suffix}}:
+      info:
+        label: Max Support MCP Server
+        description: Customer inquiries with the closest FAQ entries and the firm's fixed approval rules, and sending replies.
+      metadata:
+        transport:
+          kind: streamableHttp
+          path: /mcp
+        tools:
+          - name: list-inquiries
+            description: Lists the customer inquiries.
+            inputSchema:
+              type: object
+              properties:
+                status:
+                  type: string
+          - name: get-inquiry
+            description: Returns one inquiry with the customer, the closest FAQ entries and whether approval is required.
+            inputSchema:
+              type: object
+              properties:
+                inquiryId:
+                  type: string
+              required:
+                - inquiryId
+          - name: send-reply
+            description: Sends the reply, or puts it in the approval inbox when approval is required.
+            inputSchema:
+              type: object
+              properties:
+                contextId:
+                  type: string
+                inquiryId:
+                  type: string
+                reply:
+                  type: string
+                needsApproval:
+                  type: string
+                recommendation:
+                  type: string
+                reasoning:
+                  type: string
+              required:
+                - contextId
+                - inquiryId
+                - reply
+                - needsApproval
+                - reasoning
+
+  llms:
+    max-support-openai-llm{{-suffix}}:
+      info:
+        label: OpenAI
+        description: OpenAI-compatible LLM provider. The endpoint comes from the max-support-openai-llm{{-suffix}}.url variable in exchange.json.
+      metadata:
+        platform: AzureOpenai
+        models:
+          - gpt-5-mini
+
+context:
+  policies:
+    # 呼び出し元: HS256 の JWT。sub が会話の持ち主になる (aml-investigation と同じ)
+    max_support_jwt_validation{{_suffix}}:
+      ref:
+        name: jwt-validation
+        namespace: 68ef9520-24e9-4cf2-b2f5-620025690913
+      configuration:
+        jwtOrigin: httpBearerAuthenticationHeader
+        jwtExpression: "#[attributes.headers['jwt']]"
+        signingMethod: hmac
+        signingKeyLength: 256
+        jwtKeyOrigin: text
+        textKey: ${jwt.hs256Secret}
+        jwksUrl: "http://your-jwks-service.example:80/base/path"
+        jwksServiceTimeToLive: 60
+        jwksServiceConnectionTimeout: 10000
+        customKeyExpression: "#[authentication.properties['key_to_your_public_pem_certificate']]"
+        skipClientIdValidation: true
+        clientIdExpression: "#[vars.claimSet.client_id]"
+        validateAudClaim: false
+        mandatoryAudClaim: false
+        supportedAudiences: aud.example.com
+        mandatoryExpClaim: true
+        mandatoryNbfClaim: false
+        validateCustomClaim: false
+    max_support_user_context{{_suffix}}:
+      ref:
+        name: user-context-propagation
+        namespace: 68ef9520-24e9-4cf2-b2f5-620025690913
+      configuration:
+        userIdExpression: "#[authentication.properties.claims.sub]"
+
+  connections:
+    max_support_connection{{_suffix}}:
+      kind: mcp
+      ref:
+        name: max-support-mcp{{-suffix}}
+      url: ${max-support-mcp{{-suffix}}.url}
+
+    max_support_openai_connection{{_suffix}}:
+      kind: llm
+      ref:
+        name: max-support-openai-llm{{-suffix}}
+      url: ${max-support-openai-llm{{-suffix}}.url}
+      authentication:
+        kind: apiKey
+        apiKey: ${openAI.apiKey}
+
+brokers:
+  max-support-broker{{-suffix}}:
+    kind: AgentScript
+    implementation: ./brokers/max_support_broker.agent
+    interfaces:
+      a2a:
+        policies:
+          inbound:
+            - ref:
+                name: max_support_jwt_validation{{_suffix}}
+            - ref:
+                name: max_support_user_context{{_suffix}}
+        card:
+          name: Max Securities Customer Support Broker{{-suffix}}
+          description: Drafts a reply to a customer inquiry from the FAQ. Routine replies are sent; complaints and anything touching a pending review go to the approval inbox first.
+          version: 1.0.0
+          capabilities:
+            streaming: false
+            pushNotifications: true
+          defaultInputModes:
+            - text/plain
+          defaultOutputModes:
+            - text/plain
+          skills:
+            - id: inquiry-reply
+              name: Reply to a customer inquiry
+              description: Reads the inquiry, the closest FAQ entries and the approval rules, drafts the reply, and sends it or puts it in the approval inbox.
+              tags:
+                - support
+              examples:
+                - "問い合わせ Q-0002 に返事して"
+                - "受付の問い合わせを見せて"
+              inputModes:
+                - text/plain
+              outputModes:
+                - text/plain

@@ -1,0 +1,60 @@
+{
+  "main": "agent-network.yaml",
+  "name": "max-support-network{{-suffix}}",
+  "classifier": "agentic-network",
+  "organizationId": "{{business-group-id}}",
+  "descriptorVersion": "1.0.0",
+  "apiVersion": "v1",
+  "tags": [],
+  "groupId": "{{business-group-id}}",
+  "assetId": "max-support-network{{-suffix}}",
+  "version": "0.0.1",
+  "dependencies": [
+    {
+      "classifier": "policy",
+      "packaging": "zip",
+      "groupId": "68ef9520-24e9-4cf2-b2f5-620025690913",
+      "assetId": "jwt-validation",
+      "version": "0.11.1"
+    },
+    {
+      "classifier": "policy",
+      "packaging": "zip",
+      "groupId": "68ef9520-24e9-4cf2-b2f5-620025690913",
+      "assetId": "user-context-propagation",
+      "version": "1.0.0"
+    }
+  ],
+  "metadata": {
+    "variables": {
+      "openAI": {
+        "apiKey": {
+          "description": "API key of the LLM endpoint. For a proxy fronted by Basic authentication this is base64(clientId:clientSecret)",
+          "default": "{{llm-api-key}}",
+          "secret": true
+        }
+      },
+      "jwt": {
+        "hs256Secret": {
+          "description": "Shared secret (HS256) that signs the callers' JWTs. The sub claim becomes the conversation owner",
+          "default": "{{jwt-hs256-secret}}",
+          "secret": true
+        }
+      },
+      "max-support-mcp{{-suffix}}": {
+        "url": {
+          "description": "Base URL of the Max Support MCP server (max-core on k0, customer inquiries), scheme included, with the key path /k/<key>/support. /mcp is appended by the transport setting",
+          "default": "{{max-support-mcp-url}}",
+          "secret": true
+        }
+      },
+      "max-support-openai-llm{{-suffix}}": {
+        "url": {
+          "description": "Base URL of the OpenAI-compatible endpoint, scheme included, up to and including the version path (e.g. https://host/openai/v1)",
+          "default": "{{llm-base-url}}",
+          "secret": false
+        }
+      }
+    }
+  }
+}

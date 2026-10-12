@@ -1,0 +1,308 @@
+# @dialect: AGENTFABRIC=1.1
+#
+# Max Securities (fictional) Customer Support Broker
+#
+# One turn per inquiry. Routine replies (FAQ) are sent without anyone. Replies that the firm's fixed rules flag
+# (customer under trade review, an application that was not opened, complaint words) or that the agent wants checked
+# go to the approval inbox; an employee sends, returns, or takes over. send-reply checks the rules itself too.
+#
+#   "問い合わせ Q-0002 に返事して"
+#   trigger -> subagent classify (no tools) -> router
+#     + reply -> subagent draft (get-inquiry; one call) -> router statusRouter (not found / already handled)
+#                -> router sendRouter: route "send"     -> executor sendReply (send-reply, needsApproval false) -> echo sent
+#                                      route "approval" -> executor requestApproval (send-reply, needsApproval true) -> echo pending
+#     + list  -> subagent listInquiries (list-inquiries) -> echo
+
+system:
+  instructions: "あなたは証券会社のお客さま窓口の補助です。FAQ にある事実だけを使い、推測で答えません。審査中の事柄や個別の取引の評価には触れません。"
+
+config:
+  agent_name: "Max Securities Customer Support Broker{{-suffix}}"
+  default_llm: @llm.openai_llm
+
+llm:
+  openai_llm:
+    target: "llm://max_support_openai_connection{{_suffix}}"
+    kind: "OpenAI"
+    model: "gpt-5-mini"
+    reasoning_effort: "LOW"
+
+actions:
+  list_inquiries:
+    target: "mcp://max_support_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "list-inquiries"
+
+  get_inquiry:
+    target: "mcp://max_support_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "get-inquiry"
+
+  send_reply:
+    target: "mcp://max_support_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "send-reply"
+
+trigger supportTrigger:
+  kind: "a2a"
+  target: "brokers://max-support-broker{{-suffix}}/a2a"
+  on_message: ->
+    transition to @subagent.classify
+
+subagent classify:
+  label: "Classify Request"
+  description: "Classifies the message: reply to one inquiry, or list the inquiries."
+  system:
+    instructions: |
+      あなたは受付担当です。メッセージから問い合わせの ID を取り出す。
+      「Q-」に続く数字、または単独の 1〜4 桁の数字が問い合わせの ID。inquiryId は必ず "Q-0001" の形 (4 桁) に正規化する。
+      見つかれば route_key = "reply"。ID が無い場合 (「一覧」「受付は？」など) は route_key = "list_inquiries"。
+      特定の状態だけを見たいと書かれていれば statusFilter にその状態 (受付・送信済み・承認待ち・差し戻し・担当者対応)、それ以外は空文字。
+      使わない項目は空文字にする。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。質問文・確認文・実況を出力すると処理が中断されます。
+         どんな場合も構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | メッセージ: {!@request.payload.message.parts[0].text}
+      | route_key / inquiryId / statusFilter の構造化出力だけを返すこと。
+    outputs:
+      properties:
+        route_key:
+          type: "string"
+          description: "Next route"
+          enum:
+            - "reply"
+            - "list_inquiries"
+        inquiryId:
+          type: "string"
+          description: "Normalized inquiry ID such as Q-0001, or empty"
+        statusFilter:
+          type: "string"
+          description: "Status to list, or empty for all"
+    max_number_of_loops: 2
+    max_consecutive_errors: 2
+    task_timeout_secs: 40
+  on_exit: ->
+    transition to @router.mainRouter
+
+router mainRouter:
+  description: "Branches on the classified route."
+  routes:
+    - target: @subagent.draft
+      when: @subagent.classify.output.route_key == "reply"
+      label: "Reply"
+    - target: @subagent.listInquiries
+      when: @subagent.classify.output.route_key == "list_inquiries"
+      label: "List the inquiries"
+  otherwise:
+    target: @echo.classifyFailed
+
+subagent draft:
+  label: "Draft Reply"
+  description: "Reads the inquiry and drafts the reply."
+  system:
+    instructions: |
+      あなたはお客さま窓口の返事を下書きします。
+      1. get_inquiry を 1 回だけ呼ぶ (問い合わせ、お客さま、近い FAQ 3 件、承認が要るか (requiresApproval と approvalReasons) が 1 回で返る)。
+         found が false なら found = "false" とし、他の項目は空文字にして、以降は何もせず返す。
+      2. inquiryStatus には get_inquiry の status をそのまま入れる。
+      3. 返事 (reply) を日本語で書く。お客さまの名前に「様」を付けて始め、FAQ の答えにある事実だけを使う。
+         FAQ に答えが無いこと、個別の取引や審査、申込みの結果の理由には触れず、「担当よりご連絡いたします」とする。
+         3〜6 文。署名は「マックス証券 お客さま窓口」。
+      4. route を決める:
+         - get_inquiry の requiresApproval が true → 必ず "approval"
+         - FAQ で答えられない、お客さまが怒っている、個別の事情に踏み込む必要がある → "approval"
+         - それ以外 (FAQ の答えで済む) → "send"
+      5. route が "approval" のとき、recommendation は 返事をそのまま送ってよければ "送信"、人が対応すべきなら "担当者対応"。
+         "send" のときは "送信"。
+      6. reasoning: route と推奨の根拠を 1〜3 文 (approvalReasons があればそれに触れる)。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。質問文・確認文・実況を出力すると処理が中断されます。
+         どんな場合も構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | inquiryId: {!@subagent.classify.output.inquiryId}
+    actions:
+      get_inquiry: @actions.get_inquiry
+    outputs:
+      properties:
+        found:
+          type: "string"
+          description: "\"true\" when the inquiry exists, otherwise \"false\""
+        inquiryId:
+          type: "string"
+          description: "The inquiry ID"
+        inquiryStatus:
+          type: "string"
+          description: "The inquiry's status as returned by get_inquiry"
+        customerName:
+          type: "string"
+          description: "Customer name"
+        subject:
+          type: "string"
+          description: "The inquiry's subject"
+        reply:
+          type: "string"
+          description: "The reply to the customer"
+        route:
+          type: "string"
+          description: "send or approval"
+          enum:
+            - "send"
+            - "approval"
+        recommendation:
+          type: "string"
+          description: "送信 or 担当者対応"
+          enum:
+            - "送信"
+            - "担当者対応"
+        reasoning:
+          type: "string"
+          description: "Why this route and recommendation"
+    max_number_of_loops: 4
+    max_consecutive_errors: 2
+    task_timeout_secs: 120
+  on_exit: ->
+    transition to @router.statusRouter
+
+router statusRouter:
+  description: "Stops when the inquiry does not exist or is already handled."
+  routes:
+    - target: @echo.notFound
+      when: @subagent.draft.output.found == "false"
+      label: "Not found"
+    - target: @echo.alreadyHandled
+      when: @subagent.draft.output.inquiryStatus == "送信済み"
+      label: "Already sent"
+    - target: @echo.alreadyHandled
+      when: @subagent.draft.output.inquiryStatus == "承認待ち"
+      label: "Already waiting for approval"
+    - target: @echo.alreadyHandled
+      when: @subagent.draft.output.inquiryStatus == "担当者対応"
+      label: "Taken over by a person"
+    - target: @echo.alreadyHandled
+      when: @subagent.draft.output.inquiryStatus == "差し戻し"
+      label: "Returned"
+  otherwise:
+    target: @router.sendRouter
+
+router sendRouter:
+  description: "Sends routine replies; puts the others in the approval inbox."
+  routes:
+    - target: @executor.sendReply
+      when: @subagent.draft.output.route == "send"
+      label: "Send"
+  otherwise:
+    target: @executor.requestApproval
+
+executor sendReply:
+  description: "Sends the reply (send-reply still checks the fixed rules and may put it in the inbox instead)."
+  do: ->
+    run @actions.send_reply
+      with contextId = @request.payload.message.contextId
+      with inquiryId = @subagent.draft.output.inquiryId
+      with reply = @subagent.draft.output.reply
+      with needsApproval = "false"
+      with recommendation = "送信"
+      with reasoning = @subagent.draft.output.reasoning
+  on_exit: ->
+    transition to @echo.sent
+
+executor requestApproval:
+  description: "Puts the draft in the approval inbox."
+  do: ->
+    run @actions.send_reply
+      with contextId = @request.payload.message.contextId
+      with inquiryId = @subagent.draft.output.inquiryId
+      with reply = @subagent.draft.output.reply
+      with needsApproval = "true"
+      with recommendation = @subagent.draft.output.recommendation
+      with reasoning = @subagent.draft.output.reasoning
+  on_exit: ->
+    transition to @echo.pending
+
+echo sent:
+  label: "Reply sent"
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("### ✉️ 問い合わせ " + @subagent.draft.output.inquiryId + "（" + @subagent.draft.output.customerName + " 様「" + @subagent.draft.output.subject + "」）\n\n" + @subagent.draft.output.reply + "\n\n---\n**FAQ の答えで済むので送りました。** 決まった守りに当たる場合は、送らずに承認箱に回ります。")
+    ]
+  })
+
+echo pending:
+  label: "Draft sent to the approval inbox"
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("### 🗂 問い合わせ " + @subagent.draft.output.inquiryId + "（" + @subagent.draft.output.customerName + " 様「" + @subagent.draft.output.subject + "」）の返事の下書き\n\n" + @subagent.draft.output.reply + "\n\n---\n**承認箱 (Salesforce の「承認依頼」) に回しました。** 推奨: " + @subagent.draft.output.recommendation + "。理由: " + @subagent.draft.output.reasoning)
+    ]
+  })
+
+echo notFound:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_FAILED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("問い合わせ " + @subagent.classify.output.inquiryId + " は見つかりませんでした。問い合わせの ID（例: Q-0001）を確かめてください。")
+    ]
+  })
+
+echo alreadyHandled:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("問い合わせ " + @subagent.draft.output.inquiryId + " は対応済みです（" + @subagent.draft.output.inquiryStatus + "）。")
+    ]
+  })
+
+subagent listInquiries:
+  label: "List Inquiries"
+  description: "Lists the inquiries so the human can pick one."
+  system:
+    instructions: |
+      list_inquiries を 1 回呼び、結果を Markdown の表にして table に入れる。
+      表の列は「問い合わせ ID | 受付日 | お客さま | 経路 | 件名 | 状態」。値はツールの結果をそのまま使い、並び順も変えない。
+      問い合わせが 0 件なら table に「該当する問い合わせはありません。」とだけ入れる。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。table の構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | status: {!@subagent.classify.output.statusFilter}
+    actions:
+      list_inquiries: @actions.list_inquiries
+    outputs:
+      properties:
+        table:
+          type: "string"
+          description: "The inquiries as a Markdown table"
+    max_number_of_loops: 3
+    max_consecutive_errors: 2
+    task_timeout_secs: 40
+  on_exit: ->
+    transition to @echo.inquiryList
+
+echo inquiryList:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("### ✉️ お客さまの問い合わせ\n\n" + @subagent.listInquiries.output.table + "\n\n返事を書く問い合わせの ID を送ってください（例: 問い合わせ Q-0002 に返事して）。")
+    ]
+  })
+
+echo classifyFailed:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_FAILED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("依頼の内容を判定できませんでした。問い合わせの ID（例: Q-0001）を添えてもう一度送ってください。")
+    ]
+  })

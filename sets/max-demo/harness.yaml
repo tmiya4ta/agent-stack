@@ -1,10 +1,11 @@
 name: max-demo
 kind: set
 runtime: set
-# マックス証券 (架空) の売買審査と口座開設。MCP は k0 の max-core (mulay) で、ここでは broker の network だけを配備する
+# マックス証券 (架空) の売買審査と口座開設と問い合わせ。MCP は k0 の max-core (mulay) で、ここでは broker の network だけを配備する
 units:
   - max-surveillance
   - max-operations
+  - max-support
 defaults:
   target: ps:rootps
   gateway: ft1

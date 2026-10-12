@@ -1,0 +1,5 @@
+name: max-support
+kind: network
+runtime: agent-network
+# MCP サーバーは k0 の max-core (mulay) の窓口の口で、harness では配備しない。URL は yc の変数 (max-support-mcp-url = https://<host>/k/<鍵>/support)
+members: {}
