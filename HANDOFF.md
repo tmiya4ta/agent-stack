@@ -1,4 +1,4 @@
-# 引き継ぎ: agentic-harness → agent-stack（2026-09-23）
+# 引き継ぎ: agentic-harness → agent-stack（2026-09-23、2026-10-12 に見直し）
 
 このファイルは引っ越し直後の作業メモ。下の「やること」が終わったら消すか docs/ に移す。
 
@@ -10,11 +10,11 @@
 
 ## 引っ越しで何をしたか
 
-- ~/mule/agentic-harness から `aisearch-server/` `chat-server/` `embeddings-server/` をそのままコピーした（build/ と build-llama/ も含む）。
+- ~/mule/agents/agentic-harness から `aisearch-server/` `chat-server/` `embeddings-server/` をそのままコピーした（build/ と build-llama/ も含む）。
   **.git はコピーしていない**。旧リポジトリの唯一のコミット ee4b623 に、削除した Mule 版 embedding-harness の 17MB の .bin が入っていたので、
   履歴は作り直す（まだ一度も push していない）。
 - `embedding-harness`（Mule 版の埋め込みエミュレーター）は削除した（ユーザー了承済み）。
-- 旧 ~/mule/agentic-harness はまだ残してある。embeddings-server の README / server.clay / smoke_test.py に未コミットの変更があったが、
+- 旧 ~/mule/agents/agentic-harness はまだ残してある。embeddings-server の README / server.clay / smoke_test.py に未コミットの変更があったが、
   それもコピー済み。こちらで問題なければ旧ディレクトリは消してよい（ユーザーに確認してから）。
 - 動いている systemd --user サービス（chat-server / embeddings-server / aisearch-server）は `~/.local/lib/<name>/` の実行ファイルと
   `~/.config/<name>/env` を使っていて、ソースの場所には依存していない。引っ越しで止まったりはしない。
@@ -75,29 +75,21 @@ Mule の場合は `deploy.mule: {target: ch2|rtf, env: Sandbox, properties: conf
 - 大きなバイナリは git に入れない（Git LFS か Release アセット）。GGUF は harness.yaml に取得元と置き場所だけ書く。
 - 秘密はリポジトリに置かない。
 
-## やること（順番に）
+## やること（2026-10-12 に見直した）
 
-1. ~~git init して最初のコミットを作る~~ **済**。
-2. **kind 別に移す**: `llm/chat-server`、`embedding/embeddings-server`、`vector/aisearch-server`。
-   移したら各 build.sh / install.sh / README の相対パスを直す。特に
-   **chat-server/build.sh の既定 `LLAMA_BUILD=$HERE/../embeddings-server/build-llama`** は壊れるので、
-   `shared/llama/`（build スクリプト + ビルド成果物は ignore）に出して両方から使う。
-   移した後に 3 つとも build.sh が通ることを確認する（サービスの入れ替えはユーザーに聞いてから）。
-3. **各アプリに harness.yaml を付ける**（上の形。ポート・公開名・env の場所は各 README にある）。
-4. ~~networks/ に tmiya4ta/agent-networks を統合~~ **済（2026-09-23）**。中身だけを履歴なしでコピーした（旧リポジトリは削除する）。残り: yc の repos.clay の `default-url`（`https://github.com/tmiya4ta/agent-networks`）と
-   config.clay の言及を agent-stack の `networks/` に向け替える（yc リポジトリ側の作業）。旧 GitHub リポジトリはユーザーが削除する。
-   2026-09-23: onboarding-employees のメンバー Mule アプリ 3 つを `a2a/it-provisioning-agent`、`a2a/office-concierge-agent`、
-   `mcp/employee-db-app` に出した（各 README に yc deploy file での単体デプロイ手順、harness.yaml 付き）。
-   network フォルダからは README の相対リンクで参照する（Windows でも使うのでシンボリックリンクは置かない）。
-5. ~~GitHub に push~~ **済（2026-09-23、git@github-tmiya4ta:tmiya4ta/agent-stack.git の main）**。CI の雛形はまだ。
-6. yc の harness 対応: **runtime: mule と agent-network は済（2026-09-23、yc セッションが実装）**。
-   `yc harness list` / `yc harness deploy <org> <env> <name> target=ps:rootps gateway=ft1 [profile=] [suffix=]`、TUI は D → unit → target → gateway。
-   約束ごとは docs/harness.md。T1/Sandbox/rootps で onboarding-employees を通しで確認済み（broker は
-   https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/onboarding-broker/）。枠を空けるため inventory 系 7 アプリを STOPPED にしてある。
-   セット（sets/、runtime: set）と use-existing（別ログイン・別 BG/env の既存アプリを artifactId か名前で拾って参照）、
-   `yc harness down` も済。TUI は D/P メニューにセットが出て、確認画面で s=suffix u=use-existing p=profile、x で down。
-   記録は ~/.yc/harness-state.json。down はこの記録にあるものしか消せない（suffix なしの onboarding-network は記録前のデプロイ）。
-   yc は Mule 向けなので runtime: host（clay の 3 サーバ）は扱わない（2026-09-23 ユーザー判断）。残り: api/ の最初の単位、金融デモなどのセット。
+引っ越しのあと、作りが変わった: LLM と埋め込みは k0 に移り (k0/ai-model、ai-emu、ai-stat。k0/README.md)、
+systemd --user の 3 サービスはもう無い。yc は agent-stack を読んでいる (`yc harness list` の Source)。
+
+1. ~~git init~~ **済**。
+2. ~~kind 別に移す~~ **見送り**。chat-server と embeddings-server は k0 の llm.ornith.model と embed.gte-qwen2.model に置き換わり、
+   いまは参考として残しているだけ (動かしていない)。aisearch-server は k0 の ai-search.azure.emu のソースとして使っている。
+   置き場を変えるなら、k0/ai-emu/aisearch の build.sh の相対パスも直すこと。
+3. ~~host の各アプリに harness.yaml~~ **不要**。yc は runtime: host を扱わない (2026-09-23 ユーザー判断)。k0 のものは kubectl で入れる。
+4. ~~networks/ の統合~~ **済**。yc の向け替えも済。
+5. ~~GitHub に push~~ **済**。CI の雛形はまだ。
+6. yc の harness 対応は**済**。セットは onboarding-demo、finance-demo、max-demo (マックス証券、max/README.md)。残り: api/ の最初の単位。
+7. 旧 ~/mule/agents/agentic-harness (553MB) は消してよいかユーザーに確認中。消す前に、embeddings-server の未コミットの変更が
+   agent-stack 側に入っていることを確かめる (引っ越しのときにコピー済み)。
 
 ## 参考
 
