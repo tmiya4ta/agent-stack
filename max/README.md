@@ -27,11 +27,11 @@ max-core (mulay、k0 の max-core)                         Agent Network (T1/San
 
 ```bash
 cd ~/mule/agents/agent-stack
-k0/max-core/secrets.sh && k0/max-core/build.sh            # 秘密とイメージ (中身を変えたら VERSION と yaml の image を上げる)
-kubectl --context kind-k0 apply -f k0/max-core/max-core.yaml
+k0/max-rtf/build-jar.sh oms && k0/max-rtf/deploy.sh oms <版>   # Runtime Manager から RTF (k0) へ。ランタイムは mulay (k0/max-rtf/README.md)
+k0/max-rtf/build-jar.sh core && k0/max-rtf/deploy.sh core <版>
 yc harness deploy <T1> <Sandbox> max-demo                   # broker (yc の変数のプロファイル max)
 # データを最初からにする: max-pg に max/db/schema.sql と seed.sql を流す (README の「データ」)。承認箱の AP-* も消す
-kubectl --context kind-k0 -n max-core port-forward svc/max-core 18081:80 &
+kubectl --context kind-k0 -n 0f678523-c036-4098-9be9-cc542dca2e6d port-forward svc/max-core 18081:8081 &
 curl -X POST -H "Authorization: Bearer $API_KEY" http://127.0.0.1:18081/surveillance/run   # 1〜2 分で承認箱に 3 件
 ```
 
@@ -95,10 +95,10 @@ POST /clock/advance?days=N (max-core)  1 営業日ごとに:
 - 仕込んだ筋書き (v2): C008 工藤 麻衣 (灯台ライフの社員、内部者の登録なし) が業務提携 A101 (MX15、10-16) の前に初めて買い、10-20 に売る。
   C018 野口 典子 (翠嶺フーズのパート) が決算 A102 (MX05、10-22) の前日に 100 株買う。
 - Anypoint MQ: T1/Sandbox、ap-northeast-1。キュー max-fills (DLQ max-fills-dlq、5 回)、試験用の max-test-fills。client app "max"
-  (認証情報は ~/.config/max-mq/env、k0 では Secret)。受け取りのロックは短く (fills.lockTtl)、同じ約定は台帳に一度だけ入る。
+  (認証情報は ~/.config/max-mq/env、k0 では Runtime Manager の安全なプロパティ)。受け取りのロックは短く (fills.lockTtl)、同じ約定は台帳に一度だけ入る。
 - 試験: max-core のシナリオは、注文を同じアプリの偽の OMS (/admin/fake-oms、同じ契約) に渡し、約定は本物の MQ の試験用のキューを通る。
   max-oms は自分のシナリオで確かめる (max/oms/scenario.scn)。
-- k0: max-oms は max-core 名前空間で中だけ (k0/max-oms)。
+- k0: max-core と max-oms は Runtime Manager から RTF (T1 / Sandbox) に配備し、mulay で動く (k0/max-rtf)。中の API は外に出さない。
 
 ```bash
 curl -X POST -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:18081/clock/advance?days=5"   # 10-16 に SV-0004 → 承認箱

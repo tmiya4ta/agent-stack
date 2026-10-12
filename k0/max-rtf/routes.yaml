@@ -1,0 +1,42 @@
+# max-core / max-oms (RTF、T1 / Sandbox の名前空間) の公開の経路。鍵の入る /k/ だけを外に出し、中の API (8081) は出さない。
+# Anypoint の公開 URL (HTTPRouteTemplate) は使わない: 1 つのポートにしか流せず、鍵の経路が Anypoint の設定に平文で残り、
+# 待ち時間の既定 (15 秒) で切れるため。インフラと相談済み (2026-10-12)。
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-surveillance
+  namespace: 0f678523-c036-4098-9be9-cc542dca2e6d
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: cluster-gateway
+    namespace: rtf
+  hostnames: ["mcp-surveillance.max.theorems.dev"]
+  rules:
+  - matches:
+    - path: {type: PathPrefix, value: /k/}
+    backendRefs:
+    - name: max-core
+      port: 8082
+    timeouts: {request: 900s, backendRequest: 900s}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: order
+  namespace: 0f678523-c036-4098-9be9-cc542dca2e6d
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: cluster-gateway
+    namespace: rtf
+  hostnames: ["order.max.theorems.dev"]
+  rules:
+  - matches:
+    - path: {type: PathPrefix, value: /k/}
+    backendRefs:
+    - name: max-oms
+      port: 8082
+    timeouts: {request: 900s, backendRequest: 900s}
