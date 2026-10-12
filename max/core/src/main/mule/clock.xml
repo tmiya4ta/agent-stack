@@ -2,7 +2,8 @@
 <!--
   仮想の業務時計。業務の日付はいつも business_clock から読む (壁の時計は監査ログの時刻にだけ使う)。
     GET  /clock             いまの業務日
-    POST /clock/advance     次の営業日へ進める (?days=1..20)。1 日ごとに:
+    POST /clock/auto        自動で進めるか {enabled, until}。clock.auto.interval ごとに 1 営業日 (until の日まで)
+    POST /clock/advance     次の営業日へ進める (?days=1..20。自動で進めている最中なら 409)。1 日ごとに:
                               終値 (max/market.dwl)、普段の売買と仕込んだ注文を OMS (oms.url) へ (約定は MQ で台帳に届くのを待つ)、
                               その日の公表 (planned_events から)、
                               時計を進め、点数付けを回す (できたアラートは調査エージェントへ)
@@ -25,10 +26,11 @@
         </http:listener>
         <flow-ref name="auth"/>
         <db:select config-ref="Db">
-            <db:sql>select to_char(today, 'YYYY-MM-DD') as today from max.business_clock</db:sql>
+            <db:sql>select to_char(today, 'YYYY-MM-DD') as today, auto, to_char(auto_until, 'YYYY-MM-DD') as auto_until, busy from max.business_clock</db:sql>
         </db:select>
         <set-payload value="#[output application/json --- {today: payload[0].today,
-            nextBusinessDay: max::market::nextBusinessDay(payload[0].today as Date) as String}]"/>
+            nextBusinessDay: max::market::nextBusinessDay(payload[0].today as Date) as String,
+            auto: payload[0].auto, autoUntil: payload[0].auto_until, busy: payload[0].busy}]"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>
@@ -47,17 +49,110 @@
                 <raise-error type="MAX:BAD_REQUEST" description="days must be 1 to 20"/>
             </when>
         </choice>
+        <flow-ref name="clock-acquire"/>
+        <choice>
+            <when expression="#[not vars.acquired]">
+                <raise-error type="MAX:CONFLICT" description="The clock is being advanced (try again later)"/>
+            </when>
+        </choice>
         <set-variable variableName="report" value="#[[]]"/>
         <foreach collection="#[1 to vars.n]">
             <flow-ref name="advance-one-day"/>
             <set-variable variableName="report" value="#[vars.report + payload]"/>
         </foreach>
+        <flow-ref name="clock-release"/>
         <set-payload value="#[output application/json --- {days: vars.report}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="clock-release"/>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 進めている最中の印を取る (vars.acquired)。手と自動が重ならないように -->
+    <sub-flow name="clock-acquire">
+        <db:update config-ref="Db">
+            <db:sql>update max.business_clock set busy = true where busy = false</db:sql>
+        </db:update>
+        <set-variable variableName="acquired" value="#[payload.affectedRows == 1]"/>
+    </sub-flow>
+
+    <!-- 自分が取った印だけを返す -->
+    <sub-flow name="clock-release">
+        <choice>
+            <when expression="#[vars.acquired default false]">
+                <db:update config-ref="Db" target="released">
+                    <db:sql>update max.business_clock set busy = false</db:sql>
+                </db:update>
+                <set-variable variableName="acquired" value="#[false]"/>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <!-- 自動で進めるかと、どの日まで進めるか。{enabled: true|false, until: "yyyy-MM-dd" (無ければ限りなく)} -->
+    <flow name="clock-auto-set">
+        <http:listener config-ref="Http" path="/clock/auto" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="req" value="#[output application/java --- payload]"/>
+        <choice>
+            <when expression="#[not ((vars.req.enabled default null) is Boolean)]">
+                <raise-error type="MAX:BAD_REQUEST" description="enabled must be true or false"/>
+            </when>
+            <when expression="#[(vars.req.until default null) != null and not ((vars.req.until as String) matches /\d{4}-\d{2}-\d{2}/)]">
+                <raise-error type="MAX:BAD_REQUEST" description="until must be yyyy-MM-dd"/>
+            </when>
+        </choice>
+        <db:update config-ref="Db">
+            <db:sql>update max.business_clock set auto = :enabled, auto_until = cast(:until as date)</db:sql>
+            <db:input-parameters>#[{enabled: vars.req.enabled, until: vars.req.until default null}]</db:input-parameters>
+        </db:update>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.audit_log (actor, action, target, detail) values ('api', 'clock-auto', 'clock', cast(:detail as jsonb))</db:sql>
+            <db:input-parameters>#[{detail: write({enabled: vars.req.enabled, until: vars.req.until default null}, 'application/json', {indent: false})}]</db:input-parameters>
+        </db:insert>
+        <set-payload value="#[output application/json --- {auto: vars.req.enabled, autoUntil: vars.req.until default null}]"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>
             </on-error-continue>
         </error-handler>
+    </flow>
+
+    <!-- 自動で進める: clock.auto.interval ごとに 1 営業日。auto が false か、auto_until に着いていれば何もしない。
+         手で進めている最中なら、その回は飛ばす -->
+    <flow name="clock-auto" initialState="${clock.auto.state}">
+        <scheduler>
+            <scheduling-strategy>
+                <fixed-frequency frequency="${clock.auto.interval}" startDelay="${clock.auto.interval}"/>
+            </scheduling-strategy>
+        </scheduler>
+        <set-variable variableName="decisions" value="#[['問題なし', '深掘り', '保留', '当局報告']]"/>
+        <db:select config-ref="Db" target="c">
+            <db:sql>select auto, (auto_until is null or today &lt; auto_until) as more from max.business_clock</db:sql>
+        </db:select>
+        <choice>
+            <when expression="#[vars.c[0].auto and vars.c[0].more]">
+                <flow-ref name="clock-acquire"/>
+                <choice>
+                    <when expression="#[vars.acquired]">
+                        <try>
+                            <flow-ref name="advance-one-day"/>
+                            <flow-ref name="clock-release"/>
+                            <logger level="INFO" message="#[output text/plain --- 'clock advanced to ' ++ payload.date ++ ' (raised: ' ++ (payload.raised joinBy ',') ++ ')']"/>
+                            <error-handler>
+                                <on-error-continue>
+                                    <flow-ref name="clock-release"/>
+                                    <logger level="ERROR" message="#[output text/plain --- 'clock auto failed: ' ++ error.description]"/>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
+                    </when>
+                </choice>
+            </when>
+        </choice>
     </flow>
 
     <!-- 1 営業日進める。payload は {date, prices, trades, announcements, raised}。

@@ -38,3 +38,8 @@ fills:
   maxEmpty: "10"
   # 受けた約定のロック (ミリ秒)。待ち切れずに終わった前の受け取りが後の約定を取ってロックすることがあるので短くし、すぐ戻るようにする
   lockTtl: "5000"
+# 時計を自動で進める間隔 (ミリ秒) と、scheduler を動かすか。進めるかどうか自体は POST /clock/auto (DB) で切り替える
+clock:
+  auto:
+    interval: "300000"
+    state: "started"

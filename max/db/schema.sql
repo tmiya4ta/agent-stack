@@ -134,8 +134,11 @@ create table audit_log (
 
 -- 仮想の業務時計 (1 行だけ)。業務の日付はいつもここから読む (壁の時計の now() は監査ログの時刻にだけ使う)
 create table business_clock (
-  id     int primary key default 1 check (id = 1),
-  today  date not null
+  id          int primary key default 1 check (id = 1),
+  today       date not null,
+  auto        boolean not null default false,   -- 自動で進めるか (POST /clock/auto)
+  auto_until  date,                             -- 自動で進めるのはこの日まで (null なら限りなく)
+  busy        boolean not null default false    -- 進めている最中 (手と自動が重ならないように)
 );
 
 -- これから公表される重要事実 (時計がその日に進むと announcements に移る)
