@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  マックス証券 (架空) の業務システムの API (System API)。k0 の max-core で mulay が動かす。
+  v1: 審査の点数付け (インサイダー取引の疑い) とアラートの照会。データは静的な合成データ (max/db)。
+    GET  /                 このサービスの説明 (鍵なし)
+    GET  /health           死活確認 (鍵なし)
+    POST /admin/reset      スキーマと合成データを流し直す (admin.reset=true のときだけ。試験用)
+    POST /surveillance/run 点数付けを回してアラートを作る (同じ顧客・銘柄・公表の組は二度作らない)
+    GET  /alerts           アラートの一覧 (?status=未対応 など)
+    GET  /alerts/{id}      アラートの詳しい中身 (顧客、銘柄、公表、点の内訳、その銘柄の前後の売買、直前の売買)
+  鍵: api.key (keys.file のファイル。既定は資源の keys.properties で空 = 全部 401)。Bearer か api-key ヘッダ。
+  点数付けの規則は max/score.dwl。
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <global-property name="keys.file" value="keys.properties"/>
+    <configuration-properties file="config.yaml"/>
+    <configuration-properties file="${keys.file}"/>
+
+    <http:listener-config name="Http">
+        <http:listener-connection host="0.0.0.0" port="${http.port}"/>
+    </http:listener-config>
+
+    <db:config name="Db">
+        <db:generic-connection url="${db.url}" driverClassName="org.postgresql.Driver" user="${db.user}" password="${db.password}"/>
+    </db:config>
+
+    <!-- 鍵の確認。合わなければ MAX:UNAUTHORIZED -->
+    <sub-flow name="auth">
+        <choice>
+            <when expression="#[do {
+                var key = p('api.key') default ''
+                var h = attributes.headers
+                var auth = h.authorization default ''
+                var given = if ((auth startsWith 'Bearer ') and (sizeOf(auth) > 7)) auth[7 to -1] else (h.'api-key' default '')
+                ---
+                (key == '') or (given != key)}]">
+                <raise-error type="MAX:UNAUTHORIZED" description="Missing or wrong API key"/>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <!-- 失敗の応答 (どのフローも同じ形) -->
+    <sub-flow name="error-body">
+        <set-variable variableName="status" value="#[if (error.errorType.identifier == 'UNAUTHORIZED') 401
+            else if (error.errorType.identifier == 'NOT_FOUND') 404
+            else if (error.errorType.identifier == 'FORBIDDEN') 403
+            else if (error.errorType.identifier == 'BAD_REQUEST') 400 else 500]"/>
+        <set-payload value="#[output application/json --- {error: error.description}]"/>
+    </sub-flow>
+
+    <flow name="describe">
+        <http:listener config-ref="Http" path="/" allowedMethods="GET"/>
+        <set-payload value="#[output application/json --- {
+            name: 'max-core', company: 'マックス証券 (架空)',
+            what: 'System API of the fictional securities firm: surveillance scoring (insider trading) and alerts. All data is synthetic.',
+            endpoints: ['POST /surveillance/run', 'GET /alerts', 'GET /alerts/{id}'],
+            auth: 'Authorization: Bearer KEY or api-key: KEY'}]"/>
+    </flow>
+
+    <flow name="health">
+        <http:listener config-ref="Http" path="/health" allowedMethods="GET"/>
+        <set-payload value="#[output application/json --- {status: 'ok'}]"/>
+    </flow>
+
+    <flow name="reset">
+        <http:listener config-ref="Http" path="/admin/reset" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <choice>
+            <when expression="#[p('admin.reset') != 'true']">
+                <raise-error type="MAX:FORBIDDEN" description="Reset is turned off (admin.reset)"/>
+            </when>
+        </choice>
+        <db:execute-ddl config-ref="Db">
+            <db:sql>drop schema if exists max cascade</db:sql>
+        </db:execute-ddl>
+        <db:execute-script config-ref="Db" file="max/schema.sql"/>
+        <db:execute-script config-ref="Db" file="max/seed.sql"/>
+        <db:select config-ref="Db">
+            <db:sql>select (select count(*) from max.customers) as customers, (select count(*) from max.trades) as trades,
+                           (select count(*) from max.announcements) as announcements</db:sql>
+        </db:select>
+        <set-payload value="#[output application/json --- payload[0]]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="surveillance-run">
+        <http:listener config-ref="Http" path="/surveillance/run" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db" target="days">
+            <db:sql>select to_char(d, 'YYYY-MM-DD') as d from (select distinct trade_date as d from max.prices) x order by d</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="trades">
+            <db:sql>select customer_id, code, side, qty, price, to_char(trade_date, 'YYYY-MM-DD') as trade_date
+                    from max.trades order by trade_date, trade_id</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="registry">
+            <db:sql>select customer_id, code, relation from max.insider_registry</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="anns">
+            <db:sql>select announcement_id, code, to_char(published_at, 'YYYY-MM-DD HH24:MI') as published_at, kind, title, price_move_pct
+                    from max.announcements order by published_at</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="existing">
+            <db:sql>select customer_id, code, announcement_id, alert_id from max.alerts</db:sql>
+        </db:select>
+        <ee:transform>
+            <ee:variables>
+                <ee:set-variable variableName="raised"><![CDATA[%dw 2.0
+import alerts from max::score
+output application/java
+var found = alerts(vars.days map $.d, vars.trades, vars.registry, vars.anns)
+var known = vars.existing map ($.customer_id ++ '/' ++ $.code ++ '/' ++ $.announcement_id)
+var fresh = found filter (not (known contains ($.customer_id ++ '/' ++ $.code ++ '/' ++ $.announcement_id)))
+var nextNo = (max(vars.existing map (($.alert_id as String)[3 to -1] as Number)) default 0) + 1
+var lastDay = vars.days[-1].d
+---
+fresh map ((a, i) -> a ++ {
+    alert_id: 'SV-' ++ ((nextNo + i) as String {format: '0000'}),
+    kind: 'インサイダー取引の疑い',
+    raised_on: lastDay,
+    reasons_json: write(a.reasons, 'application/json', {indent: false})})]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <choice>
+            <when expression="#[not isEmpty(vars.raised)]">
+                <db:bulk-insert config-ref="Db">
+                    <db:bulk-input-parameters>#[vars.raised map {
+                        alert_id: $.alert_id, kind: $.kind, customer_id: $.customer_id, code: $.code,
+                        announcement_id: $.announcement_id, score: $.score, reasons: $.reasons_json, raised_on: $.raised_on}]</db:bulk-input-parameters>
+                    <db:sql>insert into max.alerts (alert_id, kind, customer_id, code, announcement_id, score, reasons, raised_on)
+                            values (:alert_id, :kind, :customer_id, :code, :announcement_id, :score, cast(:reasons as jsonb), cast(:raised_on as date))</db:sql>
+                </db:bulk-insert>
+                <db:insert config-ref="Db">
+                    <db:sql>insert into max.audit_log (actor, action, target, detail) values ('system:surveillance', 'raise-alerts', :target, cast(:detail as jsonb))</db:sql>
+                    <db:input-parameters>#[{target: (vars.raised map $.alert_id) joinBy ',',
+                        detail: write({count: sizeOf(vars.raised)}, 'application/json', {indent: false})}]</db:input-parameters>
+                </db:insert>
+            </when>
+        </choice>
+        <set-payload value="#[output application/json --- {
+            raised: vars.raised map {alertId: $.alert_id, customerId: $.customer_id, code: $.code, announcementId: $.announcement_id, score: $.score},
+            alreadyKnown: sizeOf(vars.existing)}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="alerts-list">
+        <http:listener config-ref="Http" path="/alerts" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db">
+            <db:sql>select a.alert_id, a.kind, a.score, a.status, to_char(a.raised_on, 'YYYY-MM-DD') as raised_on,
+                           a.customer_id, c.name as customer_name, a.code, i.name as instrument_name, a.announcement_id
+                    from max.alerts a join max.customers c using (customer_id) join max.instruments i using (code)
+                    where (:status = '' or a.status = :status) order by a.score desc, a.alert_id</db:sql>
+            <db:input-parameters>#[{status: attributes.queryParams.status default ''}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {
+            alertId: $.alert_id, kind: $.kind, score: $.score, status: $.status, raisedOn: $.raised_on,
+            customerId: $.customer_id, customerName: $.customer_name, code: $.code, instrumentName: $.instrument_name,
+            announcementId: $.announcement_id}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="alert-get">
+        <http:listener config-ref="Http" path="/alerts/{alertId}" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db" target="alert">
+            <db:sql>select a.alert_id, a.kind, a.score, a.status, cast(a.reasons as text) as reasons, to_char(a.raised_on, 'YYYY-MM-DD') as raised_on,
+                           a.customer_id, a.code, a.announcement_id
+                    from max.alerts a where a.alert_id = :id</db:sql>
+            <db:input-parameters>#[{id: attributes.uriParams.alertId}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[isEmpty(vars.alert)]">
+                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ attributes.uriParams.alertId ++ ' was not found']"/>
+            </when>
+        </choice>
+        <set-variable variableName="a" value="#[vars.alert[0]]"/>
+        <db:select config-ref="Db" target="customer">
+            <db:sql>select customer_id, name, name_kana, to_char(birth_date, 'YYYY-MM-DD') as birth_date, occupation, employer,
+                           annual_income, experience_years, risk_tolerance, to_char(opened_on, 'YYYY-MM-DD') as opened_on
+                    from max.customers where customer_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.a.customer_id}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="instrument">
+            <db:sql>select code, name, sector, market from max.instruments where code = :code</db:sql>
+            <db:input-parameters>#[{code: vars.a.code}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="announcement">
+            <db:sql>select announcement_id, code, to_char(published_at, 'YYYY-MM-DD HH24:MI') as published_at, kind, title, price_move_pct
+                    from max.announcements where announcement_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.a.announcement_id}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="instrumentTrades">
+            <db:sql>select trade_id, side, qty, price, to_char(trade_date, 'YYYY-MM-DD') as trade_date, channel
+                    from max.trades where customer_id = :cid and code = :code order by trade_date, trade_id</db:sql>
+            <db:input-parameters>#[{cid: vars.a.customer_id, code: vars.a.code}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="recentTrades">
+            <db:sql>select t.trade_id, t.code, i.name as instrument_name, t.side, t.qty, t.price, to_char(t.trade_date, 'YYYY-MM-DD') as trade_date
+                    from max.trades t join max.instruments i using (code)
+                    where t.customer_id = :cid order by t.trade_date desc, t.trade_id desc limit 10</db:sql>
+            <db:input-parameters>#[{cid: vars.a.customer_id}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="registry">
+            <db:sql>select r.code, i.name as instrument_name, r.relation from max.insider_registry r join max.instruments i using (code)
+                    where r.customer_id = :cid order by r.code</db:sql>
+            <db:input-parameters>#[{cid: vars.a.customer_id}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- {
+            alertId: vars.a.alert_id, kind: vars.a.kind, score: vars.a.score, status: vars.a.status, raisedOn: vars.a.raised_on,
+            reasons: read(vars.a.reasons, 'application/json') map {rule: $.rule, points: $.points, detail: $.detail},
+            customer: vars.customer[0],
+            instrument: vars.instrument[0],
+            announcement: vars.announcement[0],
+            tradesInThisInstrument: vars.instrumentTrades,
+            recentTrades: vars.recentTrades,
+            insiderRegistry: vars.registry}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+</mule>

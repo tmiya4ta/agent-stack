@@ -1,0 +1,666 @@
+%%% note
+max-core (マックス証券、架空): 審査の点数付け (インサイダー取引の疑い) とアラートの照会。
+DB は mulay の試験用の PG (localhost:15432、スキーマ max)。最初に /admin/reset で合成データを流し直す。
+仕込んだ筋書き 3 件 (C017 取引先の社員と公開買付け、C011 業務提携の前の初めての銘柄、C004 積み立て) が
+アラートになること、2 回目の点数付けで同じアラートを作らないこと、鍵の誤り、無いアラート。
+%%% jvm -Dhttp.port=18476 -Dapi.key=test-key -Dadmin.reset=true
+%%% port 18476
+%%% request GET /
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "name": "max-core",
+  "company": "マックス証券 (架空)",
+  "what": "System API of the fictional securities firm: surveillance scoring (insider trading) and alerts. All data is synthetic.",
+  "endpoints": [
+    "POST /surveillance/run",
+    "GET /alerts",
+    "GET /alerts/{id}"
+  ],
+  "auth": "Authorization: Bearer KEY or api-key: KEY"
+}
+%%% request GET /health
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "status": "ok"
+}
+%%% request POST /admin/reset
+%%% response 401
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "Missing or wrong API key"
+}
+%%% request POST /admin/reset
+authorization: Bearer wrong
+%%% response 401
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "Missing or wrong API key"
+}
+%%% request POST /admin/reset
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "customers": 20,
+  "trades": 178,
+  "announcements": 9
+}
+%%% request GET /alerts
+api-key: test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  
+]
+%%% request POST /surveillance/run
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "raised": [
+    {
+      "alertId": "SV-0001",
+      "customerId": "C017",
+      "code": "MX07",
+      "announcementId": "A005",
+      "score": 100
+    },
+    {
+      "alertId": "SV-0002",
+      "customerId": "C011",
+      "code": "MX21",
+      "announcementId": "A009",
+      "score": 75
+    },
+    {
+      "alertId": "SV-0003",
+      "customerId": "C004",
+      "code": "MX12",
+      "announcementId": "A008",
+      "score": 30
+    }
+  ],
+  "alreadyKnown": 0
+}
+%%% request POST /surveillance/run
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "raised": [
+    
+  ],
+  "alreadyKnown": 3
+}
+%%% request GET /alerts
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "alertId": "SV-0001",
+    "kind": "インサイダー取引の疑い",
+    "score": 100,
+    "status": "未対応",
+    "raisedOn": "2026-10-09",
+    "customerId": "C017",
+    "customerName": "西田 亮",
+    "code": "MX07",
+    "instrumentName": "白樺化学",
+    "announcementId": "A005"
+  },
+  {
+    "alertId": "SV-0002",
+    "kind": "インサイダー取引の疑い",
+    "score": 75,
+    "status": "未対応",
+    "raisedOn": "2026-10-09",
+    "customerId": "C011",
+    "customerName": "柴田 浩二",
+    "code": "MX21",
+    "instrumentName": "常磐バイオ",
+    "announcementId": "A009"
+  },
+  {
+    "alertId": "SV-0003",
+    "kind": "インサイダー取引の疑い",
+    "score": 30,
+    "status": "未対応",
+    "raisedOn": "2026-10-09",
+    "customerId": "C004",
+    "customerName": "遠藤 拓也",
+    "code": "MX12",
+    "instrumentName": "汐見エナジー",
+    "announcementId": "A008"
+  }
+]
+%%% request GET /alerts?status=%E6%9C%AA%E5%AF%BE%E5%BF%9C
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "alertId": "SV-0001",
+    "kind": "インサイダー取引の疑い",
+    "score": 100,
+    "status": "未対応",
+    "raisedOn": "2026-10-09",
+    "customerId": "C017",
+    "customerName": "西田 亮",
+    "code": "MX07",
+    "instrumentName": "白樺化学",
+    "announcementId": "A005"
+  },
+  {
+    "alertId": "SV-0002",
+    "kind": "インサイダー取引の疑い",
+    "score": 75,
+    "status": "未対応",
+    "raisedOn": "2026-10-09",
+    "customerId": "C011",
+    "customerName": "柴田 浩二",
+    "code": "MX21",
+    "instrumentName": "常磐バイオ",
+    "announcementId": "A009"
+  },
+  {
+    "alertId": "SV-0003",
+    "kind": "インサイダー取引の疑い",
+    "score": 30,
+    "status": "未対応",
+    "raisedOn": "2026-10-09",
+    "customerId": "C004",
+    "customerName": "遠藤 拓也",
+    "code": "MX12",
+    "instrumentName": "汐見エナジー",
+    "announcementId": "A008"
+  }
+]
+%%% request GET /alerts?status=done
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  
+]
+%%% request GET /alerts/SV-0001
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "alertId": "SV-0001",
+  "kind": "インサイダー取引の疑い",
+  "score": 100,
+  "status": "未対応",
+  "raisedOn": "2026-10-09",
+  "reasons": [
+    {
+      "rule": "公表前の売買",
+      "points": 30,
+      "detail": "公表 (2026-09-25 15:00 公開買付け、翌日 18%) の前 5 営業日に 2 回、計 7,161,900 円 の買"
+    },
+    {
+      "rule": "初めての銘柄",
+      "points": 20,
+      "detail": "この銘柄を売買したのは初めて"
+    },
+    {
+      "rule": "普段との差",
+      "points": 25,
+      "detail": "直前 60 営業日の 1 回の平均 (203,850 円) の 35.1 倍"
+    },
+    {
+      "rule": "内部者の登録",
+      "points": 25,
+      "detail": "登録あり: 取引先の社員"
+    },
+    {
+      "rule": "公表後の反対売買",
+      "points": 10,
+      "detail": "公表後 5 営業日以内に 売 (2026-09-29)"
+    }
+  ],
+  "customer": {
+    "customer_id": "C017",
+    "name": "西田 亮",
+    "name_kana": "ニシダ リョウ",
+    "birth_date": "1986-03-29",
+    "occupation": "会社員",
+    "employer": "蒼穹商事",
+    "annual_income": 6900000,
+    "experience_years": 6,
+    "risk_tolerance": "中",
+    "opened_on": "2019-09-17"
+  },
+  "instrument": {
+    "code": "MX07",
+    "name": "白樺化学",
+    "sector": "化学",
+    "market": "スタンダード"
+  },
+  "announcement": {
+    "announcement_id": "A005",
+    "code": "MX07",
+    "published_at": "2026-09-25 15:00",
+    "kind": "公開買付け",
+    "title": "暁星マテリアルによる当社株式に対する公開買付けの開始",
+    "price_move_pct": 18
+  },
+  "tradesInThisInstrument": [
+    {
+      "trade_id": "T000153",
+      "side": "買",
+      "qty": 3000,
+      "price": 1435.1,
+      "trade_date": "2026-09-22",
+      "channel": "ネット"
+    },
+    {
+      "trade_id": "T000155",
+      "side": "買",
+      "qty": 2000,
+      "price": 1428.3,
+      "trade_date": "2026-09-24",
+      "channel": "ネット"
+    },
+    {
+      "trade_id": "T000163",
+      "side": "売",
+      "qty": 5000,
+      "price": 1645.3,
+      "trade_date": "2026-09-29",
+      "channel": "ネット"
+    }
+  ],
+  "recentTrades": [
+    {
+      "trade_id": "T000163",
+      "code": "MX07",
+      "instrument_name": "白樺化学",
+      "side": "売",
+      "qty": 5000,
+      "price": 1645.3,
+      "trade_date": "2026-09-29"
+    },
+    {
+      "trade_id": "T000155",
+      "code": "MX07",
+      "instrument_name": "白樺化学",
+      "side": "買",
+      "qty": 2000,
+      "price": 1428.3,
+      "trade_date": "2026-09-24"
+    },
+    {
+      "trade_id": "T000153",
+      "code": "MX07",
+      "instrument_name": "白樺化学",
+      "side": "買",
+      "qty": 3000,
+      "price": 1435.1,
+      "trade_date": "2026-09-22"
+    },
+    {
+      "trade_id": "T000138",
+      "code": "MX09",
+      "instrument_name": "千早建設",
+      "side": "買",
+      "qty": 100,
+      "price": 2038.5,
+      "trade_date": "2026-09-10"
+    },
+    {
+      "trade_id": "T000033",
+      "code": "MX09",
+      "instrument_name": "千早建設",
+      "side": "買",
+      "qty": 100,
+      "price": 2052.4,
+      "trade_date": "2026-06-24"
+    }
+  ],
+  "insiderRegistry": [
+    {
+      "code": "MX07",
+      "instrument_name": "白樺化学",
+      "relation": "取引先の社員"
+    }
+  ]
+}
+%%% request GET /alerts/SV-0002
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "alertId": "SV-0002",
+  "kind": "インサイダー取引の疑い",
+  "score": 75,
+  "status": "未対応",
+  "raisedOn": "2026-10-09",
+  "reasons": [
+    {
+      "rule": "公表前の売買",
+      "points": 30,
+      "detail": "公表 (2026-10-02 15:30 業務提携、翌日 11.2%) の前 5 営業日に 1 回、計 6,787,350 円 の買"
+    },
+    {
+      "rule": "初めての銘柄",
+      "points": 20,
+      "detail": "この銘柄を売買したのは初めて"
+    },
+    {
+      "rule": "普段との差",
+      "points": 25,
+      "detail": "直前 60 営業日の 1 回の平均 (273,939 円) の 24.8 倍"
+    }
+  ],
+  "customer": {
+    "customer_id": "C011",
+    "name": "柴田 浩二",
+    "name_kana": "シバタ コウジ",
+    "birth_date": "1968-09-16",
+    "occupation": "自営業",
+    "employer": null,
+    "annual_income": 12500000,
+    "experience_years": 20,
+    "risk_tolerance": "高",
+    "opened_on": "2008-10-21"
+  },
+  "instrument": {
+    "code": "MX21",
+    "name": "常磐バイオ",
+    "sector": "医薬品",
+    "market": "グロース"
+  },
+  "announcement": {
+    "announcement_id": "A009",
+    "code": "MX21",
+    "published_at": "2026-10-02 15:30",
+    "kind": "業務提携",
+    "title": "大手製薬会社との共同研究開発契約の締結",
+    "price_move_pct": 11.2
+  },
+  "tradesInThisInstrument": [
+    {
+      "trade_id": "T000166",
+      "side": "買",
+      "qty": 1500,
+      "price": 4524.9,
+      "trade_date": "2026-09-30",
+      "channel": "ネット"
+    }
+  ],
+  "recentTrades": [
+    {
+      "trade_id": "T000170",
+      "code": "MX11",
+      "instrument_name": "鳴海重工",
+      "side": "買",
+      "qty": 300,
+      "price": 564.1,
+      "trade_date": "2026-10-02"
+    },
+    {
+      "trade_id": "T000166",
+      "code": "MX21",
+      "instrument_name": "常磐バイオ",
+      "side": "買",
+      "qty": 1500,
+      "price": 4524.9,
+      "trade_date": "2026-09-30"
+    },
+    {
+      "trade_id": "T000150",
+      "code": "MX11",
+      "instrument_name": "鳴海重工",
+      "side": "売",
+      "qty": 600,
+      "price": 555.2,
+      "trade_date": "2026-09-17"
+    },
+    {
+      "trade_id": "T000121",
+      "code": "MX11",
+      "instrument_name": "鳴海重工",
+      "side": "売",
+      "qty": 600,
+      "price": 578.8,
+      "trade_date": "2026-08-27"
+    },
+    {
+      "trade_id": "T000106",
+      "code": "MX19",
+      "instrument_name": "桔梗不動産",
+      "side": "買",
+      "qty": 200,
+      "price": 1655,
+      "trade_date": "2026-08-17"
+    },
+    {
+      "trade_id": "T000095",
+      "code": "MX19",
+      "instrument_name": "桔梗不動産",
+      "side": "買",
+      "qty": 200,
+      "price": 1759.7,
+      "trade_date": "2026-08-10"
+    },
+    {
+      "trade_id": "T000087",
+      "code": "MX02",
+      "instrument_name": "瑠璃ファーマ",
+      "side": "売",
+      "qty": 500,
+      "price": 489.8,
+      "trade_date": "2026-07-31"
+    },
+    {
+      "trade_id": "T000081",
+      "code": "MX19",
+      "instrument_name": "桔梗不動産",
+      "side": "売",
+      "qty": 100,
+      "price": 1668.3,
+      "trade_date": "2026-07-29"
+    },
+    {
+      "trade_id": "T000059",
+      "code": "MX02",
+      "instrument_name": "瑠璃ファーマ",
+      "side": "買",
+      "qty": 300,
+      "price": 475,
+      "trade_date": "2026-07-10"
+    },
+    {
+      "trade_id": "T000036",
+      "code": "MX19",
+      "instrument_name": "桔梗不動産",
+      "side": "買",
+      "qty": 200,
+      "price": 1759.7,
+      "trade_date": "2026-06-25"
+    }
+  ],
+  "insiderRegistry": [
+    
+  ]
+}
+%%% request GET /alerts/SV-0003
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "alertId": "SV-0003",
+  "kind": "インサイダー取引の疑い",
+  "score": 30,
+  "status": "未対応",
+  "raisedOn": "2026-10-09",
+  "reasons": [
+    {
+      "rule": "公表前の売買",
+      "points": 30,
+      "detail": "公表 (2026-10-05 15:00 業績修正、翌日 7.3%) の前 5 営業日に 1 回、計 139,600 円 の買"
+    }
+  ],
+  "customer": {
+    "customer_id": "C004",
+    "name": "遠藤 拓也",
+    "name_kana": "エンドウ タクヤ",
+    "birth_date": "1975-05-21",
+    "occupation": "会社員",
+    "employer": "風見銀行",
+    "annual_income": 11800000,
+    "experience_years": 15,
+    "risk_tolerance": "中",
+    "opened_on": "2011-09-01"
+  },
+  "instrument": {
+    "code": "MX12",
+    "name": "汐見エナジー",
+    "sector": "電気・ガス",
+    "market": "プライム"
+  },
+  "announcement": {
+    "announcement_id": "A008",
+    "code": "MX12",
+    "published_at": "2026-10-05 15:00",
+    "kind": "業績修正",
+    "title": "通期業績予想および配当予想の上方修正",
+    "price_move_pct": 7.3
+  },
+  "tradesInThisInstrument": [
+    {
+      "trade_id": "T000001",
+      "side": "買",
+      "qty": 300,
+      "price": 1351.9,
+      "trade_date": "2026-06-01",
+      "channel": "ネット"
+    },
+    {
+      "trade_id": "T000045",
+      "side": "買",
+      "qty": 100,
+      "price": 1258.8,
+      "trade_date": "2026-07-01",
+      "channel": "ネット"
+    },
+    {
+      "trade_id": "T000090",
+      "side": "買",
+      "qty": 100,
+      "price": 1151.2,
+      "trade_date": "2026-08-03",
+      "channel": "コールセンター"
+    },
+    {
+      "trade_id": "T000129",
+      "side": "買",
+      "qty": 100,
+      "price": 1270.5,
+      "trade_date": "2026-09-01",
+      "channel": "ネット"
+    },
+    {
+      "trade_id": "T000167",
+      "side": "買",
+      "qty": 100,
+      "price": 1396,
+      "trade_date": "2026-10-01",
+      "channel": "コールセンター"
+    }
+  ],
+  "recentTrades": [
+    {
+      "trade_id": "T000167",
+      "code": "MX12",
+      "instrument_name": "汐見エナジー",
+      "side": "買",
+      "qty": 100,
+      "price": 1396,
+      "trade_date": "2026-10-01"
+    },
+    {
+      "trade_id": "T000139",
+      "code": "MX06",
+      "instrument_name": "暁星マテリアル",
+      "side": "買",
+      "qty": 200,
+      "price": 1686.5,
+      "trade_date": "2026-09-11"
+    },
+    {
+      "trade_id": "T000129",
+      "code": "MX12",
+      "instrument_name": "汐見エナジー",
+      "side": "買",
+      "qty": 100,
+      "price": 1270.5,
+      "trade_date": "2026-09-01"
+    },
+    {
+      "trade_id": "T000090",
+      "code": "MX12",
+      "instrument_name": "汐見エナジー",
+      "side": "買",
+      "qty": 100,
+      "price": 1151.2,
+      "trade_date": "2026-08-03"
+    },
+    {
+      "trade_id": "T000068",
+      "code": "MX09",
+      "instrument_name": "千早建設",
+      "side": "買",
+      "qty": 100,
+      "price": 2084.9,
+      "trade_date": "2026-07-15"
+    },
+    {
+      "trade_id": "T000045",
+      "code": "MX12",
+      "instrument_name": "汐見エナジー",
+      "side": "買",
+      "qty": 100,
+      "price": 1258.8,
+      "trade_date": "2026-07-01"
+    },
+    {
+      "trade_id": "T000001",
+      "code": "MX12",
+      "instrument_name": "汐見エナジー",
+      "side": "買",
+      "qty": 300,
+      "price": 1351.9,
+      "trade_date": "2026-06-01"
+    }
+  ],
+  "insiderRegistry": [
+    
+  ]
+}
+%%% request GET /alerts/SV-9999
+authorization: Bearer test-key
+%%% response 404
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "Alert SV-9999 was not found"
+}
