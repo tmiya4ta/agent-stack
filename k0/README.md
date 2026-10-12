@@ -93,9 +93,12 @@ broker (v2) の LLM の接続を `https://llm.openai.emu.theorems.dev/v1` (platf
 | 最後が assistant の項目 | 400 Failed to initialize samplers: std::exception | エンジンに `--no-prefill-assistant` (続きを書かない。OpenAI と同じ) |
 | 考えると 1 回 10 秒を超える | — | `reasoning.effort` が none / minimal / low なら考えない (`THINK_OFF`)。OpenAI の low とは違う |
 
-- **未解決**: 出口のゲートウェイ ft1 の `upstreamResponseTimeout` が 15 秒で、長い生成 (一覧の表、調査メモ) が 504
-  (broker のログに `upstream request timeout`) になる。API インスタンスの `responseTimeout` は LLM の出口には効かない。
-  プラグインが新しく作るゲートウェイは 60 秒。ft1 は共用なので、変えるかはユーザーの判断待ち。
+- 出口のゲートウェイ ft1 の `upstreamResponseTimeout` が 15 秒で、長い生成 (一覧の表、調査メモ) が 504
+  (broker のログに `upstream request timeout`) になった。API インスタンスの `responseTimeout` は LLM の出口には効かない。
+  ユーザーの了承を得て ft1 を 300 秒にした (2026-10-12。gatewaymanager の PUT。プラグインが新しく作るゲートウェイは 60 秒)。
+- **結論 (2026-10-12)**: 仕組みとしては通る (一覧の会話は COMPLETED)。ただ AML の調査 (道具 3 つ + A2A + 長い構造化出力) は
+  3 回中 1 回しか正しく終わらなかった (「見つからない」と誤る、invalid input)。low で考えさせると 1 回が 3 分を超え、JSON の中身も崩れた。
+  当面 broker の LLM はデモ用のプロキシ (OpenAI / Gemini) にし、手元の LLM は統計的な口・埋め込み・エージェントの中で使う。
 - broker の接続の確認は、空の本文 (`{}`) の `POST /v1/responses` を送り、400 でも合格にする。
 
 ## llm-gemini-emu の作り (`emu/llm-gemini-emu`)

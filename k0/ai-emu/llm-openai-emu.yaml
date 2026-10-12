@@ -23,6 +23,7 @@ spec:
         env:
         - {name: UPSTREAM, value: "http://llm-ornith-model.ai-model.svc.cluster.local"}
         - {name: LOG_BODIES, value: "1"}
+        # THINK_OFF は既定 (none,minimal,low) のまま。low でも考えさせると、1 回が 3 分を超え、JSON の中身も崩れた (2026-10-12)
         ports: [{name: http, containerPort: 8080}]
         securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, runAsNonRoot: true, readOnlyRootFilesystem: true}
         readinessProbe:
