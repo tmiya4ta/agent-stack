@@ -40,7 +40,7 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
   エンジンはモデルの PVC のある k0-worker に固定する。
 - **API キー**: 全サービスに付ける (Gateway の手前に認証は無く、インターネットから誰でも届く)。
   `./secrets.sh <名前空間> <名前>` が `~/.config/<名前>/env` の `API_KEY` (無ければ作る、0600) から Secret `<名前>-api-key` を作る。
-- **公開**: HTTPRoute (`parentRefs: rtf/cluster-gateway`、hostnames は `.dev` だけ)。3 階層の名前の証明書は Caddy の on-demand TLS
+- **公開**: HTTPRoute (`parentRefs: rtf/cluster-gateway`、hostnames は `.dev` だけ。LLM は `timeouts` も書く、下の「長い生成」)。3 階層の名前の証明書は Caddy の on-demand TLS
   (配線盤の `/ask` が HTTPRoute にある名前だけを許す)。新しい名前は初回だけ証明書の取得に 40 秒ほどかかる。
 
 ## llama-server の注意
@@ -51,15 +51,19 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
 - Responses API (`/v1/responses`) は `text.format` の json_schema を無視して文章を返す (2026-10-11、イメージの digest は各 yaml)。
   Chat Completions の `response_format` (json_schema) は効く。broker は Responses API で構造化出力を使うので、`llm.openai.emu` で変換する。
 
-## 未解決: 共有 Gateway が 15 秒で切る
+## 長い生成とタイムアウト
 
-共有 Gateway (cloud-provider-kind の Envoy) は、どの要求も 15 秒で 504 にする (Envoy の route timeout の既定値)。
-HTTPRoute の `timeouts` は受理されるが効かない (2026-10-12 に確認、config_dump にも出ない)。生成は 1 秒に約 24 トークンなので、
-15 秒を超える生成は公開名からは失敗する。cloud-provider-kind は v0.12.0 でも timeouts を移さない (インフラがソースで確認)。
-インフラの案は、v0.10.0 に timeouts を移すパッチを当てて入れ替えること (theorems-infra の cluster/cloud-provider-kind/)。
-その間、ここの HTTPRoute には timeouts (request: 900s) を書いておく。パッチが入ればそのまま効く。
+共有 Gateway (cloud-provider-kind の Envoy) の既定は 15 秒で 504。インフラが v0.10.0 にパッチを当て、HTTPRoute の
+`rules[].timeouts.request` が効くようにした (2026-10-12、theorems-infra の `cluster/cloud-provider-kind/`。0s は無制限)。
+LLM の HTTPRoute には `timeouts: {request: 900s}` を書く。書かないと 15 秒で切れる。
 
 ## 確かめたこと (2026-10-11)
 
 - `llm-ornith-model`: 鍵なしは 401。生成は 1 秒に約 24 トークン。Chat Completions と Responses API の両方で、ツール呼び出しが正しく返る。
 - `embed-gte-qwen2-model`: 前の embeddings-server (元の PyTorch 実装とコサイン 0.9993 以上で一致) と、日本語・英語・長文でコサイン 0.9997 以上。
+
+## 確かめたこと (2026-10-12)
+
+- 公開名 (`https://llm.openai.emu.theorems.dev`、`https://llm.ornith.model.theorems.dev`) に Let's Encrypt の証明書が付き、鍵なしは 401。
+- `llm.openai.emu` の公開名で、900 トークン (約 40 秒) の生成が Chat Completions で 200、Responses API のストリーミングで
+  `response.completed` まで流れる。
