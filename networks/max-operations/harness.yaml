@@ -1,0 +1,5 @@
+name: max-operations
+kind: network
+runtime: agent-network
+# MCP サーバーは k0 の max-core (mulay) の口座開設の口で、harness では配備しない。URL は yc の変数 (max-ops-mcp-url = https://<host>/k/<鍵>/ops)
+members: {}

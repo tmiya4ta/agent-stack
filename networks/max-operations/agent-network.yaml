@@ -1,0 +1,155 @@
+agentNetwork: 2.0.0
+info:
+  label: Max Securities Account Opening Network
+  version: 1.0.0
+  description: Reviews an account-opening application of the fictional Max Securities that the rules flagged (suitability, source of funds, watch list, duplicates), drafts the memo and sends the recommendation to the approval inbox, where an employee decides.
+
+registry:
+  mcps:
+    max-operations-mcp{{-suffix}}:
+      info:
+        label: Max Operations MCP Server
+        description: Account-opening applications with the rule findings, similar existing customers and watch-list entries, and the approval inbox.
+      metadata:
+        transport:
+          kind: streamableHttp
+          path: /mcp
+        tools:
+          - name: list-applications
+            description: Lists the account-opening applications.
+            inputSchema:
+              type: object
+              properties:
+                status:
+                  type: string
+          - name: get-application
+            description: Returns one application with the rule findings, existing customers with a similar name, and matching watch-list entries.
+            inputSchema:
+              type: object
+              properties:
+                applicationId:
+                  type: string
+              required:
+                - applicationId
+          - name: request-account-approval
+            description: Saves the review and sends the recommendation with the memo to the approval inbox.
+            inputSchema:
+              type: object
+              properties:
+                contextId:
+                  type: string
+                applicationId:
+                  type: string
+                recommendation:
+                  type: string
+                facts:
+                  type: string
+                findings:
+                  type: string
+                gaps:
+                  type: string
+                reasoning:
+                  type: string
+              required:
+                - contextId
+                - applicationId
+                - recommendation
+                - facts
+                - reasoning
+
+  llms:
+    max-ops-openai-llm{{-suffix}}:
+      info:
+        label: OpenAI
+        description: OpenAI-compatible LLM provider. The endpoint comes from the max-ops-openai-llm{{-suffix}}.url variable in exchange.json.
+      metadata:
+        platform: AzureOpenai
+        models:
+          - gpt-5-mini
+
+context:
+  policies:
+    # 呼び出し元: HS256 の JWT。sub が会話の持ち主になる (aml-investigation と同じ)
+    max_ops_jwt_validation{{_suffix}}:
+      ref:
+        name: jwt-validation
+        namespace: 68ef9520-24e9-4cf2-b2f5-620025690913
+      configuration:
+        jwtOrigin: httpBearerAuthenticationHeader
+        jwtExpression: "#[attributes.headers['jwt']]"
+        signingMethod: hmac
+        signingKeyLength: 256
+        jwtKeyOrigin: text
+        textKey: ${jwt.hs256Secret}
+        jwksUrl: "http://your-jwks-service.example:80/base/path"
+        jwksServiceTimeToLive: 60
+        jwksServiceConnectionTimeout: 10000
+        customKeyExpression: "#[authentication.properties['key_to_your_public_pem_certificate']]"
+        skipClientIdValidation: true
+        clientIdExpression: "#[vars.claimSet.client_id]"
+        validateAudClaim: false
+        mandatoryAudClaim: false
+        supportedAudiences: aud.example.com
+        mandatoryExpClaim: true
+        mandatoryNbfClaim: false
+        validateCustomClaim: false
+    max_ops_user_context{{_suffix}}:
+      ref:
+        name: user-context-propagation
+        namespace: 68ef9520-24e9-4cf2-b2f5-620025690913
+      configuration:
+        userIdExpression: "#[authentication.properties.claims.sub]"
+
+  connections:
+    max_operations_connection{{_suffix}}:
+      kind: mcp
+      ref:
+        name: max-operations-mcp{{-suffix}}
+      url: ${max-operations-mcp{{-suffix}}.url}
+
+    max_ops_openai_connection{{_suffix}}:
+      kind: llm
+      ref:
+        name: max-ops-openai-llm{{-suffix}}
+      url: ${max-ops-openai-llm{{-suffix}}.url}
+      authentication:
+        kind: apiKey
+        apiKey: ${openAI.apiKey}
+
+brokers:
+  max-operations-broker{{-suffix}}:
+    kind: AgentScript
+    implementation: ./brokers/max_operations_broker.agent
+    interfaces:
+      a2a:
+        policies:
+          inbound:
+            - ref:
+                name: max_ops_jwt_validation{{_suffix}}
+            - ref:
+                name: max_ops_user_context{{_suffix}}
+        card:
+          name: Max Securities Account Opening Broker{{-suffix}}
+          description: Reviews an account-opening application that the rules flagged and sends the recommendation with the memo to the approval inbox. An employee decides there.
+          version: 1.0.0
+          capabilities:
+            streaming: false
+            pushNotifications: true
+          defaultInputModes:
+            - text/plain
+          defaultOutputModes:
+            - text/plain
+          skills:
+            - id: account-opening-review
+              name: Review an account-opening application
+              description: Reads the application, the rule findings, similar customers and watch-list entries, drafts the memo, and sends the recommendation (approve, reject, ask for more) to the approval inbox.
+              tags:
+                - onboarding
+                - kyc
+              examples:
+                - "申込み OA-0003 を調べて"
+                - "確認待ちの申込みを見せて"
+              inputModes:
+                - text/plain
+              outputModes:
+                - text/plain
