@@ -9,5 +9,5 @@ spec:
   hostnames: [llm.ornith.model.theorems.dev]
   rules:
   - backendRefs: [{name: llm-ornith-model, port: 80}]
-    # 長い生成のため。今の共有 Gateway (cloud-provider-kind) は timeouts を無視して 15 秒で切る (k0/README.md)
+    # 書かないと共有 Gateway が 15 秒で切る (k0/README.md の「長い生成とタイムアウト」)
     timeouts: {request: 900s, backendRequest: 900s}
