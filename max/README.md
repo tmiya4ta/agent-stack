@@ -103,3 +103,12 @@ POST /clock/advance?days=N (max-core)  1 営業日ごとに:
 ```bash
 curl -X POST -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:18081/clock/advance?days=5"   # 10-16 に SV-0004 → 承認箱
 ```
+
+### 時計を自動で進める、注文の画面 (2026-10-12)
+
+- `POST /clock/auto {"enabled": true, "until": "2026-10-23"}`: clock.auto.interval (k0 は 2 分) ごとに 1 営業日進め、until の日で止まる。
+  切り替えは DB に持つので再配備は要らない。手で進めている最中なら自動の回は飛ばし、手の要求は 409。
+  進行中の印は busy_since から 10 分を過ぎたら取り直す (進める途中でプロセスが止まっても、時計が止まったままにならない)。
+- 注文の画面: `https://order.max.theorems.dev/k/<max-oms の鍵>/` (鍵は `~/.config/max-oms/env`)。お客さま・銘柄・売買・株数を選んで注文すると、
+  いまの業務日の終値で約定し (約定 ID は T+yyMMdd+M+連番)、MQ で台帳に届く (max-core が 60 秒ごとに取り込む)。
+  画面は外部の資源を読まず、Referrer-Policy は no-referrer (鍵が経路に入っているため)。
