@@ -201,22 +201,27 @@ fresh map ((a, i) -> a ++ {
         </error-handler>
     </flow>
 
-    <flow name="alerts-list">
-        <http:listener config-ref="Http" path="/alerts" allowedMethods="GET">
-            <http:response statusCode="#[vars.status default 200]"/>
-        </http:listener>
-        <flow-ref name="auth"/>
-        <db:select config-ref="Db">
+    <!-- アラートの一覧: vars.statusFilter (空なら全部) -->
+    <sub-flow name="alerts-query">        <db:select config-ref="Db">
             <db:sql>select a.alert_id, a.kind, a.score, a.status, to_char(a.raised_on, 'YYYY-MM-DD') as raised_on,
                            a.customer_id, c.name as customer_name, a.code, i.name as instrument_name, a.announcement_id
                     from max.alerts a join max.customers c using (customer_id) join max.instruments i using (code)
                     where (:status = '' or a.status = :status) order by a.score desc, a.alert_id</db:sql>
-            <db:input-parameters>#[{status: attributes.queryParams.status default ''}]</db:input-parameters>
+            <db:input-parameters>#[{status: vars.statusFilter}]</db:input-parameters>
         </db:select>
         <set-payload value="#[output application/json --- payload map {
             alertId: $.alert_id, kind: $.kind, score: $.score, status: $.status, raisedOn: $.raised_on,
             customerId: $.customer_id, customerName: $.customer_name, code: $.code, instrumentName: $.instrument_name,
             announcementId: $.announcement_id}]"/>
+    </sub-flow>
+
+    <flow name="alerts-list">
+        <http:listener config-ref="Http" path="/alerts" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="statusFilter" value="#[attributes.queryParams.status default '']"/>
+        <flow-ref name="alerts-query"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>
@@ -224,20 +229,16 @@ fresh map ((a, i) -> a ++ {
         </error-handler>
     </flow>
 
-    <flow name="alert-get">
-        <http:listener config-ref="Http" path="/alerts/{alertId}" allowedMethods="GET">
-            <http:response statusCode="#[vars.status default 200]"/>
-        </http:listener>
-        <flow-ref name="auth"/>
-        <db:select config-ref="Db" target="alert">
+    <!-- アラートの詳しい中身: vars.alertId。無ければ MAX:NOT_FOUND -->
+    <sub-flow name="alert-detail">        <db:select config-ref="Db" target="alert">
             <db:sql>select a.alert_id, a.kind, a.score, a.status, cast(a.reasons as text) as reasons, to_char(a.raised_on, 'YYYY-MM-DD') as raised_on,
                            a.customer_id, a.code, a.announcement_id
                     from max.alerts a where a.alert_id = :id</db:sql>
-            <db:input-parameters>#[{id: attributes.uriParams.alertId}]</db:input-parameters>
+            <db:input-parameters>#[{id: vars.alertId}]</db:input-parameters>
         </db:select>
         <choice>
             <when expression="#[isEmpty(vars.alert)]">
-                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ attributes.uriParams.alertId ++ ' was not found']"/>
+                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ vars.alertId ++ ' was not found']"/>
             </when>
         </choice>
         <set-variable variableName="a" value="#[vars.alert[0]]"/>
@@ -281,6 +282,15 @@ fresh map ((a, i) -> a ++ {
             tradesInThisInstrument: vars.instrumentTrades,
             recentTrades: vars.recentTrades,
             insiderRegistry: vars.registry}]"/>
+    </sub-flow>
+
+    <flow name="alert-get">
+        <http:listener config-ref="Http" path="/alerts/{alertId}" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="alertId" value="#[attributes.uriParams.alertId]"/>
+        <flow-ref name="alert-detail"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>
@@ -289,18 +299,23 @@ fresh map ((a, i) -> a ++ {
     </flow>
 
     <!-- 過去の審査の事例 (似た事例を探す材料)。?kind= で絞る -->
+    <!-- 過去の審査の事例: vars.kind (空なら全部) -->
+    <sub-flow name="past-cases-query">        <db:select config-ref="Db">
+            <db:sql>select case_id, kind, summary, decision, reason, to_char(decided_on, 'YYYY-MM-DD') as decided_on
+                    from max.past_cases where (:kind = '' or kind = :kind) order by case_id</db:sql>
+            <db:input-parameters>#[{kind: vars.kind}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {
+            caseId: $.case_id, kind: $.kind, summary: $.summary, decision: $.decision, reason: $.reason, decidedOn: $.decided_on}]"/>
+    </sub-flow>
+
     <flow name="past-cases">
         <http:listener config-ref="Http" path="/past-cases" allowedMethods="GET">
             <http:response statusCode="#[vars.status default 200]"/>
         </http:listener>
         <flow-ref name="auth"/>
-        <db:select config-ref="Db">
-            <db:sql>select case_id, kind, summary, decision, reason, to_char(decided_on, 'YYYY-MM-DD') as decided_on
-                    from max.past_cases where (:kind = '' or kind = :kind) order by case_id</db:sql>
-            <db:input-parameters>#[{kind: attributes.queryParams.kind default ''}]</db:input-parameters>
-        </db:select>
-        <set-payload value="#[output application/json --- payload map {
-            caseId: $.case_id, kind: $.kind, summary: $.summary, decision: $.decision, reason: $.reason, decidedOn: $.decided_on}]"/>
+        <set-variable variableName="kind" value="#[attributes.queryParams.kind default '']"/>
+        <flow-ref name="past-cases-query"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>
@@ -329,25 +344,19 @@ fresh map ((a, i) -> a ++ {
     </flow>
 
     <!-- 調査の状態を残す。アラートが未対応なら調査中にする -->
-    <flow name="investigation-put">
-        <http:listener config-ref="Http" path="/investigations/{contextId}" allowedMethods="PUT">
-            <http:response statusCode="#[vars.status default 200]"/>
-        </http:listener>
-        <flow-ref name="auth"/>
-        <set-variable variableName="ctx" value="#[attributes.uriParams.contextId]"/>
-        <set-variable variableName="req" value="#[payload]"/>
-        <choice>
-            <when expression="#[isEmpty(payload.alertId default '') or isEmpty(payload.step default '')]">
+    <!-- 調査の状態を残す: vars.ctx、vars.req {alertId, step, recommendation, memo} -->
+    <sub-flow name="save-investigation">        <choice>
+            <when expression="#[isEmpty(vars.req.alertId default '') or isEmpty(vars.req.step default '')]">
                 <raise-error type="MAX:BAD_REQUEST" description="alertId and step are required"/>
             </when>
         </choice>
         <db:select config-ref="Db" target="alert">
             <db:sql>select alert_id, status from max.alerts where alert_id = :id</db:sql>
-            <db:input-parameters>#[{id: payload.alertId}]</db:input-parameters>
+            <db:input-parameters>#[{id: vars.req.alertId}]</db:input-parameters>
         </db:select>
         <choice>
             <when expression="#[isEmpty(vars.alert)]">
-                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ payload.alertId ++ ' was not found']"/>
+                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ vars.req.alertId ++ ' was not found']"/>
             </when>
         </choice>
         <db:insert config-ref="Db">
@@ -363,6 +372,16 @@ fresh map ((a, i) -> a ++ {
             <db:input-parameters>#[{id: vars.req.alertId}]</db:input-parameters>
         </db:update>
         <set-payload value="#[output application/json --- {saved: true, contextId: vars.ctx, alertId: vars.req.alertId, step: vars.req.step}]"/>
+    </sub-flow>
+
+    <flow name="investigation-put">
+        <http:listener config-ref="Http" path="/investigations/{contextId}" allowedMethods="PUT">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="ctx" value="#[attributes.uriParams.contextId]"/>
+        <set-variable variableName="req" value="#[payload]"/>
+        <flow-ref name="save-investigation"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>
@@ -372,24 +391,19 @@ fresh map ((a, i) -> a ++ {
 
     <!-- 承認の依頼を作る (エージェントの推奨と調査メモ)。Salesforce の承認箱 (MaxApproval__c) に置き、アラートを承認待ちにする。
          ID は ${approval.prefix}-0001 から (試験は別の前置きにして、承認箱の本物の依頼と混ぜない) -->
-    <flow name="approval-create">
-        <http:listener config-ref="Http" path="/approvals" allowedMethods="POST">
-            <http:response statusCode="#[vars.status default 201]"/>
-        </http:listener>
-        <flow-ref name="auth"/>
-        <set-variable variableName="req" value="#[payload]"/>
-        <choice>
-            <when expression="#[not (vars.decisions contains (payload.recommendation default ''))]">
+    <!-- 承認の依頼を作る: vars.req {targetId, contextId, recommendation, memo, requestedBy, kind} -->
+    <sub-flow name="create-approval">        <choice>
+            <when expression="#[not (vars.decisions contains (vars.req.recommendation default ''))]">
                 <raise-error type="MAX:BAD_REQUEST" description="#['recommendation must be one of ' ++ (vars.decisions joinBy ', ')]"/>
             </when>
-            <when expression="#[isEmpty(payload.targetId default '') or isEmpty(payload.memo default '') or isEmpty(payload.requestedBy default '')]">
+            <when expression="#[isEmpty(vars.req.targetId default '') or isEmpty(vars.req.memo default '') or isEmpty(vars.req.requestedBy default '')]">
                 <raise-error type="MAX:BAD_REQUEST" description="targetId, memo and requestedBy are required"/>
             </when>
         </choice>
         <db:select config-ref="Db" target="alert">
             <db:sql>select a.alert_id, a.kind, a.status, a.score, c.name as customer_name, i.name as instrument_name
                     from max.alerts a join max.customers c using (customer_id) join max.instruments i using (code) where a.alert_id = :id</db:sql>
-            <db:input-parameters>#[{id: payload.targetId}]</db:input-parameters>
+            <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
         </db:select>
         <choice>
             <when expression="#[isEmpty(vars.alert)]">
@@ -445,6 +459,15 @@ fresh map ((a, i) -> a ++ {
                 detail: write({approvalId: vars.id, recommendation: vars.req.recommendation, sfId: vars.sfId}, 'application/json', {indent: false})}]</db:input-parameters>
         </db:insert>
         <set-payload value="#[output application/json --- {approvalId: vars.id, targetId: vars.req.targetId, sfId: vars.sfId, title: vars.title, status: '承認待ち'}]"/>
+    </sub-flow>
+
+    <flow name="approval-create">
+        <http:listener config-ref="Http" path="/approvals" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 201]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="req" value="#[payload]"/>
+        <flow-ref name="create-approval"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>
