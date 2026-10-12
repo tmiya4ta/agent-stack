@@ -28,8 +28,8 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
 | `embed.azure.emu` | Azure OpenAI の埋め込み (`/openai/deployments/<名前>/embeddings`)。同じプログラム (FLAVOR=azure) | `embed.gte-qwen2.model` | 動いている。HTTPRoute あり |
 | `embed.ollama.emu` | Ollama の埋め込み (`/api/embed`、`/api/embeddings`、`/api/tags`)。同じプログラム (FLAVOR=ollama) | `embed.gte-qwen2.model` | 動いている。HTTPRoute あり |
 | `ai-search.azure.emu` | Azure AI Search の真似 (ベクトル DB)。ソースは `aisearch-server` | 自前 (PVC `ai-search-data`) | 動いている。HTTPRoute あり |
-| `llm.tfidf.stat` | 統計的な LLM (agent-harness の方式、mulay で動かす) | なし | これから |
-| `embed.hash512.stat` | 統計的な埋め込み (ハッシュ、512 次元、mulay で動かす) | なし | これから |
+| `llm.tfidf.stat` | 統計的な LLM (`/v1/chat/completions`、agent-harness の `stat::agent`)。mulay の `templates/stat-models` (stat.serve=llm) | なし | 動いている。HTTPRoute あり |
+| `embed.hash512.stat` | 統計的な埋め込み (512 次元。OpenAI、Azure、Ollama の形)。同じアプリ (stat.serve=embed) | なし | 動いている。HTTPRoute あり |
 
 ## 置き方
 
@@ -41,6 +41,7 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
 - **API キー**: 全サービスに付ける (Gateway の手前に認証は無く、インターネットから誰でも届く)。
   llama-server は鍵なしでも `/` (Web UI の静的ファイル) と `/health` だけは返す。API は全部 401。
   `./secrets.sh <名前空間> <名前>` が `~/.config/<名前>/env` の `API_KEY` (無ければ作る、0600) から Secret `<名前>-api-key` を作る。
+  Secret のキーは `api-key` (鍵そのもの) と `api-key.properties` (`api.key=<鍵>`。Mule のアプリが configuration-properties で読む)。
 - **公開**: HTTPRoute (`parentRefs: rtf/cluster-gateway`、hostnames は `.dev` だけ。`timeouts` も書く、下の「長い生成」)。3 階層の名前の証明書は Caddy の on-demand TLS
   (配線盤の `/ask` が HTTPRoute にある名前だけを許す)。新しい名前は初回だけ証明書の取得に 40 秒ほどかかる。
 
@@ -101,6 +102,19 @@ MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここ
 - 公式の Python SDK (google-genai 2.29.0) で、流さない呼び出し、ストリーミング、関数の自動呼び出しの往復、スキーマ付きの JSON
   (Pydantic で読める)、考えた内容の部品、countTokens、鍵の誤り (ClientError 400) が通る。
 - LOG_BODIES=1 で動かしている (broker が送るものを見るため)。
+
+## stat の作り (`k0/ai-stat`)
+
+- アプリは mulay の `templates/stat-models` (計算は agent-harness の `stat/*.dwl` を symlink で共有)。`ai-stat/build.sh` が
+  `mulay build` で 1 つの実行ファイル (DataWeave もネイティブ。JVM は要らない) にし、イメージ `stat-models:<VERSION>` にして k0 に読み込む。
+  mulay、templates/stat-models、agent-harness の stat/*.dwl のどれかを変えたら VERSION と yaml の image を上げる。
+- 同じイメージを `stat.serve=embed` と `stat.serve=llm` の 2 つの Deployment にする。鍵は Secret の `api-key.properties` を
+  `keys.file` で読む (無ければ起動しない。鍵は実行ファイルに入らない)。
+- `llm.tfidf.stat` の客は agent-harness (`llm.url=https://llm.tfidf.stat.theorems.dev/v1`、`llm.key`、`llm.model=tfidf`)。
+  ツールは agent-harness の `stat/hints.dwl` に手がかりがあるものだけが選ばれる。broker には使えない (Responses API も推論も無い)。
+- 確かめたこと (2026-10-12): シナリオ 21 件が実 Mule 4.11.3 と mulay で一致。agent-harness の `llm.url` をここに向けると、
+  agent-harness-stat のシナリオの答え 166 件が、内蔵の統計的なモデルのときと全部同じ。100 件の埋め込みは mulay が中央値 0.10 秒、
+  実 Mule が 0.20 秒。公開名に証明書が付き、鍵なしは 401。
 
 ## embed-emu の作り (`emu/embed-emu`)
 
