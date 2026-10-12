@@ -27,7 +27,11 @@ spec:
         image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:f4e145aa5370fd619be9dc512e28a5bb55581dc48b957fe09f775e359f2c7ee8
         # 値は別の引数で渡す (--model=… の形にすると、llama-server が値の中の _ まで - に変えてファイル名が壊れる)
         args: [--model, /models/Ornith-1.5-35B-Q4_K_M.gguf, --alias, ornith-1.5-35b, --host, 0.0.0.0, --port, "8080",
-               --n-gpu-layers, "99", --ctx-size, "32768", --parallel, "1", --jinja, --api-key-file, /secrets/api-key]
+               --n-gpu-layers, "99", --ctx-size, "32768", --parallel, "1", --jinja, --api-key-file, /secrets/api-key,
+               --no-prefill-assistant]
+        # --no-prefill-assistant: 最後が assistant のメッセージでも続きを書かない (OpenAI の API と同じ)。
+        # 書かないと、Agent Network の broker が前のノードの答えを assistant で渡したときに、出力のスキーマと
+        # 組み合わさって "Failed to initialize samplers: std::exception" (400) になる (2026-10-12)
         ports: [{name: http, containerPort: 8080}]
         securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
         resources:

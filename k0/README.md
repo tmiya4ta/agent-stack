@@ -79,6 +79,25 @@ MuleSoft Vectors コネクタ (1.0.0) の埋め込みの接続のうち、ここ
   (鍵は `secrets.sh` が英数字だけで作る。base URL の末尾に `/` を付けても通る)。
   鍵が URL に入るので、`embed-emu` は URI をログに出さない (Caddy と Envoy のアクセスログには残りうる)。
 
+## Agent Network の broker から使う (2026-10-12、T1/Sandbox の aml-investigation-s0 で確かめた)
+
+broker (v2) の LLM の接続を `https://llm.openai.emu.theorems.dev/v1` (platform AzureOpenai、apiKey は llm-openai-emu の鍵) に
+向けると、broker は Responses API を非ストリーミングで呼ぶ。毎回 `tools` と `text.format` (json_schema、strict) の両方と
+`reasoning.effort: low`、`store: false` を送り、道具を呼んだ後は `{"role":"assistant","content":""}` と前のノードの答え
+(assistant) を input に入れてくる。そのままでは llama-server が通らないので、次のように埋めた。
+
+| 起きたこと | llama-server の返事 | 直し |
+|---|---|---|
+| tools と text.format が両方ある | 400 failed to parse grammar | `llm.openai.emu` が 2 段に分ける (道具だけ → 文の答えならスキーマだけで聞き直す) |
+| content が文字列の assistant の項目 | 400 Cannot determine type of 'item' | 空なら外し、中身があれば `type: message` + `output_text` にする |
+| 最後が assistant の項目 | 400 Failed to initialize samplers: std::exception | エンジンに `--no-prefill-assistant` (続きを書かない。OpenAI と同じ) |
+| 考えると 1 回 10 秒を超える | — | `reasoning.effort` が none / minimal / low なら考えない (`THINK_OFF`)。OpenAI の low とは違う |
+
+- **未解決**: 出口のゲートウェイ ft1 の `upstreamResponseTimeout` が 15 秒で、長い生成 (一覧の表、調査メモ) が 504
+  (broker のログに `upstream request timeout`) になる。API インスタンスの `responseTimeout` は LLM の出口には効かない。
+  プラグインが新しく作るゲートウェイは 60 秒。ft1 は共用なので、変えるかはユーザーの判断待ち。
+- broker の接続の確認は、空の本文 (`{}`) の `POST /v1/responses` を送り、400 でも合格にする。
+
 ## llm-gemini-emu の作り (`emu/llm-gemini-emu`)
 
 - 客: Agent Network の broker の Gemini の接続 (v2。`url` を設定でき、認証は apiKey)。Mule の Inference コネクタ (1.2.0) の
