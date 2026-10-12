@@ -8,6 +8,12 @@
     POST /surveillance/run 点数付けを回してアラートを作る (同じ顧客・銘柄・公表の組は二度作らない)
     GET  /alerts           アラートの一覧 (?status=未対応 など)
     GET  /alerts/{id}      アラートの詳しい中身 (顧客、銘柄、公表、点の内訳、その銘柄の前後の売買、直前の売買)
+    GET  /past-cases       過去の審査の事例 (?kind=)
+    GET  /investigations/{contextId}, PUT 同じ   調査の状態 (broker の会話ごと)
+    POST /approvals        承認の依頼を作る (アラートを承認待ちに)。GET /approvals?status= で一覧
+    PATCH /approvals/{id}  Salesforce のレコード ID を結び付ける
+    POST /approvals/{id}/decision  社員の判断を記録する (アラートの状態、調査、監査ログ)
+    GET  /audit            監査ログ (?target=)
   鍵: api.key (keys.file のファイル。既定は資源の keys.properties で空 = 全部 401)。Bearer か api-key ヘッダ。
   点数付けの規則は max/score.dwl。
 -->
@@ -36,6 +42,8 @@
 
     <!-- 鍵の確認。合わなければ MAX:UNAUTHORIZED -->
     <sub-flow name="auth">
+        <!-- 判断の値 (判断が済んだアラートの状態も同じ値) -->
+        <set-variable variableName="decisions" value="#[['問題なし', '深掘り', '保留', '当局報告']]"/>
         <choice>
             <when expression="#[do {
                 var key = p('api.key') default ''
@@ -54,7 +62,8 @@
         <set-variable variableName="status" value="#[if (error.errorType.identifier == 'UNAUTHORIZED') 401
             else if (error.errorType.identifier == 'NOT_FOUND') 404
             else if (error.errorType.identifier == 'FORBIDDEN') 403
-            else if (error.errorType.identifier == 'BAD_REQUEST') 400 else 500]"/>
+            else if (error.errorType.identifier == 'BAD_REQUEST') 400
+            else if (error.errorType.identifier == 'CONFLICT') 409 else 500]"/>
         <set-payload value="#[output application/json --- {error: error.description}]"/>
     </sub-flow>
 
@@ -63,7 +72,9 @@
         <set-payload value="#[output application/json --- {
             name: 'max-core', company: 'マックス証券 (架空)',
             what: 'System API of the fictional securities firm: surveillance scoring (insider trading) and alerts. All data is synthetic.',
-            endpoints: ['POST /surveillance/run', 'GET /alerts', 'GET /alerts/{id}'],
+            endpoints: ['POST /surveillance/run', 'GET /alerts', 'GET /alerts/{id}', 'GET /past-cases',
+                        'GET|PUT /investigations/{contextId}', 'POST|GET /approvals', 'PATCH /approvals/{id}',
+                        'POST /approvals/{id}/decision', 'GET /audit'],
             auth: 'Authorization: Bearer KEY or api-key: KEY'}]"/>
     </flow>
 
@@ -245,6 +256,270 @@ fresh map ((a, i) -> a ++ {
             tradesInThisInstrument: vars.instrumentTrades,
             recentTrades: vars.recentTrades,
             insiderRegistry: vars.registry}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 過去の審査の事例 (似た事例を探す材料)。?kind= で絞る -->
+    <flow name="past-cases">
+        <http:listener config-ref="Http" path="/past-cases" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db">
+            <db:sql>select case_id, kind, summary, decision, reason, to_char(decided_on, 'YYYY-MM-DD') as decided_on
+                    from max.past_cases where (:kind = '' or kind = :kind) order by case_id</db:sql>
+            <db:input-parameters>#[{kind: attributes.queryParams.kind default ''}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {
+            caseId: $.case_id, kind: $.kind, summary: $.summary, decision: $.decision, reason: $.reason, decidedOn: $.decided_on}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 調査の状態 (broker の会話ごと)。無ければ {found: false, step: "new"} -->
+    <flow name="investigation-get">
+        <http:listener config-ref="Http" path="/investigations/{contextId}" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db">
+            <db:sql>select context_id, alert_id, step, recommendation, memo from max.investigations where context_id = :id</db:sql>
+            <db:input-parameters>#[{id: attributes.uriParams.contextId}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- if (isEmpty(payload)) {found: false, step: 'new'} else {
+            found: true, contextId: payload[0].context_id, alertId: payload[0].alert_id, step: payload[0].step,
+            recommendation: payload[0].recommendation, memo: payload[0].memo}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 調査の状態を残す。アラートが未対応なら調査中にする -->
+    <flow name="investigation-put">
+        <http:listener config-ref="Http" path="/investigations/{contextId}" allowedMethods="PUT">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="ctx" value="#[attributes.uriParams.contextId]"/>
+        <set-variable variableName="req" value="#[payload]"/>
+        <choice>
+            <when expression="#[isEmpty(payload.alertId default '') or isEmpty(payload.step default '')]">
+                <raise-error type="MAX:BAD_REQUEST" description="alertId and step are required"/>
+            </when>
+        </choice>
+        <db:select config-ref="Db" target="alert">
+            <db:sql>select alert_id, status from max.alerts where alert_id = :id</db:sql>
+            <db:input-parameters>#[{id: payload.alertId}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[isEmpty(vars.alert)]">
+                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ payload.alertId ++ ' was not found']"/>
+            </when>
+        </choice>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.investigations (context_id, alert_id, step, recommendation, memo, updated_at)
+                    values (:ctx, :alert, :step, :rec, :memo, now())
+                    on conflict (context_id) do update set alert_id = excluded.alert_id, step = excluded.step,
+                      recommendation = excluded.recommendation, memo = excluded.memo, updated_at = now()</db:sql>
+            <db:input-parameters>#[{ctx: vars.ctx, alert: vars.req.alertId, step: vars.req.step,
+                rec: vars.req.recommendation default null, memo: vars.req.memo default null}]</db:input-parameters>
+        </db:insert>
+        <db:update config-ref="Db">
+            <db:sql>update max.alerts set status = '調査中' where alert_id = :id and status = '未対応'</db:sql>
+            <db:input-parameters>#[{id: vars.req.alertId}]</db:input-parameters>
+        </db:update>
+        <set-payload value="#[output application/json --- {saved: true, contextId: vars.ctx, alertId: vars.req.alertId, step: vars.req.step}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 承認の依頼を作る (エージェントの推奨と調査メモ)。アラートを承認待ちにする -->
+    <flow name="approval-create">
+        <http:listener config-ref="Http" path="/approvals" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 201]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="req" value="#[payload]"/>
+        <choice>
+            <when expression="#[not (vars.decisions contains (payload.recommendation default ''))]">
+                <raise-error type="MAX:BAD_REQUEST" description="#['recommendation must be one of ' ++ (vars.decisions joinBy ', ')]"/>
+            </when>
+            <when expression="#[isEmpty(payload.targetId default '') or isEmpty(payload.memo default '') or isEmpty(payload.requestedBy default '')]">
+                <raise-error type="MAX:BAD_REQUEST" description="targetId, memo and requestedBy are required"/>
+            </when>
+        </choice>
+        <db:select config-ref="Db" target="alert">
+            <db:sql>select alert_id, status from max.alerts where alert_id = :id</db:sql>
+            <db:input-parameters>#[{id: payload.targetId}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[isEmpty(vars.alert)]">
+                <raise-error type="MAX:NOT_FOUND" description="#['Alert ' ++ vars.req.targetId ++ ' was not found']"/>
+            </when>
+            <when expression="#[vars.decisions contains vars.alert[0].status]">
+                <raise-error type="MAX:CONFLICT" description="#['Alert ' ++ vars.req.targetId ++ ' is already decided (' ++ vars.alert[0].status ++ ')']"/>
+            </when>
+        </choice>
+        <db:select config-ref="Db" target="pending">
+            <db:sql>select approval_id from max.approvals where target_id = :id and status = '承認待ち'</db:sql>
+            <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[not isEmpty(vars.pending)]">
+                <raise-error type="MAX:CONFLICT" description="#['Alert ' ++ vars.req.targetId ++ ' already waits for approval ' ++ vars.pending[0].approval_id]"/>
+            </when>
+        </choice>
+        <db:select config-ref="Db" target="next">
+            <db:sql>select 'AP-' || lpad(cast(nextval('max.approval_seq') as text), 4, '0') as id</db:sql>
+        </db:select>
+        <set-variable variableName="id" value="#[vars.next[0].id]"/>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.approvals (approval_id, kind, target_id, context_id, recommendation, memo, requested_by)
+                    values (:id, :kind, :target, :ctx, :rec, :memo, :by)</db:sql>
+            <db:input-parameters>#[{id: vars.id, kind: vars.req.kind default '売買審査', target: vars.req.targetId,
+                ctx: vars.req.contextId default null, rec: vars.req.recommendation, memo: vars.req.memo, by: vars.req.requestedBy}]</db:input-parameters>
+        </db:insert>
+        <db:update config-ref="Db">
+            <db:sql>update max.alerts set status = '承認待ち' where alert_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.req.targetId}]</db:input-parameters>
+        </db:update>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.audit_log (actor, action, target, detail) values (:actor, 'request-approval', :target, cast(:detail as jsonb))</db:sql>
+            <db:input-parameters>#[{actor: vars.req.requestedBy, target: vars.req.targetId,
+                detail: write({approvalId: vars.id, recommendation: vars.req.recommendation}, 'application/json', {indent: false})}]</db:input-parameters>
+        </db:insert>
+        <set-payload value="#[output application/json --- {approvalId: vars.id, targetId: vars.req.targetId, status: '承認待ち'}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="approvals-list">
+        <http:listener config-ref="Http" path="/approvals" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db">
+            <db:sql>select approval_id, kind, target_id, context_id, sf_id, recommendation, memo, requested_by, status, decision, note, decided_by
+                    from max.approvals where (:status = '' or status = :status) order by approval_id</db:sql>
+            <db:input-parameters>#[{status: attributes.queryParams.status default ''}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {
+            approvalId: $.approval_id, kind: $.kind, targetId: $.target_id, contextId: $.context_id, sfId: $.sf_id,
+            recommendation: $.recommendation, memo: $.memo, requestedBy: $.requested_by, status: $.status,
+            decision: $.decision, note: $.note, decidedBy: $.decided_by}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 承認の依頼に Salesforce のレコード ID を結び付ける (承認箱の連携が呼ぶ) -->
+    <flow name="approval-link">
+        <http:listener config-ref="Http" path="/approvals/{approvalId}" allowedMethods="PATCH">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="id" value="#[attributes.uriParams.approvalId]"/>
+        <db:update config-ref="Db">
+            <db:sql>update max.approvals set sf_id = :sf where approval_id = :id</db:sql>
+            <db:input-parameters>#[{sf: payload.sfId default null, id: vars.id}]</db:input-parameters>
+        </db:update>
+        <choice>
+            <when expression="#[payload.affectedRows == 0]">
+                <raise-error type="MAX:NOT_FOUND" description="#['Approval ' ++ vars.id ++ ' was not found']"/>
+            </when>
+        </choice>
+        <set-payload value="#[output application/json --- {approvalId: vars.id, linked: true}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 社員の判断を記録する。アラートの状態を判断にし、調査を decided にして、監査ログに残す -->
+    <flow name="approval-decide">
+        <http:listener config-ref="Http" path="/approvals/{approvalId}/decision" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="req" value="#[payload]"/>
+        <set-variable variableName="id" value="#[attributes.uriParams.approvalId]"/>
+        <choice>
+            <when expression="#[not (vars.decisions contains (payload.decision default ''))]">
+                <raise-error type="MAX:BAD_REQUEST" description="#['decision must be one of ' ++ (vars.decisions joinBy ', ')]"/>
+            </when>
+            <when expression="#[isEmpty(payload.decidedBy default '')]">
+                <raise-error type="MAX:BAD_REQUEST" description="decidedBy is required"/>
+            </when>
+        </choice>
+        <db:select config-ref="Db" target="ap">
+            <db:sql>select approval_id, target_id, context_id, status, decision from max.approvals where approval_id = :id</db:sql>
+            <db:input-parameters>#[{id: vars.id}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[isEmpty(vars.ap)]">
+                <raise-error type="MAX:NOT_FOUND" description="#['Approval ' ++ vars.id ++ ' was not found']"/>
+            </when>
+            <when expression="#[vars.ap[0].status != '承認待ち']">
+                <raise-error type="MAX:CONFLICT" description="#['Approval ' ++ vars.id ++ ' is already decided (' ++ vars.ap[0].decision ++ ')']"/>
+            </when>
+        </choice>
+        <db:update config-ref="Db">
+            <db:sql>update max.approvals set status = '判断済み', decision = :decision, note = :note, decided_by = :by, decided_at = now()
+                    where approval_id = :id</db:sql>
+            <db:input-parameters>#[{decision: vars.req.decision, note: vars.req.note default null, by: vars.req.decidedBy, id: vars.id}]</db:input-parameters>
+        </db:update>
+        <db:update config-ref="Db">
+            <db:sql>update max.alerts set status = :decision where alert_id = :id</db:sql>
+            <db:input-parameters>#[{decision: vars.req.decision, id: vars.ap[0].target_id}]</db:input-parameters>
+        </db:update>
+        <db:update config-ref="Db">
+            <db:sql>update max.investigations set step = 'decided', updated_at = now() where context_id = :ctx</db:sql>
+            <db:input-parameters>#[{ctx: vars.ap[0].context_id default ''}]</db:input-parameters>
+        </db:update>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.audit_log (actor, action, target, detail) values (:actor, 'decide', :target, cast(:detail as jsonb))</db:sql>
+            <db:input-parameters>#[{actor: 'user:' ++ vars.req.decidedBy, target: vars.ap[0].target_id,
+                detail: write({approvalId: vars.id, decision: vars.req.decision, note: vars.req.note default null}, 'application/json', {indent: false})}]</db:input-parameters>
+        </db:insert>
+        <set-payload value="#[output application/json --- {approvalId: vars.id, targetId: vars.ap[0].target_id, decision: vars.req.decision, status: '判断済み'}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 監査ログ (新しい順)。?target= で絞る -->
+    <flow name="audit">
+        <http:listener config-ref="Http" path="/audit" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db">
+            <db:sql>select id, to_char(at, 'YYYY-MM-DD"T"HH24:MI:SS') as at, actor, action, target, cast(detail as text) as detail
+                    from max.audit_log where (:target = '' or target = :target) order by id desc limit 100</db:sql>
+            <db:input-parameters>#[{target: attributes.queryParams.target default ''}]</db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {
+            id: $.id, at: $.at, actor: $.actor, action: $.action, target: $.target, detail: read($.detail, 'application/json')}]"/>
         <error-handler>
             <on-error-continue>
                 <flow-ref name="error-body"/>

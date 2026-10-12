@@ -103,13 +103,17 @@ create table investigations (
   updated_at     timestamp not null default now()
 );
 
--- 承認 (社員の最終確認。Salesforce の MaxApproval__c と対で持つ)
+-- 承認 (社員の最終確認。Salesforce の MaxApproval__c と対で持つ)。ID は AP-0001 から
+create sequence approval_seq;
 create table approvals (
   approval_id  text primary key,                -- AP-0001..
   kind         text not null,                   -- 売買審査 ..
   target_id    text not null,                   -- 対象 (アラート ID など)
+  context_id   text,                            -- 調査した会話 (investigations)
   sf_id        text,                            -- Salesforce のレコード ID
-  recommendation text not null,
+  recommendation text not null,                 -- 問題なし / 深掘り / 保留 / 当局報告
+  memo         text not null,                   -- 調査メモ (エージェントの下書き)
+  requested_by text not null,                   -- agent:max-surveillance など
   status       text not null default '承認待ち',  -- 承認待ち / 判断済み
   decision     text,                            -- 問題なし / 深掘り / 保留 ..
   note         text,
