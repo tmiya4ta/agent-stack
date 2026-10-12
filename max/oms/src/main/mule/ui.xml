@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  1 件ずつの注文と、注文の画面。注文はいまの業務日 (business_clock) の終値で約定し、約定は MQ で台帳に届く。
+  中の API (Http、Bearer の鍵):
+    GET  /market           業務日、銘柄と終値、お客さま
+    POST /orders           {customer_id, code, side, qty, channel} → 約定
+    GET  /orders/today     きょうの 1 件ずつの注文
+  画面 (Ui、ui.port。外に出すのはこちら。鍵は経路に入れる: /k/<api.key>/):
+    GET  /k/{key}/         注文の画面 (ui/order.html)。画面は同じ前置きの market、orders、orders/today を呼ぶ
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:anypoint-mq="http://www.mulesoft.org/schema/mule/anypoint-mq"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/anypoint-mq http://www.mulesoft.org/schema/mule/anypoint-mq/current/mule-anypoint-mq.xsd">
+
+    <http:listener-config name="Ui">
+        <http:listener-connection host="0.0.0.0" port="${ui.port}"/>
+    </http:listener-config>
+
+    <!-- 経路の鍵が合わなければ、無いのと同じ (404) -->
+    <sub-flow name="ui-key">
+        <choice>
+            <when expression="#[(p('api.key') default '') == '' or attributes.uriParams.key != p('api.key')]">
+                <raise-error type="OMS:NOT_FOUND" description="Not found"/>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <sub-flow name="market-view">
+        <db:select config-ref="Db" target="clock">
+            <db:sql>select to_char(today, 'YYYY-MM-DD') as today from max.business_clock</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="instruments">
+            <db:sql>select i.code, i.name, i.sector, p.close from max.instruments i join max.prices p
+                    on p.code = i.code and p.trade_date = (select today from max.business_clock) order by i.code</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="customers">
+            <db:sql>select customer_id, name from max.customers order by customer_id</db:sql>
+        </db:select>
+        <set-payload value="#[output application/json --- {today: vars.clock[0].today,
+            instruments: vars.instruments map {code: $.code, name: $.name, sector: $.sector, close: $.close},
+            customers: vars.customers map {customerId: $.customer_id, name: $.name}}]"/>
+    </sub-flow>
+
+    <sub-flow name="today-orders">
+        <db:select config-ref="Db">
+            <db:sql>select o.trade_id, o.customer_id, c.name as customer_name, o.code, i.name as instrument_name, o.side, o.qty, o.price
+                    from max.orders o join max.customers c using (customer_id) join max.instruments i using (code)
+                    where o.trade_date = (select today from max.business_clock) and o.order_id like 'O%M%' order by o.order_id desc</db:sql>
+        </db:select>
+        <set-payload value="#[output application/json --- payload map {tradeId: $.trade_id, customerId: $.customer_id, customerName: $.customer_name,
+            code: $.code, instrumentName: $.instrument_name, side: $.side, qty: $.qty, price: $.price}]"/>
+    </sub-flow>
+
+    <!-- vars.req {customer_id, code, side, qty, channel} をいまの業務日の終値で約定させ、約定を MQ に送る。payload は約定 -->
+    <sub-flow name="place-order">
+        <choice>
+            <when expression="#[not (['買', '売'] contains (vars.req.side default ''))]">
+                <raise-error type="OMS:BAD_REQUEST" description="売買は「買」か「売」です"/>
+            </when>
+            <!-- not は or より弱く結び付くので括弧で囲む -->
+            <when expression="#[(not ((vars.req.qty default null) is Number)) or (vars.req.qty mod 100) != 0 or vars.req.qty &lt; 100 or vars.req.qty &gt; 100000]">
+                <raise-error type="OMS:BAD_REQUEST" description="株数は 100 株から 100,000 株まで、100 株単位です"/>
+            </when>
+        </choice>
+        <db:select config-ref="Db" target="found">
+            <db:sql>select (select count(*) from max.customers where customer_id = :cid) as customers,
+                           to_char(c.today, 'YYYY-MM-DD') as today,
+                           (select close from max.prices p where p.code = :code and p.trade_date = c.today) as close,
+                           (select count(*) from max.orders o where o.trade_date = c.today and o.order_id like 'O%M%') as manual
+                    from max.business_clock c</db:sql>
+            <db:input-parameters>#[{cid: vars.req.customer_id default '', code: vars.req.code default ''}]</db:input-parameters>
+        </db:select>
+        <choice>
+            <when expression="#[vars.found[0].customers == 0]">
+                <raise-error type="OMS:BAD_REQUEST" description="#['お客さま ' ++ (vars.req.customer_id default '') ++ ' はいません']"/>
+            </when>
+            <when expression="#[vars.found[0].close == null]">
+                <raise-error type="OMS:BAD_REQUEST" description="#['銘柄 ' ++ (vars.req.code default '') ++ ' の終値がありません']"/>
+            </when>
+        </choice>
+        <set-variable variableName="fill" value="#[output application/java --- max::fills::single(vars.found[0].today, vars.found[0].manual + 1, vars.req, vars.found[0].close)]"/>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.orders (order_id, customer_id, code, side, qty, trade_date, price, channel, trade_id)
+                    values (:orderId, :customerId, :code, :side, :qty, cast(:tradeDate as date), :price, :channel, :tradeId)</db:sql>
+            <db:input-parameters>#[vars.fill]</db:input-parameters>
+        </db:insert>
+        <anypoint-mq:publish config-ref="Mq" destination="${mq.fillsQueue}" messageId="#[vars.fill.tradeId]">
+            <anypoint-mq:body><![CDATA[#[output application/json --- vars.fill]]]></anypoint-mq:body>
+        </anypoint-mq:publish>
+        <set-payload value="#[output application/json --- vars.fill]"/>
+    </sub-flow>
+
+    <!-- 中の API -->
+    <flow name="market">
+        <http:listener config-ref="Http" path="/market" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <flow-ref name="market-view"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <flow name="order-one">
+        <http:listener config-ref="Http" path="/orders" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 201]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="req" value="#[output application/java --- payload]"/>
+        <flow-ref name="place-order"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <flow name="orders-today">
+        <http:listener config-ref="Http" path="/orders/today" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <flow-ref name="today-orders"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <!-- 画面 -->
+    <flow name="ui-page">
+        <http:listener config-ref="Ui" path="/k/{key}/" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="ui-key"/>
+        <parse-template location="ui/order.html"/>
+        <set-payload value="#[payload]" mimeType="text/html"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <flow name="ui-market">
+        <http:listener config-ref="Ui" path="/k/{key}/market" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="ui-key"/>
+        <flow-ref name="market-view"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <flow name="ui-order">
+        <http:listener config-ref="Ui" path="/k/{key}/orders" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 201]"/>
+        </http:listener>
+        <flow-ref name="ui-key"/>
+        <set-variable variableName="req" value="#[output application/java --- payload]"/>
+        <flow-ref name="place-order"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+
+    <flow name="ui-orders-today">
+        <http:listener config-ref="Ui" path="/k/{key}/orders/today" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="ui-key"/>
+        <flow-ref name="today-orders"/>
+        <error-handler><on-error-continue><flow-ref name="error-body"/></on-error-continue></error-handler>
+    </flow>
+</mule>

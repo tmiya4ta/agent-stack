@@ -13,3 +13,11 @@ fun fills(day: String, orders: Array, closes: Object): Array =
         customerId: o.customer_id, code: o.code, side: o.side, qty: o.qty,
         price: closes[o.code], tradeDate: day, channel: o.channel default "ネット"
     })
+
+// 画面などから 1 件ずつ来た注文の約定 (その日の n 件目。n は 1 から)。ID はまとめての約定と重ならないよう M を挟む
+fun single(day: String, n: Number, o: Object, close: Number): Object = {
+    tradeId: "T" ++ ymd(day) ++ "M" ++ (n as String {format: "000"}),
+    orderId: "O" ++ ymd(day) ++ "M" ++ (n as String {format: "0000"}),
+    customerId: o.customer_id, code: o.code, side: o.side, qty: o.qty,
+    price: close, tradeDate: day, channel: o.channel default "ネット"
+}

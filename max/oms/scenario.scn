@@ -2,10 +2,12 @@
 max-oms (マックス証券、架空): その日の注文をまとめて約定させ、約定を本物の Anypoint MQ (T1/Sandbox、試験用のキュー
 max-test-fills) に送る。鍵の誤り、日付の誤り、終値の無い銘柄、2 件の注文 (並びと ID は max/fills.dwl)、同じ日の二度目
 (注文は増えない)、送った約定をキューから受けて確かめる (/admin/peek-fills)、空の日。
+1 件ずつの注文 (いまの業務日 2026-10-09 の終値。株数・売買・お客さま・銘柄の誤り)、きょうの注文、注文の画面 (経路の鍵の誤りは 404)。
 DB は mulay の試験用の PG (localhost:15432、スキーマ max)。最初に /admin/reset で合成データを流し直し、キューも空にする。
 %%% requires src/main/resources/mq-secret.yaml
-%%% jvm -Dhttp.port=18478 -Dapi.key=test-key -Dadmin.reset=true -Dmq.fillsQueue=max-test-fills
+%%% jvm -Dhttp.port=18478 -Dui.port=18479 -Dapi.key=test-key -Dadmin.reset=true -Dmq.fillsQueue=max-test-fills
 %%% port 18478
+%%% port 18479
 %%% request GET /health
 %%% response 200
 content-type: application/json; charset=UTF-8
@@ -189,3 +191,550 @@ content-type: application/json; charset=UTF-8
     
   ]
 }
+%%% request GET /market
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "today": "2026-10-09",
+  "instruments": [
+    {
+      "code": "MX01",
+      "name": "朝凪精工",
+      "sector": "精密機器",
+      "close": 4950.2
+    },
+    {
+      "code": "MX02",
+      "name": "瑠璃ファーマ",
+      "sector": "医薬品",
+      "close": 444.7
+    },
+    {
+      "code": "MX03",
+      "name": "霧島ロジテック",
+      "sector": "陸運",
+      "close": 472.4
+    },
+    {
+      "code": "MX04",
+      "name": "銀鈴電機",
+      "sector": "電気機器",
+      "close": 542.2
+    },
+    {
+      "code": "MX05",
+      "name": "翠嶺フーズ",
+      "sector": "食料品",
+      "close": 479.3
+    },
+    {
+      "code": "MX06",
+      "name": "暁星マテリアル",
+      "sector": "化学",
+      "close": 1686.2
+    },
+    {
+      "code": "MX07",
+      "name": "白樺化学",
+      "sector": "化学",
+      "close": 1529.6
+    },
+    {
+      "code": "MX08",
+      "name": "蒼月システムズ",
+      "sector": "情報・通信",
+      "close": 1092.9
+    },
+    {
+      "code": "MX09",
+      "name": "千早建設",
+      "sector": "建設",
+      "close": 2042.8
+    },
+    {
+      "code": "MX10",
+      "name": "楓リテイル",
+      "sector": "小売",
+      "close": 4750.4
+    },
+    {
+      "code": "MX11",
+      "name": "鳴海重工",
+      "sector": "機械",
+      "close": 555.6
+    },
+    {
+      "code": "MX12",
+      "name": "汐見エナジー",
+      "sector": "電気・ガス",
+      "close": 1435.4
+    },
+    {
+      "code": "MX13",
+      "name": "雲雀ネット",
+      "sector": "情報・通信",
+      "close": 1944.2
+    },
+    {
+      "code": "MX14",
+      "name": "琥珀ホールディングス",
+      "sector": "卸売",
+      "close": 1484.1
+    },
+    {
+      "code": "MX15",
+      "name": "灯台ライフ",
+      "sector": "保険",
+      "close": 1545.9
+    },
+    {
+      "code": "MX16",
+      "name": "若葉メディカル",
+      "sector": "医薬品",
+      "close": 2214.5
+    },
+    {
+      "code": "MX17",
+      "name": "黎明モビリティ",
+      "sector": "輸送用機器",
+      "close": 894.1
+    },
+    {
+      "code": "MX18",
+      "name": "紺碧海運",
+      "sector": "海運",
+      "close": 4095.6
+    },
+    {
+      "code": "MX19",
+      "name": "桔梗不動産",
+      "sector": "不動産",
+      "close": 1461.9
+    },
+    {
+      "code": "MX20",
+      "name": "疾風ゲームス",
+      "sector": "情報・通信",
+      "close": 3452.8
+    },
+    {
+      "code": "MX21",
+      "name": "常磐バイオ",
+      "sector": "医薬品",
+      "close": 5174.9
+    },
+    {
+      "code": "MX22",
+      "name": "群青鉄鋼",
+      "sector": "鉄鋼",
+      "close": 914.7
+    },
+    {
+      "code": "MX23",
+      "name": "陽炎テキスタイル",
+      "sector": "繊維",
+      "close": 1780.2
+    },
+    {
+      "code": "MX24",
+      "name": "朱鷺航空サービス",
+      "sector": "空運",
+      "close": 1058.1
+    },
+    {
+      "code": "MX25",
+      "name": "風見銀行",
+      "sector": "銀行",
+      "close": 918.7
+    },
+    {
+      "code": "MX26",
+      "name": "砂丘ガラス",
+      "sector": "ガラス・土石",
+      "close": 3320.5
+    },
+    {
+      "code": "MX27",
+      "name": "萌黄フィナンシャル",
+      "sector": "その他金融",
+      "close": 2880.8
+    },
+    {
+      "code": "MX28",
+      "name": "嵐山ツーリズム",
+      "sector": "サービス",
+      "close": 3173.1
+    },
+    {
+      "code": "MX29",
+      "name": "雪洞エレクトロ",
+      "sector": "電気機器",
+      "close": 3568.8
+    },
+    {
+      "code": "MX30",
+      "name": "珊瑚マリン",
+      "sector": "水産・農林",
+      "close": 845.3
+    }
+  ],
+  "customers": [
+    {
+      "customerId": "C001",
+      "name": "相沢 美穂"
+    },
+    {
+      "customerId": "C002",
+      "name": "石原 健一"
+    },
+    {
+      "customerId": "C003",
+      "name": "上野 沙織"
+    },
+    {
+      "customerId": "C004",
+      "name": "遠藤 拓也"
+    },
+    {
+      "customerId": "C005",
+      "name": "大西 由紀子"
+    },
+    {
+      "customerId": "C006",
+      "name": "加藤 翼"
+    },
+    {
+      "customerId": "C007",
+      "name": "北村 直樹"
+    },
+    {
+      "customerId": "C008",
+      "name": "工藤 麻衣"
+    },
+    {
+      "customerId": "C009",
+      "name": "小松 誠"
+    },
+    {
+      "customerId": "C010",
+      "name": "斎藤 恵"
+    },
+    {
+      "customerId": "C011",
+      "name": "柴田 浩二"
+    },
+    {
+      "customerId": "C012",
+      "name": "杉山 彩"
+    },
+    {
+      "customerId": "C013",
+      "name": "高田 修"
+    },
+    {
+      "customerId": "C014",
+      "name": "千葉 奈々"
+    },
+    {
+      "customerId": "C015",
+      "name": "土屋 隆之"
+    },
+    {
+      "customerId": "C016",
+      "name": "中島 早苗"
+    },
+    {
+      "customerId": "C017",
+      "name": "西田 亮"
+    },
+    {
+      "customerId": "C018",
+      "name": "野口 典子"
+    },
+    {
+      "customerId": "C019",
+      "name": "原田 大輔"
+    },
+    {
+      "customerId": "C020",
+      "name": "藤井 真理"
+    }
+  ]
+}
+%%% request POST /orders
+authorization: Bearer test-key
+content-type: application/json
+
+{"customer_id":"C003","code":"MX10","side":"買","qty":150}
+%%% response 400
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "株数は 100 株から 100,000 株まで、100 株単位です"
+}
+%%% request POST /orders
+authorization: Bearer test-key
+content-type: application/json
+
+{"customer_id":"C003","code":"MX10","side":"x","qty":100}
+%%% response 400
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "売買は「買」か「売」です"
+}
+%%% request POST /orders
+authorization: Bearer test-key
+content-type: application/json
+
+{"customer_id":"C999","code":"MX10","side":"買","qty":100}
+%%% response 400
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "お客さま C999 はいません"
+}
+%%% request POST /orders
+authorization: Bearer test-key
+content-type: application/json
+
+{"customer_id":"C003","code":"MX99","side":"買","qty":100}
+%%% response 400
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "銘柄 MX99 の終値がありません"
+}
+%%% request POST /orders
+authorization: Bearer test-key
+content-type: application/json
+
+{"customer_id":"C003","code":"MX10","side":"買","qty":200,"channel":"ネット"}
+%%% response 201
+content-type: application/json; charset=UTF-8
+
+{
+  "tradeId": "T261009M001",
+  "orderId": "O261009M0001",
+  "customerId": "C003",
+  "code": "MX10",
+  "side": "買",
+  "qty": 200,
+  "price": 4750.4,
+  "tradeDate": "2026-10-09",
+  "channel": "ネット"
+}
+%%% request GET /k/wrong/
+%%% response 404
+content-type: text/plain
+
+No listener for endpoint: /k/wrong/
+%%% request GET :18479/k/wrong/
+%%% response 404
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "Not found"
+}
+%%% request GET :18479/k/test-key/
+%%% response 200
+content-type: text/html
+
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>マックス証券 注文</title>
+<style>
+  :root { --bg: #f7f7f5; --fg: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6; --accent: #0b5cad; --buy: #b42318; --sell: #1f6f43; --card: #ffffff; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ecece8; --muted: #a3a39c; --line: #3a3a37; --accent: #6aa8f0; --buy: #f07a6e; --sell: #6fcf97; --card: #20201e; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.6 system-ui, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  select, input { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); font: inherit; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .sides { display: flex; gap: 8px; margin-top: 4px; }
+  .sides button { flex: 1; padding: 9px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; cursor: pointer; }
+  .sides button[aria-pressed="true"].buy { background: var(--buy); color: #fff; border-color: var(--buy); }
+  .sides button[aria-pressed="true"].sell { background: var(--sell); color: #fff; border-color: var(--sell); }
+  .submit { margin-top: 16px; width: 100%; padding: 11px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  .submit:disabled { opacity: .5; cursor: default; }
+  .est { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .msg { margin-top: 12px; font-size: 14px; }
+  .msg.err { color: var(--buy); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .note { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>マックス証券 注文</h1>
+  <p class="sub">架空の証券会社のデモです。名前・銘柄・値段はすべて作りものです。<span id="today"></span></p>
+
+  <section class="card">
+    <label for="customer">お客さま</label>
+    <select id="customer"></select>
+    <label for="code">銘柄</label>
+    <select id="code"></select>
+    <div class="row">
+      <div>
+        <label>売買</label>
+        <div class="sides">
+          <button type="button" class="buy" data-side="買" aria-pressed="true">買</button>
+          <button type="button" class="sell" data-side="売" aria-pressed="false">売</button>
+        </div>
+      </div>
+      <div>
+        <label for="qty">株数 (100 株単位)</label>
+        <input id="qty" type="number" min="100" step="100" value="100">
+      </div>
+    </div>
+    <div class="est" id="est"></div>
+    <button class="submit" id="submit">注文する</button>
+    <div class="msg" id="msg" role="status"></div>
+  </section>
+
+  <section class="card">
+    <strong>きょうの注文</strong>
+    <table>
+      <thead><tr><th>約定</th><th>お客さま</th><th>銘柄</th><th>売買</th><th class="num">株数</th><th class="num">単価</th></tr></thead>
+      <tbody id="orders"></tbody>
+    </table>
+    <p class="note">注文はその日の終値で約定し、約定は Anypoint MQ で台帳に届きます。売買審査は毎日の終わりに回ります。</p>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let market = null, side = "買";
+const yen = (n) => Number(n).toLocaleString("ja-JP");
+function opt(v, t) { const o = document.createElement("option"); o.value = v; o.textContent = t; return o; }
+function estimate() {
+  const i = market && market.instruments.find((x) => x.code === $("code").value);
+  const q = Number($("qty").value);
+  $("est").textContent = i && q > 0 ? `終値 ${yen(i.close)} 円 × ${yen(q)} 株 = 約 ${yen(Math.round(i.close * q))} 円` : "";
+}
+async function loadOrders() {
+  const r = await fetch("orders/today");
+  const rows = r.ok ? await r.json() : [];
+  const tb = $("orders"); tb.replaceChildren();
+  for (const o of rows) {
+    const tr = document.createElement("tr");
+    for (const [v, num] of [[o.tradeId], [o.customerName], [o.instrumentName], [o.side], [yen(o.qty), 1], [yen(o.price), 1]]) {
+      const td = document.createElement("td"); td.textContent = v; if (num) td.className = "num"; tr.appendChild(td);
+    }
+    tb.appendChild(tr);
+  }
+}
+async function load() {
+  const r = await fetch("market");
+  if (!r.ok) { $("msg").textContent = "読み込めませんでした。"; $("msg").className = "msg err"; return; }
+  market = await r.json();
+  $("today").textContent = ` 業務日: ${market.today}`;
+  for (const c of market.customers) $("customer").appendChild(opt(c.customerId, `${c.customerId} ${c.name}`));
+  for (const i of market.instruments) $("code").appendChild(opt(i.code, `${i.code} ${i.name} (${yen(i.close)} 円)`));
+  estimate(); loadOrders();
+}
+document.querySelectorAll(".sides button").forEach((b) => b.addEventListener("click", () => {
+  side = b.dataset.side;
+  document.querySelectorAll(".sides button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+}));
+$("code").addEventListener("change", estimate);
+$("qty").addEventListener("input", estimate);
+$("submit").addEventListener("click", async () => {
+  $("submit").disabled = true; $("msg").textContent = ""; $("msg").className = "msg";
+  try {
+    const r = await fetch("orders", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customer_id: $("customer").value, code: $("code").value, side, qty: Number($("qty").value), channel: "ネット" }) });
+    const d = await r.json();
+    if (!r.ok) { $("msg").textContent = d.error || "注文できませんでした。"; $("msg").className = "msg err"; }
+    else { $("msg").textContent = `約定しました: ${d.tradeId} ${d.side} ${yen(d.qty)} 株 @ ${yen(d.price)} 円`; loadOrders(); }
+  } catch (e) { $("msg").textContent = "注文できませんでした。"; $("msg").className = "msg err"; }
+  $("submit").disabled = false;
+});
+load();
+</script>
+</body>
+</html>
+
+%%% request POST :18479/k/test-key/orders
+content-type: application/json
+
+{"customer_id":"C014","code":"MX13","side":"売","qty":100,"channel":"ネット"}
+%%% response 201
+content-type: application/json; charset=UTF-8
+
+{
+  "tradeId": "T261009M002",
+  "orderId": "O261009M0002",
+  "customerId": "C014",
+  "code": "MX13",
+  "side": "売",
+  "qty": 100,
+  "price": 1944.2,
+  "tradeDate": "2026-10-09",
+  "channel": "ネット"
+}
+%%% request GET :18479/k/test-key/orders/today
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "tradeId": "T261009M002",
+    "customerId": "C014",
+    "customerName": "千葉 奈々",
+    "code": "MX13",
+    "instrumentName": "雲雀ネット",
+    "side": "売",
+    "qty": 100,
+    "price": 1944.2
+  },
+  {
+    "tradeId": "T261009M001",
+    "customerId": "C003",
+    "customerName": "上野 沙織",
+    "code": "MX10",
+    "instrumentName": "楓リテイル",
+    "side": "買",
+    "qty": 200,
+    "price": 4750.4
+  }
+]
+%%% request POST /admin/peek-fills
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "tradeId": "T261009M001",
+    "orderId": "O261009M0001",
+    "customerId": "C003",
+    "code": "MX10",
+    "side": "買",
+    "qty": 200,
+    "price": 4750.4,
+    "tradeDate": "2026-10-09",
+    "channel": "ネット"
+  },
+  {
+    "tradeId": "T261009M002",
+    "orderId": "O261009M0002",
+    "customerId": "C014",
+    "code": "MX13",
+    "side": "売",
+    "qty": 100,
+    "price": 1944.2,
+    "tradeDate": "2026-10-09",
+    "channel": "ネット"
+  }
+]

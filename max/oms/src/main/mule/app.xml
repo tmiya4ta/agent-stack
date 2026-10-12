@@ -65,6 +65,7 @@
     <sub-flow name="error-body">
         <set-variable variableName="status" value="#[if (error.errorType.identifier == 'UNAUTHORIZED') 401
             else if (error.errorType.identifier == 'FORBIDDEN') 403
+            else if (error.errorType.identifier == 'NOT_FOUND') 404
             else if (error.errorType.identifier == 'BAD_REQUEST') 400 else 500]"/>
         <set-payload value="#[output application/json --- {error: error.description}]"/>
     </sub-flow>
@@ -74,7 +75,7 @@
         <set-payload value="#[output application/json --- {
             name: 'max-oms', company: 'マックス証券 (架空)',
             what: 'Order management of the fictional securities firm: fills orders at the day close and sends the fills to Anypoint MQ. All data is synthetic.',
-            endpoints: ['POST /orders/day', 'GET /orders?date='],
+            endpoints: ['POST /orders/day', 'GET /orders?date=', 'GET /market', 'POST /orders', 'GET /orders/today', 'UI: GET /k/{key}/ (ui.port)'],
             auth: 'Authorization: Bearer KEY or api-key: KEY'}]"/>
     </flow>
 
