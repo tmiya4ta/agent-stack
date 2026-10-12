@@ -3,12 +3,39 @@
 社員は最後の承認だけをし、ほかは規則による自動処理 (STP) とエージェントが受け持つ、架空のネット証券のデモ。
 名前・会社・銘柄・数値はすべて架空で、合成データ (`db/gen_seed.py`、決まった乱数の種) から作る。実在の会社や人とは関係ない。
 
-## v1: 売買審査の縦の通し
+## v1: 売買審査の縦の通し (2026-10-12 に通しで動いた)
 
-1. **max-core** (`core/`、System API。mulay で k0 の max-core に置く): 合成データの上で審査の点数付けを回し、アラートを作る
-2. 調査エージェント (Agent Network の broker): MCP の道具でアラートを調べ、調査メモと推奨を下書きする
-3. 承認箱 (Salesforce d30): 社員が推奨を見て判断する
-4. 判断を max-core に戻し、監査ログに残す
+```
+max-core (mulay、k0 の max-core)                         Agent Network (T1/Sandbox、ft1)          Salesforce d30
+  POST /surveillance/run  点数付け → アラート
+    └─ dispatch: A2A 1.0 SendMessage (JWT HS256) ──────▶ max-surveillance-broker
+                                                          classify → investigate (get-alert)
+  MCP (8082、mcp-surveillance.max.theorems.dev) ◀──────── → executor request-approval ──────────────▶ 承認依頼 (MaxApproval__c)
+    request-approval: 調査メモを組み立て、承認箱に依頼                                                 社員が「判断」を選ぶ
+  approvals-poll (30 秒ごと) ◀──────────────────────────────────────────────────────────────────── 判断済みの依頼
+    判断を記録 (アラートの状態、調査、監査ログ)
+```
+
+1. **max-core** (`core/`、System API。mulay で k0 の max-core に置く): 合成データの上で審査の点数付けを回し、アラートを作る。
+   作ったアラートは調査エージェントに回す (社員はチャットで頼まない)
+2. 調査エージェント (`networks/max-surveillance`、AgentScript v2): get-alert を 1 回で調べ、推奨を下書きし、executor が承認箱に依頼する。
+   LLM はデモのプロキシ (OpenAI 互換、gpt-5-mini)。手元の LLM では判断が安定しなかった (k0/README.md)
+3. 承認箱 (`salesforce/`、d30 のカスタムオブジェクト「承認依頼」): 社員が推奨と調査メモを見て判断する
+4. max-core が 30 秒ごとに判断を取り込み、監査ログに残す (エージェントの依頼と社員の判断の両方)
+
+### デモの回し方
+
+```bash
+cd ~/mule/agents/agent-stack
+k0/max-core/secrets.sh && k0/max-core/build.sh            # 秘密とイメージ (中身を変えたら VERSION と yaml の image を上げる)
+kubectl --context kind-k0 apply -f k0/max-core/max-core.yaml
+yc harness deploy <T1> <Sandbox> max-demo                   # broker (yc の変数のプロファイル max)
+# データを最初からにする: max-pg に max/db/schema.sql と seed.sql を流す (README の「データ」)。承認箱の AP-* も消す
+kubectl --context kind-k0 -n max-core port-forward svc/max-core 18081:80 &
+curl -X POST -H "Authorization: Bearer $API_KEY" http://127.0.0.1:18081/surveillance/run   # 1〜2 分で承認箱に 3 件
+```
+
+API_KEY は `~/.config/max-core/env`。broker にチャットで話しかけることもできる (A2A 1.0、JWT の sub は会話の持ち主)。
 
 v2 で、注文の流れ・模擬の市場・仮想の業務時計・Anypoint MQ を足す。
 

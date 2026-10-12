@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - name: max-core
-        image: max-core:0.1.0
+        image: max-core:0.1.1
         imagePullPolicy: IfNotPresent
         args:
         - http.port=8081
@@ -27,6 +27,8 @@ spec:
         - sf.file=/secrets/max-core/sf.yaml
         - db.url=jdbc:postgresql://max-pg.max-core.svc.cluster.local:5432/max
         - db.user=max_app
+        # 調査エージェント (T1/Sandbox の Agent Network。sets/max-demo)
+        - broker.url=https://ft1-23fgzd.pnwfdv.jpn-e1.cloudhub.io/max-surveillance-broker/
         ports:
         - {name: http, containerPort: 8081}
         - {name: mcp, containerPort: 8082}
