@@ -2,7 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Recommendation__c</fullName>
     <label>推奨 (エージェント)</label>
-    <inlineHelpText>売買審査: 問題なし / 深掘り / 保留 / 当局報告。口座開設: 承認 / 否認 / 追加確認</inlineHelpText>
+    <inlineHelpText>売買審査: 問題なし / 深掘り / 保留 / 当局報告。口座開設: 承認 / 否認 / 追加確認。問い合わせ: 送信 / 差し戻し / 担当者対応</inlineHelpText>
     <type>Picklist</type>
     <trackHistory>true</trackHistory>
     <valueSet><restricted>true</restricted><valueSetDefinition><sorted>false</sorted>
@@ -13,5 +13,8 @@
         <value><fullName>承認</fullName><default>false</default><label>承認</label></value>
         <value><fullName>否認</fullName><default>false</default><label>否認</label></value>
         <value><fullName>追加確認</fullName><default>false</default><label>追加確認</label></value>
+        <value><fullName>送信</fullName><default>false</default><label>送信</label></value>
+        <value><fullName>差し戻し</fullName><default>false</default><label>差し戻し</label></value>
+        <value><fullName>担当者対応</fullName><default>false</default><label>担当者対応</label></value>
     </valueSetDefinition></valueSet>
 </CustomField>

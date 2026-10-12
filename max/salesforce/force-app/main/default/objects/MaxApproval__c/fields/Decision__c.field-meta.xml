@@ -12,5 +12,8 @@
         <value><fullName>承認</fullName><default>false</default><label>承認</label></value>
         <value><fullName>否認</fullName><default>false</default><label>否認</label></value>
         <value><fullName>追加確認</fullName><default>false</default><label>追加確認</label></value>
+        <value><fullName>送信</fullName><default>false</default><label>送信</label></value>
+        <value><fullName>差し戻し</fullName><default>false</default><label>差し戻し</label></value>
+        <value><fullName>担当者対応</fullName><default>false</default><label>担当者対応</label></value>
     </valueSetDefinition></valueSet>
 </CustomField>

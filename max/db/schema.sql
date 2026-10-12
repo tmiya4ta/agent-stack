@@ -217,3 +217,34 @@ create table watchlist (
   reason      text not null,
   listed_on   date not null
 );
+
+-- よくある質問 (窓口の broker が返事の材料にする)
+create table faq (
+  faq_id    text primary key,                   -- F01..
+  category  text not null,
+  question  text not null,
+  answer    text not null
+);
+
+-- お客さまの問い合わせ (時計がその日に進むと planned_inquiries から届く)
+create table inquiries (
+  inquiry_id   text primary key,                -- Q-0001..
+  customer_id  text not null references customers(customer_id),
+  channel      text not null,                   -- メール / チャット / 電話
+  received_on  date not null,
+  subject      text not null,
+  body         text not null,
+  status       text not null default '受付',    -- 受付 / 送信済み / 承認待ち / 差し戻し / 担当者対応
+  reply        text,                            -- 送った (または送る予定の) 返事
+  sent_by      text,                            -- agent:max-support (自動) / user:<名前> (承認)
+  sent_on      date
+);
+
+create table planned_inquiries (
+  inquiry_id   text primary key,
+  customer_id  text not null references customers(customer_id),
+  channel      text not null,
+  received_on  date not null,
+  subject      text not null,
+  body         text not null
+);
