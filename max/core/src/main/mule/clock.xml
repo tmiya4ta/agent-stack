@@ -73,7 +73,9 @@
     <!-- 進めている最中の印を取る (vars.acquired)。手と自動が重ならないように -->
     <sub-flow name="clock-acquire">
         <db:update config-ref="Db">
-            <db:sql>update max.business_clock set busy = true where busy = false</db:sql>
+            <!-- 10 分より古い印は、進めている途中で止まったプロセスの残り (再配備など) なので取り直す -->
+            <db:sql>update max.business_clock set busy = true, busy_since = now()
+                    where busy = false or busy_since is null or busy_since &lt; now() - interval '10 minutes'</db:sql>
         </db:update>
         <set-variable variableName="acquired" value="#[payload.affectedRows == 1]"/>
     </sub-flow>
@@ -83,7 +85,7 @@
         <choice>
             <when expression="#[vars.acquired default false]">
                 <db:update config-ref="Db" target="released">
-                    <db:sql>update max.business_clock set busy = false</db:sql>
+                    <db:sql>update max.business_clock set busy = false, busy_since = null</db:sql>
                 </db:update>
                 <set-variable variableName="acquired" value="#[false]"/>
             </when>
@@ -153,6 +155,28 @@
                 </choice>
             </when>
         </choice>
+    </flow>
+
+    <!-- 試験用: 止まったプロセスが残した古い印を作る (admin.reset=true のときだけ) -->
+    <flow name="admin-stale-busy">
+        <http:listener config-ref="Http" path="/admin/stale-busy" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <choice>
+            <when expression="#[p('admin.reset') != 'true']">
+                <raise-error type="MAX:FORBIDDEN" description="Reset is turned off (admin.reset)"/>
+            </when>
+        </choice>
+        <db:update config-ref="Db">
+            <db:sql>update max.business_clock set busy = true, busy_since = now() - interval '11 minutes'</db:sql>
+        </db:update>
+        <set-payload value="#[output application/json --- {busy: true, stale: true}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
     </flow>
 
     <!-- 1 営業日進める。payload は {date, prices, trades, announcements, raised}。

@@ -138,7 +138,8 @@ create table business_clock (
   today       date not null,
   auto        boolean not null default false,   -- 自動で進めるか (POST /clock/auto)
   auto_until  date,                             -- 自動で進めるのはこの日まで (null なら限りなく)
-  busy        boolean not null default false    -- 進めている最中 (手と自動が重ならないように)
+  busy        boolean not null default false,   -- 進めている最中 (手と自動が重ならないように)
+  busy_since  timestamp                         -- busy にした時刻 (10 分より古い印は、止まったプロセスの残りとして取り直せる)
 );
 
 -- これから公表される重要事実 (時計がその日に進むと announcements に移る)

@@ -12,6 +12,7 @@ dispatch.async=false で順に回す)、手で回す、署名の誤り。
 偽の OMS /admin/fake-oms に HTTP で渡し、約定は本物の Anypoint MQ の試験用のキュー max-test-fills で台帳が受ける)、公表、
 仕込んだ筋書き C008 / MX15 と C018 / MX05 がアラートになり、試験用の broker に回る)。
 時計を自動で進める: 値の誤り、10-28 まで自動で (2 秒ごとに 1 営業日)、着いたら止まる、切る。
+進行中の古い印 (止まったプロセスの残り) は取り直して進められる。
 MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-alert (番号だけの ID、無いアラート)、request-approval
 (調査メモを組み立てて承認箱へ、二重の依頼、判断済み、推奨の誤り)。MCP のセッション ID は capture で渡し、mask で伏せる。
 %%% mask
@@ -1946,7 +1947,7 @@ content-type: application/json; charset=UTF-8
   "auto": true,
   "autoUntil": "2026-10-28"
 }
-%%% wait 14000
+%%% wait 40000
 %%% request GET /clock
 authorization: Bearer test-key
 %%% response 200
@@ -1993,3 +1994,49 @@ content-type: application/json; charset=UTF-8
     }
   }
 ]
+%%% request POST /admin/stale-busy
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "busy": true,
+  "stale": true
+}
+%%% request POST /clock/advance?days=1
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "days": [
+    {
+      "date": "2026-10-29",
+      "prices": 30,
+      "trades": [
+        "T261029001 C019 MX16 買 100 @ 2181.7"
+      ],
+      "missingFills": [
+        
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    }
+  ]
+}
+%%% request GET /clock
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "today": "2026-10-29",
+  "nextBusinessDay": "2026-10-30",
+  "auto": false,
+  "autoUntil": null,
+  "busy": false
+}

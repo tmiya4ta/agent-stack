@@ -198,7 +198,7 @@ def main():
         out.append(row("trades", (f"T{i:06d}", cid, code, side, qty, price, d.isoformat(), ch)))
 
     # 時計: 合成データの最後の営業日
-    out.append(row("business_clock", (1, END.isoformat(), False, None, False)))
+    out.append(row("business_clock", (1, END.isoformat(), False, None, False, None)))
     for e in PLANNED_EVENTS:
         out.append(row("planned_events", e))
     for o in PLANNED_ORDERS:
