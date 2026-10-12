@@ -131,3 +131,29 @@ create table audit_log (
   target  text not null,
   detail  jsonb not null default '{}'
 );
+
+-- 仮想の業務時計 (1 行だけ)。業務の日付はいつもここから読む (壁の時計の now() は監査ログの時刻にだけ使う)
+create table business_clock (
+  id     int primary key default 1 check (id = 1),
+  today  date not null
+);
+
+-- これから公表される重要事実 (時計がその日に進むと announcements に移る)
+create table planned_events (
+  announcement_id text primary key,             -- A101..
+  code            text not null references instruments(code),
+  published_at    timestamp not null,
+  kind            text not null,
+  title           text not null,
+  price_move_pct  numeric(6,1) not null
+);
+
+-- 仕込んだ注文 (時計がその日に進むと、その日の終値で約定する)
+create table planned_orders (
+  customer_id text not null references customers(customer_id),
+  code        text not null references instruments(code),
+  side        text not null check (side in ('買', '売')),
+  qty         int not null,
+  trade_date  date not null,
+  primary key (customer_id, code, side, trade_date)
+);

@@ -8,6 +8,8 @@ ID の前置きは TAP で、本物の依頼と混ぜない)、社員の判断 (
 (承認箱で判断したことにして sync)、監査ログ、過去の事例。Salesforce のレコード ID は隠す。
 点数付けが作ったアラートを調査エージェントに回す (試験用の broker /admin/fake-broker が JWT の署名と A2A 1.0 の形を確かめる。
 dispatch.async=false で順に回す)、手で回す、署名の誤り。
+仮想の業務時計 (v2): 進める日数の誤り、5 営業日ずつ 2 回進める (終値、普段の売買と仕込んだ注文の約定、公表、
+仕込んだ筋書き C008 / MX15 と C018 / MX05 がアラートになり、試験用の broker に回る)。
 MCP の口 (別のポート、経路に鍵): 鍵の誤り、list-alerts、get-alert (番号だけの ID、無いアラート)、request-approval
 (調査メモを組み立てて承認箱へ、二重の依頼、判断済み、推奨の誤り)。MCP のセッション ID は capture で渡し、mask で伏せる。
 %%% mask
@@ -1459,6 +1461,427 @@ content-type: application/json; charset=UTF-8
       "reply": "received: アラート SV-0002 を調べて (sub=max-core, ttl=600)",
       "state": "TASK_STATE_COMPLETED",
       "contextId": "ctx-fake"
+    }
+  }
+]
+%%% request GET /clock
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "today": "2026-10-09",
+  "nextBusinessDay": "2026-10-12"
+}
+%%% request POST /clock/advance?days=0
+authorization: Bearer test-key
+%%% response 400
+content-type: application/json; charset=UTF-8
+
+{
+  "error": "days must be 1 to 20"
+}
+%%% request POST /clock/advance?days=5
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "days": [
+    {
+      "date": "2026-10-12",
+      "prices": 30,
+      "trades": [
+        "T000179 C015 MX14 買 100 @ 1476.5"
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    },
+    {
+      "date": "2026-10-13",
+      "prices": 30,
+      "trades": [
+        "T000180 C008 MX15 買 1200 @ 1551.7",
+        "T000181 C010 MX28 買 100 @ 3175.5"
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    },
+    {
+      "date": "2026-10-14",
+      "prices": 30,
+      "trades": [
+        "T000182 C001 MX10 買 100 @ 4700.2",
+        "T000183 C018 MX06 売 100 @ 1720.3"
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    },
+    {
+      "date": "2026-10-15",
+      "prices": 30,
+      "trades": [
+        "T000184 C008 MX15 買 800 @ 1570.7",
+        "T000185 C011 MX11 売 600 @ 565.5"
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    },
+    {
+      "date": "2026-10-16",
+      "prices": 30,
+      "trades": [
+        "T000186 C010 MX28 買 100 @ 3230"
+      ],
+      "announcements": [
+        "A101"
+      ],
+      "raised": [
+        "SV-0004"
+      ]
+    }
+  ]
+}
+%%% request POST /clock/advance?days=5
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "days": [
+    {
+      "date": "2026-10-19",
+      "prices": 30,
+      "trades": [
+        "T000187 C017 MX07 売 100 @ 1524.8",
+        "T000188 C018 MX26 売 100 @ 3345",
+        "T000189 C020 MX08 買 600 @ 1095.8"
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    },
+    {
+      "date": "2026-10-20",
+      "prices": 30,
+      "trades": [
+        "T000190 C008 MX15 売 2000 @ 1704.5",
+        "T000191 C011 MX21 売 100 @ 5233.3",
+        "T000192 C013 MX25 買 700 @ 922.5"
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    },
+    {
+      "date": "2026-10-21",
+      "prices": 30,
+      "trades": [
+        "T000193 C012 MX28 売 100 @ 3233.6",
+        "T000194 C018 MX05 買 100 @ 477.7"
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    },
+    {
+      "date": "2026-10-22",
+      "prices": 30,
+      "trades": [
+        "T000195 C002 MX27 買 100 @ 2913.6"
+      ],
+      "announcements": [
+        "A102"
+      ],
+      "raised": [
+        "SV-0005"
+      ]
+    },
+    {
+      "date": "2026-10-23",
+      "prices": 30,
+      "trades": [
+        "T000196 C007 MX06 買 100 @ 1723.9",
+        "T000197 C013 MX25 買 300 @ 929.4",
+        "T000198 C014 MX13 買 100 @ 1952.7"
+      ],
+      "announcements": [
+        
+      ],
+      "raised": [
+        
+      ]
+    }
+  ]
+}
+%%% request GET /clock
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "today": "2026-10-23",
+  "nextBusinessDay": "2026-10-26"
+}
+%%% request GET /alerts?status=%E6%9C%AA%E5%AF%BE%E5%BF%9C
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "alertId": "SV-0004",
+    "kind": "インサイダー取引の疑い",
+    "score": 75,
+    "status": "未対応",
+    "raisedOn": "2026-10-16",
+    "customerId": "C008",
+    "customerName": "工藤 麻衣",
+    "code": "MX15",
+    "instrumentName": "灯台ライフ",
+    "announcementId": "A101"
+  },
+  {
+    "alertId": "SV-0005",
+    "kind": "インサイダー取引の疑い",
+    "score": 50,
+    "status": "未対応",
+    "raisedOn": "2026-10-22",
+    "customerId": "C018",
+    "customerName": "野口 典子",
+    "code": "MX05",
+    "instrumentName": "翠嶺フーズ",
+    "announcementId": "A102"
+  }
+]
+%%% request GET /alerts/SV-0004
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+{
+  "alertId": "SV-0004",
+  "kind": "インサイダー取引の疑い",
+  "score": 75,
+  "status": "未対応",
+  "raisedOn": "2026-10-16",
+  "reasons": [
+    {
+      "rule": "公表前の売買",
+      "points": 30,
+      "detail": "公表 (2026-10-16 15:00 業務提携、翌日 8.5%) の前 5 営業日に 2 回、計 3,118,600 円 の買"
+    },
+    {
+      "rule": "初めての銘柄",
+      "points": 20,
+      "detail": "この銘柄を売買したのは初めて"
+    },
+    {
+      "rule": "普段との差",
+      "points": 25,
+      "detail": "直前 60 営業日の 1 回の平均 (224,435 円) の 13.9 倍"
+    }
+  ],
+  "customer": {
+    "customer_id": "C008",
+    "name": "工藤 麻衣",
+    "name_kana": "クドウ マイ",
+    "birth_date": "1988-10-05",
+    "occupation": "会社員",
+    "employer": "灯台ライフ",
+    "annual_income": 6200000,
+    "experience_years": 7,
+    "risk_tolerance": "中",
+    "opened_on": "2018-02-14"
+  },
+  "instrument": {
+    "code": "MX15",
+    "name": "灯台ライフ",
+    "sector": "保険",
+    "market": "プライム"
+  },
+  "announcement": {
+    "announcement_id": "A101",
+    "code": "MX15",
+    "published_at": "2026-10-16 15:00",
+    "kind": "業務提携",
+    "title": "海外保険会社との資本業務提携",
+    "price_move_pct": 8.5
+  },
+  "tradesInThisInstrument": [
+    {
+      "trade_id": "T000180",
+      "side": "買",
+      "qty": 1200,
+      "price": 1551.7,
+      "trade_date": "2026-10-13",
+      "channel": "ネット"
+    },
+    {
+      "trade_id": "T000184",
+      "side": "買",
+      "qty": 800,
+      "price": 1570.7,
+      "trade_date": "2026-10-15",
+      "channel": "ネット"
+    },
+    {
+      "trade_id": "T000190",
+      "side": "売",
+      "qty": 2000,
+      "price": 1704.5,
+      "trade_date": "2026-10-20",
+      "channel": "ネット"
+    }
+  ],
+  "recentTrades": [
+    {
+      "trade_id": "T000190",
+      "code": "MX15",
+      "instrument_name": "灯台ライフ",
+      "side": "売",
+      "qty": 2000,
+      "price": 1704.5,
+      "trade_date": "2026-10-20"
+    },
+    {
+      "trade_id": "T000184",
+      "code": "MX15",
+      "instrument_name": "灯台ライフ",
+      "side": "買",
+      "qty": 800,
+      "price": 1570.7,
+      "trade_date": "2026-10-15"
+    },
+    {
+      "trade_id": "T000180",
+      "code": "MX15",
+      "instrument_name": "灯台ライフ",
+      "side": "買",
+      "qty": 1200,
+      "price": 1551.7,
+      "trade_date": "2026-10-13"
+    },
+    {
+      "trade_id": "T000174",
+      "code": "MX28",
+      "instrument_name": "嵐山ツーリズム",
+      "side": "売",
+      "qty": 100,
+      "price": 3142.2,
+      "trade_date": "2026-10-06"
+    },
+    {
+      "trade_id": "T000140",
+      "code": "MX11",
+      "instrument_name": "鳴海重工",
+      "side": "買",
+      "qty": 100,
+      "price": 565.2,
+      "trade_date": "2026-09-11"
+    },
+    {
+      "trade_id": "T000113",
+      "code": "MX11",
+      "instrument_name": "鳴海重工",
+      "side": "買",
+      "qty": 300,
+      "price": 564.1,
+      "trade_date": "2026-08-20"
+    },
+    {
+      "trade_id": "T000076",
+      "code": "MX28",
+      "instrument_name": "嵐山ツーリズム",
+      "side": "売",
+      "qty": 100,
+      "price": 3577.7,
+      "trade_date": "2026-07-23"
+    },
+    {
+      "trade_id": "T000048",
+      "code": "MX11",
+      "instrument_name": "鳴海重工",
+      "side": "買",
+      "qty": 400,
+      "price": 511.1,
+      "trade_date": "2026-07-02"
+    },
+    {
+      "trade_id": "T000030",
+      "code": "MX06",
+      "instrument_name": "暁星マテリアル",
+      "side": "売",
+      "qty": 100,
+      "price": 1578.7,
+      "trade_date": "2026-06-23"
+    },
+    {
+      "trade_id": "T000027",
+      "code": "MX28",
+      "instrument_name": "嵐山ツーリズム",
+      "side": "買",
+      "qty": 100,
+      "price": 3610,
+      "trade_date": "2026-06-22"
+    }
+  ],
+  "insiderRegistry": [
+    
+  ]
+}
+%%% request GET /audit?target=SV-0004
+authorization: Bearer test-key
+%%% response 200
+content-type: application/json; charset=UTF-8
+
+[
+  {
+    "id": 17,
+    "at": "***",
+    "actor": "system:max-core",
+    "action": "dispatch",
+    "target": "SV-0004",
+    "detail": {
+      "error": null,
+      "reply": "received: アラート SV-0004 を調べて (sub=max-core, ttl=600)",
+      "state": "TASK_STATE_COMPLETED",
+      "contextId": "ctx-fake"
+    }
+  },
+  {
+    "id": 16,
+    "at": "***",
+    "actor": "system:surveillance",
+    "action": "raise-alerts",
+    "target": "SV-0004",
+    "detail": {
+      "count": 1
     }
   }
 ]

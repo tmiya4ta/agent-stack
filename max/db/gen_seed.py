@@ -104,6 +104,22 @@ PAST_CASES = [
 ]
 
 
+# 時計を進めると起きること (v2)。公表は planned_events、仕込んだ注文は planned_orders。日々の値動きと普段の売買は
+# max-core の max/market.dwl が日付と銘柄・顧客のハッシュから作る (同じ日なら同じ結果)。
+#   C008  灯台ライフの社員 (内部者の登録なし) が、業務提携の公表 (MX15、2026-10-16) の前に初めて買い、公表後に売る   → 深掘り
+#   C018  翠嶺フーズのパート (登録なし) が、決算の公表 (MX05、2026-10-22) の前日に 100 株だけ買う                   → 問題なし寄り
+PLANNED_EVENTS = [
+    ("A101", "MX15", "2026-10-16 15:00", "業務提携", "海外保険会社との資本業務提携", 8.5),
+    ("A102", "MX05", "2026-10-22 15:00", "決算", "2026 年 7-9 月期 決算短信 (増益)", 4.0),
+]
+PLANNED_ORDERS = [
+    ("C008", "MX15", "買", 1200, "2026-10-13"),
+    ("C008", "MX15", "買", 800, "2026-10-15"),
+    ("C008", "MX15", "売", 2000, "2026-10-20"),
+    ("C018", "MX05", "買", 100, "2026-10-21"),
+]
+
+
 def q(v):
     if v is None:
         return "null"
@@ -181,6 +197,12 @@ def main():
         cid, code, side, qty, price, d, ch = t
         out.append(row("trades", (f"T{i:06d}", cid, code, side, qty, price, d.isoformat(), ch)))
 
+    # 時計: 合成データの最後の営業日
+    out.append(row("business_clock", (1, END.isoformat())))
+    for e in PLANNED_EVENTS:
+        out.append(row("planned_events", e))
+    for o in PLANNED_ORDERS:
+        out.append(row("planned_orders", o))
     print("\n".join(out))
 
 

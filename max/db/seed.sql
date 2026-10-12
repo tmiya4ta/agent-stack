@@ -3101,3 +3101,10 @@ insert into trades values ('T000175', 'C006', 'MX16', '売', 100, 2230.4, '2026-
 insert into trades values ('T000176', 'C018', 'MX18', '買', 100, 4050.6, '2026-10-07', 'ネット');
 insert into trades values ('T000177', 'C015', 'MX04', '買', 300, 543.0, '2026-10-08', 'ネット');
 insert into trades values ('T000178', 'C014', 'MX11', '売', 100, 555.6, '2026-10-09', 'コールセンター');
+insert into business_clock values (1, '2026-10-09');
+insert into planned_events values ('A101', 'MX15', '2026-10-16 15:00', '業務提携', '海外保険会社との資本業務提携', 8.5);
+insert into planned_events values ('A102', 'MX05', '2026-10-22 15:00', '決算', '2026 年 7-9 月期 決算短信 (増益)', 4.0);
+insert into planned_orders values ('C008', 'MX15', '買', 1200, '2026-10-13');
+insert into planned_orders values ('C008', 'MX15', '買', 800, '2026-10-15');
+insert into planned_orders values ('C008', 'MX15', '売', 2000, '2026-10-20');
+insert into planned_orders values ('C018', 'MX05', '買', 100, '2026-10-21');

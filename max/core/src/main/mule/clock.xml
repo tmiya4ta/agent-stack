@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  仮想の業務時計。業務の日付はいつも business_clock から読む (壁の時計は監査ログの時刻にだけ使う)。
+    GET  /clock             いまの業務日
+    POST /clock/advance     次の営業日へ進める (?days=1..20)。1 日ごとに:
+                              終値 (max/market.dwl)、普段の売買と仕込んだ注文の約定、その日の公表 (planned_events から)、
+                              時計を進め、点数付けを回す (できたアラートは調査エージェントへ)
+  同じデータから同じ日に進めれば、同じ終値・同じ約定・同じアラートになる。
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <flow name="clock-get">
+        <http:listener config-ref="Http" path="/clock" allowedMethods="GET">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <db:select config-ref="Db">
+            <db:sql>select to_char(today, 'YYYY-MM-DD') as today from max.business_clock</db:sql>
+        </db:select>
+        <set-payload value="#[output application/json --- {today: payload[0].today,
+            nextBusinessDay: max::market::nextBusinessDay(payload[0].today as Date) as String}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="clock-advance">
+        <http:listener config-ref="Http" path="/clock/advance" allowedMethods="POST">
+            <http:response statusCode="#[vars.status default 200]"/>
+        </http:listener>
+        <flow-ref name="auth"/>
+        <set-variable variableName="n" value="#[(attributes.queryParams.days default '1') as Number default 0]"/>
+        <choice>
+            <when expression="#[vars.n &lt; 1 or vars.n &gt; 20]">
+                <raise-error type="MAX:BAD_REQUEST" description="days must be 1 to 20"/>
+            </when>
+        </choice>
+        <set-variable variableName="report" value="#[[]]"/>
+        <foreach collection="#[1 to vars.n]">
+            <flow-ref name="advance-one-day"/>
+            <set-variable variableName="report" value="#[vars.report + payload]"/>
+        </foreach>
+        <set-payload value="#[output application/json --- {days: vars.report}]"/>
+        <error-handler>
+            <on-error-continue>
+                <flow-ref name="error-body"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- 1 営業日進める。payload は {date, prices, trades, announcements, raised}。
+         変数の名前は surveillance (vars.trades、vars.days など) と重ねない -->
+    <sub-flow name="advance-one-day">
+        <db:select config-ref="Db" target="clock">
+            <db:sql>select to_char(today, 'YYYY-MM-DD') as today from max.business_clock</db:sql>
+        </db:select>
+        <set-variable variableName="day" value="#[max::market::nextBusinessDay(vars.clock[0].today as Date) as String]"/>
+        <db:select config-ref="Db" target="prev">
+            <db:sql>select code, close from max.prices where trade_date = cast(:d as date) order by code</db:sql>
+            <db:input-parameters>#[{d: vars.clock[0].today}]</db:input-parameters>
+        </db:select>
+        <!-- 前の営業日 (いまの業務日) の公表は、今日の値動きに出る -->
+        <db:select config-ref="Db" target="published">
+            <db:sql>select code, price_move_pct from max.announcements where cast(published_at as date) = cast(:d as date)</db:sql>
+            <db:input-parameters>#[{d: vars.clock[0].today}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="customers">
+            <db:sql>select customer_id, annual_income from max.customers order by customer_id</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="favorites">
+            <db:sql>select distinct customer_id, code from max.trades order by customer_id, code</db:sql>
+        </db:select>
+        <db:select config-ref="Db" target="planned">
+            <db:sql>select customer_id, code, side, qty from max.planned_orders where trade_date = cast(:d as date) order by customer_id, code, side</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:select>
+        <db:select config-ref="Db" target="lastTrade">
+            <db:sql>select coalesce(max(cast(substr(trade_id, 2) as int)), 0) as n from max.trades</db:sql>
+        </db:select>
+        <ee:transform>
+            <ee:variables>
+                <ee:set-variable variableName="dayPriceRows"><![CDATA[%dw 2.0
+import dayPrices from max::market
+output application/java
+---
+dayPrices(vars.day, vars.prev, {(vars.published map {($.code): $.price_move_pct})})]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <!-- 同じ ee:transform の中では、前の set-variable の値が見えない (実 Mule と同じ) ので分ける -->
+        <ee:transform>
+            <ee:variables>
+                <ee:set-variable variableName="dayTrades"><![CDATA[%dw 2.0
+import backgroundTrades from max::market
+output application/java
+var closes = {(vars.dayPriceRows map {($.code): $.close})}
+var favs = (vars.favorites groupBy $.customer_id) mapObject ((rows, cid) -> {(cid): rows map $.code})
+var background = backgroundTrades(vars.day, vars.customers, favs, closes)
+var planted = vars.planned map {customer_id: $.customer_id, code: $.code, side: $.side, qty: $.qty, price: closes[$.code],
+    trade_date: vars.day, channel: 'ネット'}
+var all = (background ++ planted) orderBy ($.customer_id ++ '|' ++ $.code ++ '|' ++ $.side)
+---
+all map ((t, i) -> t ++ {trade_id: 'T' ++ ((vars.lastTrade[0].n + i + 1) as String {format: '000000'})})]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <db:bulk-insert config-ref="Db">
+            <db:bulk-input-parameters>#[vars.dayPriceRows]</db:bulk-input-parameters>
+            <db:sql>insert into max.prices (code, trade_date, close, volume) values (:code, cast(:trade_date as date), :close, :volume)</db:sql>
+        </db:bulk-insert>
+        <choice>
+            <when expression="#[not isEmpty(vars.dayTrades)]">
+                <db:bulk-insert config-ref="Db">
+                    <db:bulk-input-parameters>#[vars.dayTrades]</db:bulk-input-parameters>
+                    <db:sql>insert into max.trades (trade_id, customer_id, code, side, qty, price, trade_date, channel)
+                            values (:trade_id, :customer_id, :code, :side, :qty, :price, cast(:trade_date as date), :channel)</db:sql>
+                </db:bulk-insert>
+            </when>
+        </choice>
+        <!-- 今日の公表を announcements に移す -->
+        <db:select config-ref="Db" target="todays">
+            <db:sql>select announcement_id from max.planned_events where cast(published_at as date) = cast(:d as date) order by announcement_id</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:select>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.announcements (announcement_id, code, published_at, kind, title, price_move_pct)
+                    select announcement_id, code, published_at, kind, title, price_move_pct from max.planned_events
+                    where cast(published_at as date) = cast(:d as date)</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:insert>
+        <db:update config-ref="Db">
+            <db:sql>update max.business_clock set today = cast(:d as date)</db:sql>
+            <db:input-parameters>#[{d: vars.day}]</db:input-parameters>
+        </db:update>
+        <db:insert config-ref="Db">
+            <db:sql>insert into max.audit_log (actor, action, target, detail) values ('system:clock', 'advance', :d, cast(:detail as jsonb))</db:sql>
+            <db:input-parameters>#[{d: vars.day, detail: write({prices: sizeOf(vars.dayPriceRows), trades: sizeOf(vars.dayTrades),
+                announcements: vars.todays map $.announcement_id}, 'application/json', {indent: false})}]</db:input-parameters>
+        </db:insert>
+        <flow-ref name="surveillance"/>
+        <set-payload value="#[{date: vars.day, prices: sizeOf(vars.dayPriceRows), trades: vars.dayTrades map ($.trade_id ++ ' ' ++ $.customer_id ++ ' ' ++ $.code ++ ' ' ++ $.side ++ ' ' ++ ($.qty as String) ++ ' @ ' ++ ($.price as String)),
+            announcements: vars.todays map $.announcement_id, raised: vars.raised map $.alert_id}]"/>
+    </sub-flow>
+</mule>
