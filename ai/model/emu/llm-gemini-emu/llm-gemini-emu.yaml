@@ -1,0 +1,61 @@
+# llm.gemini.emu.theorems.dev: Gemini API (generateContent、streamGenerateContent) の真似 (agent-stack/ai/model/emu/llm-gemini-emu)。中身は ai-model の llm-ornith-model。
+# Agent Network の broker の Gemini の接続 (v2、url を設定できる) から使う。鍵は x-goog-api-key、?key=、Bearer のどれでも通る。
+# 鍵: 自分の鍵 (Secret llm-gemini-emu-api-key、../secrets.sh ai-emu llm-gemini-emu) と、
+#     llama-server の鍵 (Secret llm-ornith-model-api-key、../secrets.sh ai-emu llm-ornith-model。ai-model のものと同じ値)。
+# LOG_BODIES=1: broker が送る要求の本文をログに出す (kubectl -n ai-emu logs deploy/llm-gemini-emu)。調べ終えたら外す。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gemini-emu
+  namespace: ai-emu
+  labels: {app: llm-gemini-emu}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: llm-gemini-emu}
+  template:
+    metadata:
+      labels: {app: llm-gemini-emu}
+    spec:
+      containers:
+      - name: llm-gemini-emu
+        image: llm-gemini-emu:0.1.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: UPSTREAM, value: "http://llm-ornith-model.ai-model.svc.cluster.local"}
+        - {name: LOG_BODIES, value: "1"}
+        ports: [{name: http, containerPort: 8080}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, runAsNonRoot: true, readOnlyRootFilesystem: true}
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: self-key, mountPath: /secrets/self, readOnly: true}
+        - {name: upstream-key, mountPath: /secrets/upstream, readOnly: true}
+      volumes:
+      - name: self-key
+        secret: {secretName: llm-gemini-emu-api-key}
+      - name: upstream-key
+        secret: {secretName: llm-ornith-model-api-key}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gemini-emu
+  namespace: ai-emu
+spec:
+  selector: {app: llm-gemini-emu}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: llm-gemini-emu
+  namespace: ai-emu
+spec:
+  parentRefs: [{name: cluster-gateway, namespace: rtf}]
+  hostnames: [llm.gemini.emu.theorems.dev]
+  rules:
+  - backendRefs: [{name: llm-gemini-emu, port: 80}]
+    # 書かないと共有 Gateway が 15 秒で切る (k0/README.md の「長い生成とタイムアウト」)
+    timeouts: {request: 900s, backendRequest: 900s}

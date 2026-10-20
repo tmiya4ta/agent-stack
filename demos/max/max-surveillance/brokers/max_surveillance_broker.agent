@@ -1,0 +1,367 @@
+# @dialect: AGENTFABRIC=1.1
+#
+# Max Securities (fictional) Trade Surveillance Broker
+#
+# One turn. The agent gathers the facts and drafts; an employee decides in the approval inbox (Salesforce), not here.
+#
+#   "アラート SV-0001 を調べて"
+#   trigger
+#     +-> subagent classify            (no tools) -> route "investigate" + alertId, or "list_alerts"
+#        +-> router mainRouter
+#             + investigate  -> subagent investigate     get-alert (customer, trades, announcement, insider registry,
+#             |                    |                     past cases: one call)
+#             |                    +-> router statusRouter
+#             |                         + not found          -> echo alertNotFound (FAILED)
+#             |                         + already pending    -> echo alreadyPending
+#             |                         + already decided    -> echo alreadyDecided
+#             |                         + otherwise          -> executor requestApproval (request-approval, no LLM)
+#             |                                                  -> generator reply -> echo memoArtifact -> echo memoStatus
+#             + list_alerts  -> subagent listAlerts (list-alerts) -> echo alertList
+#
+# Design notes (same as demos/finance/aml-investigation):
+#   - The recommendation is a draft. Only the employee decides, in the approval inbox; max-core takes the decision in.
+#   - request-approval is run by an executor, so no LLM sits between the investigation and the record. The MCP server
+#     builds the memo from the structured fields, and answers already-pending / already-decided as normal results.
+#   - Nodes that call tools never talk to the human (a question from a tool-calling node ends the task early).
+#   - Every tool round trip is an LLM call, so get-alert returns the whole bundle and the LLM runs with reasoning_effort LOW.
+
+system:
+  instructions: "あなたは証券会社の売買審査部門の調査補助です。確認できた事実だけを扱い、推測で埋めません。最終判断は必ず担当者が承認箱で行います。"
+
+config:
+  agent_name: "Max Securities Trade Surveillance Broker{{-suffix}}"
+  default_llm: @llm.openai_llm
+
+llm:
+  openai_llm:
+    target: "llm://max_openai_connection{{_suffix}}"
+    kind: "OpenAI"
+    model: "gpt-5-mini"
+    reasoning_effort: "LOW"
+
+actions:
+  list_alerts:
+    target: "mcp://max_surveillance_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "list-alerts"
+
+  get_alert:
+    target: "mcp://max_surveillance_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "get-alert"
+
+  request_approval:
+    target: "mcp://max_surveillance_connection{{_suffix}}"
+    kind: "mcp:tool"
+    tool_name: "request-approval"
+
+trigger surveillanceTrigger:
+  kind: "a2a"
+  target: "brokers://max-surveillance-broker{{-suffix}}/a2a"
+  on_message: ->
+    transition to @subagent.classify
+
+# -------------------------------------------------------------
+# 1. What does the human want?
+# -------------------------------------------------------------
+subagent classify:
+  label: "Classify Request"
+  description: "Classifies the message: investigate one alert, or list the alerts."
+  system:
+    instructions: |
+      あなたは受付担当です。メッセージからアラート ID を取り出す。
+      「SV-」に続く数字、または単独の 1〜4 桁の数字がアラート ID。alertId は必ず "SV-0001" の形 (4 桁) に正規化する。
+      見つかれば route_key = "investigate"。
+      アラート ID が無い場合 (「一覧」「どんなアラートがある？」など、または ID の書き忘れ) は route_key = "list_alerts"。
+      未対応だけを見たいと書かれていれば statusFilter = "未対応" (承認待ち・問題なし・深掘り・保留・当局報告も同様)、それ以外は空文字。
+      使わない項目は空文字にする。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。質問文・確認文・実況を出力すると処理が中断されます。
+         どんな場合も構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | メッセージ: {!@request.payload.message.parts[0].text}
+      | route_key / alertId / statusFilter の構造化出力だけを返すこと。
+    outputs:
+      properties:
+        route_key:
+          type: "string"
+          description: "Next route"
+          enum:
+            - "investigate"
+            - "list_alerts"
+        alertId:
+          type: "string"
+          description: "Normalized alert ID such as SV-0001, or empty"
+        statusFilter:
+          type: "string"
+          description: "Status to list, or empty for all"
+    max_number_of_loops: 2
+    max_consecutive_errors: 2
+    task_timeout_secs: 40
+  on_exit: ->
+    transition to @router.mainRouter
+
+router mainRouter:
+  description: "Branches on the classified route."
+  routes:
+    - target: @subagent.investigate
+      when: @subagent.classify.output.route_key == "investigate"
+      label: "Investigate"
+    - target: @subagent.listAlerts
+      when: @subagent.classify.output.route_key == "list_alerts"
+      label: "List the alerts"
+  otherwise:
+    target: @echo.classifyFailed
+
+# -------------------------------------------------------------
+# 2. Investigate: one bundle, then a recommendation
+# -------------------------------------------------------------
+subagent investigate:
+  label: "Investigate Alert"
+  description: "Reads the alert bundle (customer, trades, announcement, insider registry, past cases) and drafts a recommendation."
+  system:
+    instructions: |
+      あなたはインサイダー取引の疑いのアラートの一次調査を行います。
+      1. get_alert を 1 回だけ呼ぶ (顧客の属性、銘柄、公表、点数の内訳、その銘柄の売買、直前の売買、内部者の登録、同じ種類の過去の事例が 1 回で返る)。
+         found が false なら found = "false" とし、他の項目は空文字にして、以降は何もせず返す。
+      2. alertStatus には get_alert の status をそのまま入れる。
+      3. 集めた材料から推奨を 1 つ決める:
+         - 定型の売買 (毎月の積み立てなど、同じ日付・同じ株数が続く) や、公表と結び付く点が無い → "問題なし"
+         - 内部者の登録や発行会社との関係があり、初めての銘柄・普段より大きな金額・公表後すぐの反対売買が重なる → "深掘り"
+         - 関係は見えないが、初めての銘柄を公表の直前に大きく買うなど説明がつかず、本人への聞き取りが要る → "保留"
+         - 内部者の登録があり、公表直前の売買と公表後の反対売買で利益を得ており、過去の事例でも当局報告になっている → "当局報告"
+         推奨は下書きであり、最終判断は担当者が行う。
+      出力 (どれも get_alert の値だけを使い、無い事実を足さない):
+      - facts: アラート (点数と内訳)、顧客の属性 (職業・勤務先・年収・投資経験)、公表 (日時・種類・翌日の値動き) を 3〜5 行で。
+      - notableTrades: この銘柄の売買を 1 行 1 件 (「YYYY-MM-DD / 買 or 売 / 株数 / 単価」)。最後に 1 行だけ、直前の売買から読み取れる普段の売買の様子。
+      - relations: 内部者の登録 (銘柄と関係)。この銘柄の登録が無ければ「この銘柄の内部者の登録なし」。
+      - similarCases: 同じ種類の過去の事例から、今回に近いものを 1 事例 1 行 (事例番号 / 判断 / 共通点を 1 文) で最大 3 行。
+      - gaps: 確認できなかった材料 (無ければ "なし")。
+      - reasoning: 推奨の根拠を 2〜4 文で。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。質問文・確認文・実況を出力すると処理が中断されます。
+         どんな場合も構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | alertId: {!@subagent.classify.output.alertId}
+    actions:
+      get_alert: @actions.get_alert
+    outputs:
+      properties:
+        found:
+          type: "string"
+          description: "\"true\" when the alert exists, otherwise \"false\""
+        alertId:
+          type: "string"
+          description: "The alert ID"
+        alertStatus:
+          type: "string"
+          description: "The alert's status as returned by get_alert"
+        customerName:
+          type: "string"
+          description: "Customer name"
+        instrumentName:
+          type: "string"
+          description: "Instrument name"
+        recommendation:
+          type: "string"
+          description: "問題なし, 深掘り, 保留 or 当局報告"
+          enum:
+            - "問題なし"
+            - "深掘り"
+            - "保留"
+            - "当局報告"
+        facts:
+          type: "string"
+          description: "The alert, the customer and the announcement, 3 to 5 lines"
+        notableTrades:
+          type: "string"
+          description: "Trades in this instrument, one per line, plus one line on the usual trading"
+        relations:
+          type: "string"
+          description: "Insider registry entries"
+        similarCases:
+          type: "string"
+          description: "Up to 3 similar past cases, one per line"
+        gaps:
+          type: "string"
+          description: "What could not be checked, or なし"
+        reasoning:
+          type: "string"
+          description: "Why this recommendation"
+    max_number_of_loops: 4
+    max_consecutive_errors: 2
+    task_timeout_secs: 150
+  on_exit: ->
+    transition to @router.statusRouter
+
+router statusRouter:
+  description: "Stops when the alert does not exist, already waits for approval, or is already decided."
+  routes:
+    - target: @echo.alertNotFound
+      when: @subagent.investigate.output.found == "false"
+      label: "Alert not found"
+    - target: @echo.alreadyPending
+      when: @subagent.investigate.output.alertStatus == "承認待ち"
+      label: "Already waiting for approval"
+    - target: @echo.alreadyDecided
+      when: @subagent.investigate.output.alertStatus == "問題なし"
+      label: "Already decided (問題なし)"
+    - target: @echo.alreadyDecided
+      when: @subagent.investigate.output.alertStatus == "深掘り"
+      label: "Already decided (深掘り)"
+    - target: @echo.alreadyDecided
+      when: @subagent.investigate.output.alertStatus == "保留"
+      label: "Already decided (保留)"
+    - target: @echo.alreadyDecided
+      when: @subagent.investigate.output.alertStatus == "当局報告"
+      label: "Already decided (当局報告)"
+  otherwise:
+    target: @executor.requestApproval
+
+executor requestApproval:
+  description: "Saves the investigation and sends the recommendation with the memo to the approval inbox."
+  do: ->
+    run @actions.request_approval
+      with contextId = @request.payload.message.contextId
+      with alertId = @subagent.investigate.output.alertId
+      with recommendation = @subagent.investigate.output.recommendation
+      with facts = @subagent.investigate.output.facts
+      with notableTrades = @subagent.investigate.output.notableTrades
+      with relations = @subagent.investigate.output.relations
+      with similarCases = @subagent.investigate.output.similarCases
+      with gaps = @subagent.investigate.output.gaps
+      with reasoning = @subagent.investigate.output.reasoning
+  on_exit: ->
+    transition to @generator.reply
+
+generator reply:
+  system:
+    instructions: "あなたは売買審査部門の調査補助です。担当者が読む調査メモの下書きを Markdown で書きます。確認できた事実だけを使い、材料にない事実を足しません。前置き・実況は書きません。"
+  prompt: ->
+    | 次の材料から調査メモの下書きを作ってください。1 行目は「### 🔎 調査メモ（下書き）: <アラート ID> <顧客名> / <銘柄名>」とします。
+    | 見出しは順に「アラートと顧客」「注目すべき売買」「内部者の登録」「似た過去の事例」「確認できなかった材料」「推奨（下書き）」。
+    | 「注目すべき売買」は表（日付 / 売買 / 株数 / 単価）にし、普段の売買の様子は表の下に 1 行で書きます。
+    | 「推奨（下書き）」には推奨と根拠を書きます。
+    | 最後に次の 2 行を必ずそのまま付けます:
+    | ---
+    | **承認箱 (Salesforce の「承認依頼」) に回しました。** 判断は承認箱で担当者が行います。
+    |
+    | アラート ID: {!@subagent.investigate.output.alertId}
+    | 顧客名: {!@subagent.investigate.output.customerName}
+    | 銘柄名: {!@subagent.investigate.output.instrumentName}
+    | 事実: {!@subagent.investigate.output.facts}
+    | 注目すべき売買: {!@subagent.investigate.output.notableTrades}
+    | 内部者の登録: {!@subagent.investigate.output.relations}
+    | 似た過去の事例: {!@subagent.investigate.output.similarCases}
+    | 確認できなかった材料: {!@subagent.investigate.output.gaps}
+    | 推奨: {!@subagent.investigate.output.recommendation}
+    | 根拠: {!@subagent.investigate.output.reasoning}
+  on_exit: ->
+    transition to @echo.memoArtifact
+
+echo memoArtifact:
+  label: "Investigation memo"
+  kind: "a2a:artifact_update_event"
+  artifact: a2a.artifact({
+    artifactId: uuid(),
+    name: "surveillance-investigation-memo",
+    description: "Draft investigation memo. An employee decides in the approval inbox.",
+    parts: [
+      a2a.textPart(@generator.reply.output),
+      a2a.dataPart({ data: @subagent.investigate.output })
+    ],
+    metadata: {}
+  })
+  append: False
+  lastChunk: True
+  on_exit: ->
+    transition to @echo.memoStatus
+
+echo memoStatus:
+  label: "Memo sent to the approval inbox"
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart(@generator.reply.output)
+    ]
+  })
+
+echo alertNotFound:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_FAILED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("アラート " + @subagent.classify.output.alertId + " は見つかりませんでした。アラート ID（例: SV-0001）を確かめてください。")
+    ]
+  })
+
+echo alreadyPending:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("アラート " + @subagent.investigate.output.alertId + " は、すでに承認箱で担当者の判断を待っています。")
+    ]
+  })
+
+echo alreadyDecided:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("アラート " + @subagent.investigate.output.alertId + " は判断済みです（" + @subagent.investigate.output.alertStatus + "）。")
+    ]
+  })
+
+# -------------------------------------------------------------
+# 3. List the alerts
+# -------------------------------------------------------------
+subagent listAlerts:
+  label: "List Alerts"
+  description: "Lists the alerts so the human can pick one."
+  system:
+    instructions: |
+      list_alerts を 1 回呼び、結果を Markdown の表にして table に入れる。
+      表の列は「アラート ID | 点数 | 状態 | 発生日 | 顧客 | 銘柄」。値はツールの結果をそのまま使い、並び順も変えない。
+      アラートが 0 件なら table に「該当するアラートはありません。」とだけ入れる。
+      ★★ 最重要: あなたは人間に話しかけてはいけません。table の構造化出力だけを返してください。
+  reasoning:
+    instructions: ->
+      | status: {!@subagent.classify.output.statusFilter}
+    actions:
+      list_alerts: @actions.list_alerts
+    outputs:
+      properties:
+        table:
+          type: "string"
+          description: "The alerts as a Markdown table"
+    max_number_of_loops: 3
+    max_consecutive_errors: 2
+    task_timeout_secs: 40
+  on_exit: ->
+    transition to @echo.alertList
+
+echo alertList:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("### 📋 審査のアラート\n\n" + @subagent.listAlerts.output.table + "\n\n調べたいアラートの ID を送ってください（例: アラート SV-0001 を調べて）。")
+    ]
+  })
+
+echo classifyFailed:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_FAILED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart("依頼の内容を判定できませんでした。アラート ID（例: SV-0001）を添えてもう一度送ってください。")
+    ]
+  })

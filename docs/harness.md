@@ -7,8 +7,8 @@ layout.
 A unit is found by walking the repository for `harness.yaml`. Its `name` is the key other
 units use to refer to it and the default deployment name.
 
-What runs on the k0 cluster (`k0/`, `emu/`, `max/`) has no `harness.yaml`;
-it is applied with `kubectl` or `k0/max-rtf/deploy.sh` (see [k0/README.md](../k0/README.md)).
+What runs on the k0 cluster (`ai/`, and `max-core` / `max-oms` in `demos/max/`) has no
+`harness.yaml`; it is applied with `kubectl` or `demos/max/deploy/deploy.sh` (see [ai/README.md](../ai/README.md)).
 
 ## Common fields
 
@@ -71,7 +71,8 @@ variables profile. `{{business-group-id}}` is the Business Group deployed into, 
 ## runtime: set
 
 A set is a named selection of units provisioned together — for example everything a finance
-demo needs. It lives under `sets/<name>/harness.yaml` and holds no code of its own.
+demo needs. It lives at the root of its demo, `demos/<demo>/harness.yaml`, next to the units it
+brings up, and holds no code of its own.
 
 ```yaml
 name: onboarding-demo

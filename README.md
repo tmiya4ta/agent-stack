@@ -5,31 +5,42 @@
 
 ## 構成
 
-| 場所 | 中身 | 動かし方 |
-|---|---|---|
-| [a2a/](a2a/) | A2A エージェント (Mule) | yc (`harness.yaml`) |
-| [mcp/](mcp/) | MCP サーバ (Mule) | yc (`harness.yaml`) |
-| [networks/](networks/) | Agent Network (broker) | yc (`harness.yaml`) |
-| [sets/](sets/) | 一緒に配備する単位の組 | `yc harness deploy <org> <env> <set>` |
-| [max/](max/) | マックス証券 (架空) のデモ。max-core、max-oms (mulay)、DB、Salesforce の承認箱 | [k0/max-rtf](k0/max-rtf/) から RTF (k0) へ |
-| [k0/](k0/) | kind クラスタ k0 の定義 (LLM、埋め込み、emu、stat、max の配備) | `kubectl --context kind-k0 apply` |
-| [emu/](emu/) | k0 の emu (他社 API の真似) のソース (clay)。LLM と埋め込みの emu、`aisearch-server` (`ai-search.azure.emu`) | 各 `build.sh` (aisearch-server は `image.sh`) でイメージにして k0 へ |
-| [docs/](docs/) | 仕様と調べた記録 | — |
+```
+agent-stack/
+├── demos/       デモごとに、セット・Agent Network・メンバーの Mule アプリを 1 か所に
+│   ├── onboarding/   新入社員の受け入れ (セット onboarding-demo)
+│   ├── finance/      AML アラートの調査 (セット finance-demo)
+│   └── max/          マックス証券 (架空。セット max-demo、max-core / max-oms と k0 への配備)
+├── ai/          k0 で動く AI のサービス。ソースと k8s の yaml を同じフォルダに
+│   ├── model/        real (本物のモデル)、emu (他社の API の真似)、stat (統計的な実装)
+│   └── vector/       emu (Azure AI Search の真似)
+├── labs/        どのデモにも属さない調べもの
+└── docs/        仕様と調べた記録
+```
+
+| 場所 | 動かし方 |
+|---|---|
+| [demos/](demos/) | `yc harness deploy <org> <env> <セット>`。max-core / max-oms は [demos/max/deploy](demos/max/deploy/) から RTF (k0) へ |
+| [ai/](ai/) | 各 `build.sh` (aisearch-server は `image.sh`) でイメージにし、`kubectl --context kind-k0 apply` |
+| [labs/](labs/) | yc (`harness.yaml`) |
+
+フォルダの名前は、中の単位の harness の `name` (k0 のものはプログラムの名前) と同じにする。
 
 ## 単位の一覧 (`harness.yaml`)
 
-| 名前 | kind | 使う network |
+| 名前 | kind | 場所 |
 |---|---|---|
-| [address-change-agent](a2a/address-change-agent/) | a2a | (単独。A2A コネクタの調べもの用) |
-| [case-history-agent](a2a/case-history-agent/) | a2a | aml-investigation |
-| [it-provisioning-agent](a2a/it-provisioning-agent/) | a2a | onboarding-employees |
-| [office-concierge-agent](a2a/office-concierge-agent/) | a2a | onboarding-employees |
-| [core-banking-mcp](mcp/core-banking-mcp/) | mcp | aml-investigation |
-| [employee-db-app](mcp/employee-db-app/) | mcp | onboarding-employees |
-| [screening-mcp](mcp/screening-mcp/) | mcp | aml-investigation |
-| [onboarding-employees](networks/onboarding-employees/) | network | セット onboarding-demo |
-| [aml-investigation](networks/aml-investigation/) | network | セット finance-demo |
-| [max-surveillance](networks/max-surveillance/)、[max-operations](networks/max-operations/)、[max-support](networks/max-support/) | network | セット max-demo (MCP は k0 の max-core) |
+| onboarding-demo | set | [demos/onboarding](demos/onboarding/) |
+| ├ [onboarding-employees](demos/onboarding/onboarding-employees/) | network | |
+| ├ [it-provisioning-agent](demos/onboarding/it-provisioning-agent/)、[office-concierge-agent](demos/onboarding/office-concierge-agent/) | a2a | |
+| └ [employee-db-app](demos/onboarding/employee-db-app/) | mcp | |
+| finance-demo | set | [demos/finance](demos/finance/) |
+| ├ [aml-investigation](demos/finance/aml-investigation/) | network | |
+| ├ [case-history-agent](demos/finance/case-history-agent/) | a2a | |
+| └ [core-banking-mcp](demos/finance/core-banking-mcp/)、[screening-mcp](demos/finance/screening-mcp/) | mcp | |
+| max-demo | set | [demos/max](demos/max/) |
+| └ [max-surveillance](demos/max/max-surveillance/)、[max-operations](demos/max/max-operations/)、[max-support](demos/max/max-support/) | network | MCP は k0 の max-core |
+| [address-change-agent](labs/address-change-agent/) | a2a | 単独。A2A コネクタの調べもの用 |
 
 ## 決めごと
 
@@ -42,6 +53,6 @@
 ## やること
 
 - CI の雛形 (`.github/workflows/`)。
-- `api/` の最初の単位。
+- API (kind: api) の最初の単位。
 - 旧 `~/mule/agents/agentic-harness` (Linux の PC、553MB) を消してよいか確かめる。そこから持ってきた chat-server と embeddings-server は
   k0 (`llm.ornith.model`、`embed.gte-qwen2.model`) に置き換わったので消した。中身は git の履歴 (`674fd46`) にある。

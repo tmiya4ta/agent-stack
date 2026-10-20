@@ -1,0 +1,75 @@
+# ai-search.azure.emu.theorems.dev: Azure AI Search の REST API (ベクトル検索まわり) の真似。プログラムは agent-stack/ai/vector/emu/aisearch-server。
+# 埋め込みは持たない (客がベクトルを渡す。Vectors コネクタなら embed.azure.emu などで作る)。
+# 鍵: Secret ai-search-azure-emu-api-key (../secrets.sh ai-emu ai-search-azure-emu)。api-key ヘッダで送る (無い・違えば 403)。
+# データ: PVC ai-search-data (local-path)。状態を変えた要求を 1 件 1 ファイルで残し、起動時に流し直す。
+#   全部消すには Deployment を 0 にしてから PVC を消して作り直す。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ai-search-data
+  namespace: ai-emu
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources: {requests: {storage: 5Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-search-azure-emu
+  namespace: ai-emu
+  labels: {app: ai-search-azure-emu}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}   # PVC は 1 つの Pod にしか付かない。状態はメモリにあるので 2 つ同時に動かさない
+  selector:
+    matchLabels: {app: ai-search-azure-emu}
+  template:
+    metadata:
+      labels: {app: ai-search-azure-emu}
+    spec:
+      containers:
+      - name: ai-search-azure-emu
+        image: aisearch-server:0.2.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: AIS_HOST, value: "0.0.0.0"}
+        - {name: AIS_PORT, value: "8080"}
+        - {name: AIS_DATA, value: "/data"}
+        - {name: AIS_SERVICE, value: "ai-search"}
+        - {name: AIS_API_KEY_FILE, value: "/secrets/self/api-key"}
+        ports: [{name: http, containerPort: 8080}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, runAsNonRoot: true, readOnlyRootFilesystem: true}
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: self-key, mountPath: /secrets/self, readOnly: true}
+        - {name: data, mountPath: /data}
+      volumes:
+      - name: self-key
+        secret: {secretName: ai-search-azure-emu-api-key}
+      - name: data
+        persistentVolumeClaim: {claimName: ai-search-data}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-search-azure-emu
+  namespace: ai-emu
+spec:
+  selector: {app: ai-search-azure-emu}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ai-search-azure-emu
+  namespace: ai-emu
+spec:
+  parentRefs: [{name: cluster-gateway, namespace: rtf}]
+  hostnames: [ai-search.azure.emu.theorems.dev]
+  rules:
+  - backendRefs: [{name: ai-search-azure-emu, port: 80}]
+    # 大きな登録のバッチのため。書かないと共有 Gateway が 15 秒で切る (k0/README.md)
+    timeouts: {request: 900s, backendRequest: 900s}

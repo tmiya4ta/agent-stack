@@ -1,7 +1,7 @@
 # Agent Network の broker は contextId と利用者 ID をどう管理しているか
 
 2026-09-23、T1 / Sandbox（private space rootps、Managed Flex Gateway ft1）で、
-`networks/aml-investigation` の broker（Agent Network v2）を使って確かめた記録。
+`demos/finance/aml-investigation` の broker（Agent Network v2）を使って確かめた記録。
 
 ## 結論
 
@@ -103,7 +103,7 @@ timestamp                 context_id  user_id (= sha256(sub))   state
   あとで戻しても誰でも続きを送れた。`__default__` で保存されるためと考えられる。
 - **手で足した ingress ポリシーは、network を再デプロイすると消える。** 代わりに
   agent-network.yaml の `brokers.<id>.interfaces.a2a.policies.inbound` に書けば毎回付く
-  （`networks/aml-investigation/agent-network.yaml` がその形。公式プラグイン 1.3.0 と、
+  （`demos/finance/aml-investigation/agent-network.yaml` がその形。公式プラグイン 1.3.0 と、
   2026-09-23 以降の yc の両方で確認）。
 - broker から下流（MCP / A2A）への contextId は下流が採番し、利用者とは結び付かない
   （`tool-context-store` に別に保存される。次の節）。

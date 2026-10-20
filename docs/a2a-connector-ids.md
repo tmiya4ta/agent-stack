@@ -1,7 +1,7 @@
 # A2A コネクタ（Mule）は contextId / taskId をどう管理しているか
 
 2026-09-23、`mule4-a2a-connector` 1.1.1（A2A 0.3）で作った単独のエージェント
-[a2a/address-change-agent](../a2a/address-change-agent/)（住所変更の受付、LLM なし）をローカルの
+[labs/address-change-agent](../labs/address-change-agent/)（住所変更の受付、LLM なし）をローカルの
 Mule 4.11.3 で動かし、`/debug/ids`（受信した ID）と `/debug/store`（コネクタのタスク保存先）で確かめた。
 コネクタ本体（`ServerAgent`、`TaskHistoryParameterGroup`、`repository/*`）のクラスも読んだ。
 

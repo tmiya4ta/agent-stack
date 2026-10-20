@@ -1,0 +1,61 @@
+# llm.openai.emu.theorems.dev: OpenAI の LLM の API の真似 (agent-stack/ai/model/emu/llm-openai-emu)。中身は ai-model の llm-ornith-model。
+# 鍵: 自分の鍵 (Secret llm-openai-emu-api-key、../secrets.sh ai-emu llm-openai-emu) と、
+#     llama-server の鍵 (Secret llm-ornith-model-api-key、../secrets.sh ai-emu llm-ornith-model。ai-model のものと同じ値)。
+# LOG_BODIES=1: broker が送る要求の本文をログに出す (kubectl -n ai-emu logs deploy/llm-openai-emu)。調べ終えたら外す。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-openai-emu
+  namespace: ai-emu
+  labels: {app: llm-openai-emu}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: llm-openai-emu}
+  template:
+    metadata:
+      labels: {app: llm-openai-emu}
+    spec:
+      containers:
+      - name: llm-openai-emu
+        image: llm-openai-emu:0.1.4
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: UPSTREAM, value: "http://llm-ornith-model.ai-model.svc.cluster.local"}
+        - {name: LOG_BODIES, value: "1"}
+        # THINK_OFF は既定 (none,minimal,low) のまま。low でも考えさせると、1 回が 3 分を超え、JSON の中身も崩れた (2026-10-12)
+        ports: [{name: http, containerPort: 8080}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, runAsNonRoot: true, readOnlyRootFilesystem: true}
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: self-key, mountPath: /secrets/self, readOnly: true}
+        - {name: upstream-key, mountPath: /secrets/upstream, readOnly: true}
+      volumes:
+      - name: self-key
+        secret: {secretName: llm-openai-emu-api-key}
+      - name: upstream-key
+        secret: {secretName: llm-ornith-model-api-key}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-openai-emu
+  namespace: ai-emu
+spec:
+  selector: {app: llm-openai-emu}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: llm-openai-emu
+  namespace: ai-emu
+spec:
+  parentRefs: [{name: cluster-gateway, namespace: rtf}]
+  hostnames: [llm.openai.emu.theorems.dev]
+  rules:
+  - backendRefs: [{name: llm-openai-emu, port: 80}]
+    # 書かないと共有 Gateway が 15 秒で切る (k0/README.md の「長い生成とタイムアウト」)
+    timeouts: {request: 900s, backendRequest: 900s}

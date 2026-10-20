@@ -1,0 +1,60 @@
+# embed.openai.emu.theorems.dev: OpenAI の埋め込み (/v1/embeddings)。
+# プログラムは agent-stack/ai/model/emu/embed-emu (FLAVOR=openai)。中身は ai-model の embed-gte-qwen2-model。
+# 鍵: 自分の鍵 (Secret embed-openai-emu-api-key、../secrets.sh ai-emu embed-openai-emu) と、
+#     llama-server の鍵 (Secret embed-gte-qwen2-model-api-key、../secrets.sh ai-emu embed-gte-qwen2-model。ai-model のものと同じ値)。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embed-openai-emu
+  namespace: ai-emu
+  labels: {app: embed-openai-emu}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: embed-openai-emu}
+  template:
+    metadata:
+      labels: {app: embed-openai-emu}
+    spec:
+      containers:
+      - name: embed-openai-emu
+        image: embed-emu:0.1.1
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: FLAVOR, value: "openai"}
+        - {name: UPSTREAM, value: "http://embed-gte-qwen2-model.ai-model.svc.cluster.local"}
+        ports: [{name: http, containerPort: 8080}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, runAsNonRoot: true, readOnlyRootFilesystem: true}
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: self-key, mountPath: /secrets/self, readOnly: true}
+        - {name: upstream-key, mountPath: /secrets/upstream, readOnly: true}
+      volumes:
+      - name: self-key
+        secret: {secretName: embed-openai-emu-api-key}
+      - name: upstream-key
+        secret: {secretName: embed-gte-qwen2-model-api-key}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embed-openai-emu
+  namespace: ai-emu
+spec:
+  selector: {app: embed-openai-emu}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: embed-openai-emu
+  namespace: ai-emu
+spec:
+  parentRefs: [{name: cluster-gateway, namespace: rtf}]
+  hostnames: [embed.openai.emu.theorems.dev]
+  rules:
+  - backendRefs: [{name: embed-openai-emu, port: 80}]
+    # 大きな束の埋め込みのため (エンジンは 1 本で順に処理する)。書かないと共有 Gateway が 15 秒で切る (k0/README.md)
+    timeouts: {request: 900s, backendRequest: 900s}
