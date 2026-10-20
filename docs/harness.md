@@ -7,12 +7,15 @@ layout.
 A unit is found by walking the repository for `harness.yaml`. Its `name` is the key other
 units use to refer to it and the default deployment name.
 
+What runs on the k0 cluster (`k0/`, `emu/`, `aisearch-server/`, `max/`) has no `harness.yaml`;
+it is applied with `kubectl` or `k0/max-rtf/deploy.sh` (see [k0/README.md](../k0/README.md)).
+
 ## Common fields
 
 ```yaml
 name: it-provisioning-agent     # unique in the repository
 kind: a2a                       # llm | embedding | vector | mcp | a2a | api | network | set
-runtime: mule                   # mule | host | agent-network | set
+runtime: mule                   # mule | agent-network | set
 version: 1.7.8                  # informational; for mule the pom <version> wins
 ```
 
@@ -119,22 +122,6 @@ The command line can add or replace `use-existing`:
 
 Tearing down a set (`yc harness down <org> <env> <set>`) removes what the set deployed into
 that environment — its networks and its own apps — and never touches a `use-existing` unit.
-
-## runtime: host
-
-A clay executable run as a `systemd --user` unit on this PC.
-
-```yaml
-build: ./build.sh
-test: ./smoke_test.py
-deploy:
-  host:
-    unit: embeddings-server.service
-    install: ./install.sh
-    env: ~/.config/embeddings-server/env    # secrets live there; only the path is recorded
-expose:
-  url: https://embeddings.theorems.io
-```
 
 ## Value references
 

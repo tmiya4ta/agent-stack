@@ -2,13 +2,21 @@
 
 Reference implementations of MuleSoft **Agent Fabric** agent networks.
 
-Each folder is the root of one Agent Network project — `agent-network.yaml`, `exchange.json` and
-`brokers/` — together with the Mule apps that make up its members, so each reference can be
-deployed on its own.
+Each folder is the root of one Agent Network project — `agent-network.yaml`, `exchange.json`,
+`brokers/` and a `harness.yaml`. The Mule apps that make up its members live in
+[`../a2a/`](../a2a/) and [`../mcp/`](../mcp/) and are listed under `members` in the
+`harness.yaml`, so yc deploys them along with the network.
 
-| Reference | What it shows |
-|---|---|
-| [onboarding-employees](onboarding-employees/) | New employee onboarding. One broker orchestrates 2 A2A agents and 1 MCP server, branching explicitly on full success, partial failure and total failure |
+| Reference | What it shows | Members |
+|---|---|---|
+| [onboarding-employees](onboarding-employees/) | New employee onboarding. One broker orchestrates 2 A2A agents and 1 MCP server, branching explicitly on full success, partial failure and total failure | `it-provisioning-agent`, `office-concierge-agent`, `employee-db-app` |
+| [aml-investigation](aml-investigation/) | First pass of an AML alert investigation (fictitious bank data). The agent gathers and drafts; the analyst decides | `case-history-agent`, `core-banking-mcp`, `screening-mcp` |
+| [max-surveillance](max-surveillance/) | Max Securities (fictitious): investigates trade surveillance alerts and asks for approval | MCP on k0 `max-core` ([max/](../max/)) |
+| [max-operations](max-operations/) | Max Securities: account opening | MCP on k0 `max-core` |
+| [max-support](max-support/) | Max Securities: customer inquiries. Drafts replies from FAQ facts; guarded ones go to the approval inbox | MCP on k0 `max-core` |
+
+The max-* networks have no `members`: their MCP server is `max-core` running on k0 (not deployed
+by yc), and its URL comes from a yc variables profile.
 
 ---
 
