@@ -1,4 +1,4 @@
-# ai-search.azure.emu.theorems.dev: Azure AI Search の REST API (ベクトル検索まわり) の真似。プログラムは agent-stack/aisearch-server。
+# ai-search.azure.emu.theorems.dev: Azure AI Search の REST API (ベクトル検索まわり) の真似。プログラムは agent-stack/emu/aisearch-server。
 # 埋め込みは持たない (客がベクトルを渡す。Vectors コネクタなら embed.azure.emu などで作る)。
 # 鍵: Secret ai-search-azure-emu-api-key (../secrets.sh ai-emu ai-search-azure-emu)。api-key ヘッダで送る (無い・違えば 403)。
 # データ: PVC ai-search-data (local-path)。状態を変えた要求を 1 件 1 ファイルで残し、起動時に流し直す。

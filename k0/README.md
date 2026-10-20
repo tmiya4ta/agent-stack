@@ -27,7 +27,7 @@ Deployment、Service、Secret、`~/.config/<名前>/env` は、公開名のラ�
 | `embed.openai.emu` | OpenAI の埋め込み (`/v1/embeddings`)。ソースは `emu/embed-emu` (FLAVOR=openai) | `embed.gte-qwen2.model` | 動いている。HTTPRoute あり |
 | `embed.azure.emu` | Azure OpenAI の埋め込み (`/openai/deployments/<名前>/embeddings`)。同じプログラム (FLAVOR=azure) | `embed.gte-qwen2.model` | 動いている。HTTPRoute あり |
 | `embed.ollama.emu` | Ollama の埋め込み (`/api/embed`、`/api/embeddings`、`/api/tags`)。同じプログラム (FLAVOR=ollama) | `embed.gte-qwen2.model` | 動いている。HTTPRoute あり |
-| `ai-search.azure.emu` | Azure AI Search の真似 (ベクトル DB)。ソースは `aisearch-server` | 自前 (PVC `ai-search-data`) | 動いている。HTTPRoute あり |
+| `ai-search.azure.emu` | Azure AI Search の真似 (ベクトル DB)。ソースは `emu/aisearch-server` | 自前 (PVC `ai-search-data`) | 動いている。HTTPRoute あり |
 | `llm.tfidf.stat` | 統計的な LLM (`/v1/chat/completions`、agent-harness の `stat::agent`)。mulay の `templates/stat-models` (stat.serve=llm) | なし | 動いている。HTTPRoute あり |
 | `embed.hash512.stat` | 統計的な埋め込み (512 次元。OpenAI、Azure、Ollama の形)。同じアプリ (stat.serve=embed) | なし | 動いている。HTTPRoute あり |
 

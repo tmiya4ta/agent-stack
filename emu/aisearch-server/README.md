@@ -13,7 +13,7 @@ MuleSoft の Vectors コネクタの保存先 (`ai-search-connection`) や、Sem
                                               └ 状態を変えた要求を /data/log/<連番>.json (PVC ai-search-data) に書き、起動時に再生
 ```
 
-- 定義は `../k0/ai-emu/ai-search-azure-emu.yaml`、鍵は `~/.config/ai-search-azure-emu/env` (`../k0/secrets.sh` が作る)
+- 定義は `../../k0/ai-emu/ai-search-azure-emu.yaml`、鍵は `~/.config/ai-search-azure-emu/env` (`../../k0/secrets.sh` が作る)
 - LAN 内からは公開名を直接開けない（ヘアピン NAT が効かない）。`--resolve ai-search.azure.emu.theorems.dev:443:192.168.11.6`
   を付けるか、`kubectl -n ai-emu port-forward svc/ai-search-azure-emu 18898:80` で `http://127.0.0.1:18898` を叩く
 - clay 0.85.0 で書いている（2026-10-12 に 0.42 から移した。`hm/Request`・`hm/Response` の run-server、
@@ -96,7 +96,7 @@ GET/PUT /indexes/semantic-cache            インデックスの確認・作成
 ```bash
 ./build.sh        # テスト（test/*.clay）を回してから build/aisearch-server を作る
 ./image.sh        # イメージ aisearch-server:<VERSION> を作って k0 に読み込む (中身を変えたら VERSION と yaml の image を上げる)
-kubectl --context kind-k0 apply -f ../k0/ai-emu/ai-search-azure-emu.yaml
+kubectl --context kind-k0 apply -f ../../k0/ai-emu/ai-search-azure-emu.yaml
 kubectl --context kind-k0 -n ai-emu port-forward svc/ai-search-azure-emu 18898:80 &
 API_KEY=$KEY python3 smoke_test.py http://127.0.0.1:18898                  # HTTP のスモークテスト
 API_KEY=$KEY python3 smoke_test.py http://127.0.0.1:18898 --concurrency    # 並行登録で更新が消えないかも見る

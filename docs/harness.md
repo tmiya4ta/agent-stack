@@ -7,7 +7,7 @@ layout.
 A unit is found by walking the repository for `harness.yaml`. Its `name` is the key other
 units use to refer to it and the default deployment name.
 
-What runs on the k0 cluster (`k0/`, `emu/`, `aisearch-server/`, `max/`) has no `harness.yaml`;
+What runs on the k0 cluster (`k0/`, `emu/`, `max/`) has no `harness.yaml`;
 it is applied with `kubectl` or `k0/max-rtf/deploy.sh` (see [k0/README.md](../k0/README.md)).
 
 ## Common fields
