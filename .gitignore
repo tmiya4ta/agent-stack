@@ -6,3 +6,8 @@ data/
 # local env / secrets
 .env
 *.env
+# tool caches / local state
+__pycache__/
+*.pyc
+.sf/
+.sfdx/
