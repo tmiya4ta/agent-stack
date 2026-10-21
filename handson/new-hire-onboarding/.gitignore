@@ -1,0 +1,3 @@
+# クレデンシャルの値 (credentials.md の一覧の値をここに書く。setup/ のスクリプトが出すパスワードは .local.json)
+*.local.md
+*.local.json
