@@ -11,7 +11,8 @@ agent-stack/
 │   ├── suspicious-transaction-review/   銀行の疑わしい取引のアラート調査 (AML = マネーロンダリング対策)
 │   └── max-securities/                  マックス証券 (架空のネット証券)。売買審査・口座開設・問い合わせ
 ├── handson/     ハンズオン (作りはデモと同じ)
-│   └── new-hire-onboarding/             新入社員の受け入れ
+│   ├── new-hire-onboarding/             新入社員の受け入れ
+│   └── agent-fabric-actionability/      MuleSoft の Agent Fabric Actionability Workshop (手順とクレデンシャルの一覧)
 ├── ai/          k0 で動く AI のサービス。ソースと k8s の yaml を同じフォルダに
 │   ├── model/        real (本物のモデル)、emu (他社の API の真似)、stat (統計的な実装)
 │   └── vector/       emu (Azure AI Search の真似)
