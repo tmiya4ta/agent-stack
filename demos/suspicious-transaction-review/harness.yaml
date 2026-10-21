@@ -1,4 +1,4 @@
-name: finance-demo
+name: suspicious-transaction-review
 kind: set
 runtime: set
 units:

@@ -1,4 +1,4 @@
-name: max-demo
+name: max-securities
 kind: set
 runtime: set
 # マックス証券 (架空) の売買審査と口座開設と問い合わせ。MCP は k0 の max-core (mulay) で、ここでは broker の network だけを配備する

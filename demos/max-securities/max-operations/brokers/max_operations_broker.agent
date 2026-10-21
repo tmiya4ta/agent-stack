@@ -12,7 +12,7 @@
 #                       -> executor requestApproval (request-account-approval, no LLM) -> generator reply -> echo
 #     + list         -> subagent listApplications (list-applications) -> echo
 #
-# Same design notes as demos/max/max-surveillance.
+# Same design notes as demos/max-securities/max-surveillance.
 
 system:
   instructions: "あなたは証券会社の口座開設の審査の補助です。確認できた事実だけを扱い、推測で埋めません。最終判断は必ず担当者が承認箱で行います。"

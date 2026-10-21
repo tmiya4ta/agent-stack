@@ -1,18 +1,18 @@
 # demos
 
-One folder per demo. Each holds the demo's set (`harness.yaml` at the folder root), its MuleSoft
-**Agent Fabric** agent networks and the Mule apps that make up their members, so everything a
-demo needs is in one place. Folders are named after the harness `name` of the unit inside.
+Demos to show. One folder per demo, named after its set. Each holds the set (`harness.yaml` at
+the folder root), its MuleSoft **Agent Fabric** agent networks and the Mule apps that make up
+their members, so everything a demo needs is in one place. Inside, folders are named after the
+harness `name` of the unit they hold. Hands-on material lives in [../handson/](../handson/).
 
-| Demo | Set | What it brings up |
-|---|---|---|
-| [onboarding](onboarding/) | `onboarding-demo` | New employee onboarding. The [onboarding-employees](onboarding/onboarding-employees/) broker orchestrates 2 A2A agents and 1 MCP server, branching explicitly on full success, partial failure and total failure |
-| [finance](finance/) | `finance-demo` | First pass of an AML alert investigation (fictitious bank data). The [aml-investigation](finance/aml-investigation/) network, two MCP servers and one A2A agent. The agent gathers and drafts; the analyst decides |
-| [max](max/) | `max-demo` | Max Securities (fictitious): the surveillance, operations and support networks. `max-core` / `max-oms` run on k0 under mulay and are deployed separately ([max/deploy](max/deploy/)) |
+| Demo (= set) | What it shows |
+|---|---|
+| [suspicious-transaction-review](suspicious-transaction-review/) | A bank's anti-money-laundering (AML) review of suspicious-transaction alerts (fictitious bank data). The [aml-investigation](suspicious-transaction-review/aml-investigation/) network, two MCP servers and one A2A agent. The agent gathers and drafts; the analyst decides |
+| [max-securities](max-securities/) | Max Securities, a fictitious online brokerage: trade surveillance, account opening and customer inquiries, with staff only giving the final approval. `max-core` / `max-oms` run on k0 under mulay and are deployed separately ([max-securities/deploy](max-securities/deploy/)) |
 
 ```bash
-yc harness deploy <org> <env> onboarding-demo [suffix=<s>] [use-existing=<profile>:<bg>/<env>]
-yc harness down   <org> <env> onboarding-demo [suffix=<s>]
+yc harness deploy <org> <env> suspicious-transaction-review [suffix=<s>] [use-existing=<profile>:<bg>/<env>]
+yc harness down   <org> <env> suspicious-transaction-review [suffix=<s>]
 ```
 
 A network brings its `members` (listed in its `harness.yaml`) along. The max-* networks have no
@@ -26,6 +26,8 @@ See [docs/harness.md](../docs/harness.md).
 - `anypoint-cli-v4` with the `agent-network` plugin
 
 ## Conventions
+
+These apply to [../handson/](../handson/) as well.
 
 - `{{...}}` tokens are placeholders and must be replaced before building. Nothing here builds
   as checked in.

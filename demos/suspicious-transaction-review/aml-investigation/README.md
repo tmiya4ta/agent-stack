@@ -15,7 +15,7 @@ reply and the record.
   - [core-banking-mcp](../core-banking-mcp/) — alerts, customers, transactions; investigation state and decisions
   - [screening-mcp](../screening-mcp/) — watch-list screening and news search
   - [case-history-agent](../case-history-agent/) — similar past cases and how they were decided
-- Provision everything at once with the [finance-demo](../) set
+- Provision everything at once with the [suspicious-transaction-review](../) set
 
 ## The conversation
 
@@ -100,8 +100,8 @@ gets `The operation is not permitted.`. See
 ## Deploying
 
 ```bash
-yc harness deploy <org> <env> finance-demo              # the three members, then the network
-yc harness down   <org> <env> finance-demo              # remove what the set deployed
+yc harness deploy <org> <env> suspicious-transaction-review              # the three members, then the network
+yc harness down   <org> <env> suspicious-transaction-review              # remove what the set deployed
 ```
 
 The LLM endpoint and key come from the yc variables profile (`llm-base-url`, `llm-api-key`).

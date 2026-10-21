@@ -27,10 +27,10 @@ max-core (mulay、k0 の max-core)                         Agent Network (T1/San
 
 ```bash
 cd ~/mule/agents/agent-stack
-demos/max/deploy/build-jar.sh oms && demos/max/deploy/deploy.sh oms <版>   # Runtime Manager から RTF (k0) へ。ランタイムは mulay (demos/max/deploy/README.md)
-demos/max/deploy/build-jar.sh core && demos/max/deploy/deploy.sh core <版>
-yc harness deploy <T1> <Sandbox> max-demo                   # broker (yc の変数のプロファイル max)
-# データを最初からにする: max-pg に demos/max/db/schema.sql と seed.sql を流す (README の「データ」)。承認箱の AP-* も消す
+demos/max-securities/deploy/build-jar.sh oms && demos/max-securities/deploy/deploy.sh oms <版>   # Runtime Manager から RTF (k0) へ。ランタイムは mulay (demos/max-securities/deploy/README.md)
+demos/max-securities/deploy/build-jar.sh core && demos/max-securities/deploy/deploy.sh core <版>
+yc harness deploy <T1> <Sandbox> max-securities                   # broker (yc の変数のプロファイル max)
+# データを最初からにする: max-pg に demos/max-securities/db/schema.sql と seed.sql を流す (README の「データ」)。承認箱の AP-* も消す
 kubectl --context kind-k0 -n 0f678523-c036-4098-9be9-cc542dca2e6d port-forward svc/max-core 18081:8081 &
 curl -X POST -H "Authorization: Bearer $API_KEY" http://127.0.0.1:18081/surveillance/run   # 1〜2 分で承認箱に 3 件
 ```
@@ -73,8 +73,8 @@ SV-0003 は保留 → 問題なし)。判断するのは承認箱の社員。
 
 ```bash
 cd ~/projects/mulay
-tools/mule-oracle/mule-oracle fill  ~/mule/agents/agent-stack/demos/max/core/scenario.scn   # 実 Mule で期待値を取る
-tools/mule-oracle/mule-oracle mulay ~/mule/agents/agent-stack/demos/max/core/scenario.scn   # mulay で照合する
+tools/mule-oracle/mule-oracle fill  ~/mule/agents/agent-stack/demos/max-securities/core/scenario.scn   # 実 Mule で期待値を取る
+tools/mule-oracle/mule-oracle mulay ~/mule/agents/agent-stack/demos/max-securities/core/scenario.scn   # mulay で照合する
 ```
 
 DB は mulay の試験用の PG (localhost:15432、スキーマ max) を使う。

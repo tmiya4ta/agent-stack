@@ -29,21 +29,21 @@
     "variables": {
       "case-history-agent{{-suffix}}": {
         "url": {
-          "description": "A2A endpoint of the Case History Agent (agent-stack demos/finance/case-history-agent), scheme included",
+          "description": "A2A endpoint of the Case History Agent (agent-stack demos/suspicious-transaction-review/case-history-agent), scheme included",
           "default": "{{case-history-agent-url}}",
           "secret": false
         }
       },
       "core-banking-server{{-suffix}}": {
         "url": {
-          "description": "Base URL of the Core Banking MCP Server (agent-stack demos/finance/core-banking-mcp), scheme included. /mcp is appended by the transport setting",
+          "description": "Base URL of the Core Banking MCP Server (agent-stack demos/suspicious-transaction-review/core-banking-mcp), scheme included. /mcp is appended by the transport setting",
           "default": "{{core-banking-mcp-url}}",
           "secret": false
         }
       },
       "screening-server{{-suffix}}": {
         "url": {
-          "description": "Base URL of the Screening MCP Server (agent-stack demos/finance/screening-mcp), scheme included. /mcp is appended by the transport setting",
+          "description": "Base URL of the Screening MCP Server (agent-stack demos/suspicious-transaction-review/screening-mcp), scheme included. /mcp is appended by the transport setting",
           "default": "{{screening-mcp-url}}",
           "secret": false
         }

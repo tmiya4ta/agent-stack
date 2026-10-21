@@ -7,8 +7,8 @@ layout.
 A unit is found by walking the repository for `harness.yaml`. Its `name` is the key other
 units use to refer to it and the default deployment name.
 
-What runs on the k0 cluster (`ai/`, and `max-core` / `max-oms` in `demos/max/`) has no
-`harness.yaml`; it is applied with `kubectl` or `demos/max/deploy/deploy.sh` (see [ai/README.md](../ai/README.md)).
+What runs on the k0 cluster (`ai/`, and `max-core` / `max-oms` in `demos/max-securities/`) has no
+`harness.yaml`; it is applied with `kubectl` or `demos/max-securities/deploy/deploy.sh` (see [ai/README.md](../ai/README.md)).
 
 ## Common fields
 
@@ -71,11 +71,11 @@ variables profile. `{{business-group-id}}` is the Business Group deployed into, 
 ## runtime: set
 
 A set is a named selection of units provisioned together — for example everything a finance
-demo needs. It lives at the root of its demo, `demos/<demo>/harness.yaml`, next to the units it
-brings up, and holds no code of its own.
+demo needs. It lives at the root of its demo or hands-on, `demos/<name>/harness.yaml` or
+`handson/<name>/harness.yaml`, next to the units it brings up, and holds no code of its own.
 
 ```yaml
-name: onboarding-demo
+name: new-hire-onboarding
 kind: set
 runtime: set
 units:                        # harness names; a network brings its members along
@@ -119,7 +119,7 @@ not found, not running or has no public URL stops the deploy with a list of what
 it is never deployed silently in its place.
 
 The command line can add or replace `use-existing`:
-`yc harness deploy T1 Sandbox onboarding-demo use-existing=tm:T1/Sandbox`.
+`yc harness deploy T1 Sandbox new-hire-onboarding use-existing=tm:T1/Sandbox`.
 
 Tearing down a set (`yc harness down <org> <env> <set>`) removes what the set deployed into
 that environment — its networks and its own apps — and never touches a `use-existing` unit.

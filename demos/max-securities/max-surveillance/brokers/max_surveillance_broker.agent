@@ -18,7 +18,7 @@
 #             |                                                  -> generator reply -> echo memoArtifact -> echo memoStatus
 #             + list_alerts  -> subagent listAlerts (list-alerts) -> echo alertList
 #
-# Design notes (same as demos/finance/aml-investigation):
+# Design notes (same as demos/suspicious-transaction-review/aml-investigation):
 #   - The recommendation is a draft. Only the employee decides, in the approval inbox; max-core takes the decision in.
 #   - request-approval is run by an executor, so no LLM sits between the investigation and the record. The MCP server
 #     builds the memo from the structured fields, and answers already-pending / already-decided as normal results.
