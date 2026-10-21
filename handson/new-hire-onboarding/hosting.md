@@ -4,6 +4,18 @@
 APPBG に置いたメンバーの 3 アプリを URL で呼ぶ。メンバーのアプリは参加者に見せない。
 参加者は VS Code (Anypoint Code Builder) で配備する。その手順は別のチュートリアルにあるので、ここには環境の作り方だけを書く。
 値 (ログイン、URL、鍵) は [credentials.md](credentials.md) の一覧に名前を、`credentials.local.md` (git に入らない) に値を書く。
+受講者が見るのは BG1 の Exchange の資産 `new-hire-onboarding-handson` (使う URL、クレデンシャル、コピペする 3 つのファイル)。
+
+## Claude に頼むとき
+
+「new-hire-onboarding をセットアップして」と言われたら、**確認を挟まずに**下の「手順」の 1〜8 を順に流し、「確かめる」と「予行」(CLI) まで通して、
+結果 (作ったものの ID と URL、受講者のユーザー名とパスワード、Exchange のページの URL) を `credentials.local.md` に書いてから報告する。
+聞いてよいのは、次のどれかが分からないときだけ:
+
+- 管理者のユーザー名とパスワード、LLM の行き先の URL と鍵 (`credentials.local.md` に無ければ)
+- ハンズオンの日付 (ユーザー名の `wsXX_<日付>`) と人数 (既定は ws00 + 受講者 5 人)
+
+「new-hire-onboarding を片付けて」と言われたら、下の「後片付け」を、まず消すものの一覧を出して見せてから `--yes` で流す (消すと戻せないので、ここだけは確認する)。
 
 ## 全体
 
@@ -43,7 +55,8 @@ cd handson/new-hire-onboarding/setup
 | 4 | メンバーの 3 アプリを APPBG / Sandbox に配備 (下の「メンバーのアプリ」) | `yc harness deploy ...` | 1 つ 3〜5 分 |
 | 5 | Model Proxy `workshop-llm-proxy` を BG1 に作る | `LLM_TOKEN=<鍵> NODE_PATH=<node_modules> node model-proxy.js` | 2 分 |
 | 6 | Model Proxy の Client ID Enforcement を無効にする (認証なし) | `python anypoint_setup.py proxy-auth-off` | 1 分 (反映に 1 分) |
-| 7 | 確かめる (下の「確かめる」) | `python anypoint_setup.py show` と curl | — |
+| 7 | 受講者が見る Exchange のページ。BG1 の custom 資産 `new-hire-onboarding-handson` に、使う値と、値を埋めた `exchange.json`、`agent-network.yaml`、`broker1.agent` を載せる | `python anypoint_setup.py page` | 1 分 |
+| 8 | 確かめる (下の「確かめる」と「予行」) | `python anypoint_setup.py show` と curl | 10 分 |
 
 ws00 は主催者の予行用にする (`--count 6` なら ws00 と参加者 5 人)。
 メールの既定は `tmiyashita+{name}@salesforce.com` (`--email` で変える)。org のユーザー名は Anypoint 全体で一意なので、日付で分ける。
@@ -127,16 +140,32 @@ anypoint-cli-v4 agent-network project deploy $A -g agent-network-shared-gw \
 Model Proxy に認証が無いので `openAI.*` は `none` でよい。broker の呼び方は [onboarding-employees の README](onboarding-employees/README.md) の curl
 (`<Gateway の URL>/onboarding-broker-ws00/`、`SendMessage`、`A2A-Version: 1.0`)。全部成功なら `TASK_STATE_COMPLETED` で、社員 ID、PC、入館証が返る。
 
-## 参加者に配るもの
+## 受講者に渡すもの
 
-1 人 1 枚: ユーザー名、パスワード、suffix (`wsXX`)、BG1、メンバーの 3 つの URL、Model Proxy の URL (`<Gateway の URL>/llm`)。
+- 1 人ずつ: ユーザー名 (`wsXX_<日付>`) とパスワード (`credentials.local.json`)
+- 全員に: Exchange のページの URL (`page` が最後に出す。`https://anypoint.mulesoft.com/exchange/<BG1 の ID>/new-hire-onboarding-handson/`)
+
+Exchange のページ (手順 7) に載せるもの:
+
+| ページ | 中身 |
+|---|---|
+| home | BG1 の名前と ID、Sandbox、Gateway の名前、メンバーの 3 つの URL、Model Proxy の URL、クレデンシャル (`openAI.*` は `none`)、broker の呼び方 |
+| exchange.json、agent-network.yaml、broker1.agent | `onboarding-employees/` のファイルの `{{...}}` を埋めたもの。suffix は `-wsXX` / `_wsXX` のままにして、受講者が自分の番号に置き換える |
+
 全員が BG1 / Sandbox / 同じ Gateway に配備するので、Exchange の assetId、broker の名前、connection (= API インスタンス) の名前がぶつかる。
-`{{-suffix}}` を `-wsXX`、`{{_suffix}}` を `_wsXX` にしてもらう。
+そのために `wsXX` を自分の番号にしてもらう。`onboarding-employees/` のファイルを直したら `page` を流し直す (同じ資産のページを上書きする)。
 
-## 後片付け (未)
+## 後片付け
 
-順番の案: 参加者の broker (Runtime Manager のアプリと API インスタンス、Exchange の資産) → ユーザー → チーム → APPBG のアプリ →
-Model Proxy → Gateway → BG。スクリプトはまだ無い。
+```bash
+python anypoint_setup.py teardown --date <日付>          # 消すものの一覧を出すだけ
+python anypoint_setup.py teardown --date <日付> --yes    # 消す
+```
+
+BG1 と APPBG の Sandbox のアプリ (受講者の broker とメンバーの 3 つ) → API インスタンス (broker の connection と Model Proxy) → Gateway →
+ユーザー `wsNN_<日付>` → チーム workshop → BG1 と APPBG、の順に消す。Exchange の資産 (受講者のネットワーク、Model Proxy、ハンズオンのページ) は BG と一緒に消える。
+BG は Gateway が消えきるまで消せないので、30 秒おきに試す (最大 10 分)。vCore と Managed Gateway の枠は root に戻る。
+yc の変数プロファイル `nho-<日付>` と `credentials.local.*` は手で消す。
 
 ## Gateway の名前
 
@@ -171,4 +200,4 @@ BG1 には private space を作らないので `agent-network-shared-gw` にす�
 
 | 回 | org | 状態 |
 |---|---|---|
-| 2026-10-29 | `anypoint-cbp-1791266292` (US)。ID と URL は `credentials.local.md` | 2026-10-21 に 1〜7 を済ませた (BG1 の vCore は 0.5)。ws00 で broker を CLI で配備して全部成功の分岐を確認。VS Code での通しは未 |
+| 2026-10-29 | `anypoint-cbp-1791266292` (US)。ID と URL は `credentials.local.md` | 2026-10-21〜22 に 1〜8 を済ませた (BG1 の vCore は 0.5)。ws00 で broker を CLI で配備して全部成功の分岐を確認。Exchange のページは ws00 から見える。teardown は一覧を出すところまで (消すのは未実行) |

@@ -18,5 +18,4 @@
 |---|---|
 | Anypoint のログイン | ユーザー名 (`wsXX_<日付>`) とパスワード。BG1 / Sandbox |
 | suffix | `wsXX` |
-| メンバーのアプリの URL | 上と同じ 3 つ |
-| LLM Proxy | URL (認証なし) |
+| Exchange のページ | BG1 の `new-hire-onboarding-handson`。メンバーの 3 つの URL、LLM (Model Proxy) の URL (認証なし)、`openAI.*` の値 (`none`)、コピペする 3 つのファイル |

@@ -5,7 +5,9 @@
     python anypoint_setup.py team                     # チーム workshop と、BG1 / Sandbox への全ロール
     python anypoint_setup.py users --count 6 --date 20261029 --email tmiyashita+{name}@salesforce.com
     python anypoint_setup.py proxy-auth-off           # Model Proxy の Client ID Enforcement を無効にする
+    python anypoint_setup.py page                     # 受講者が見る Exchange のページ (URL と、コピペする 3 つのファイル)
     python anypoint_setup.py show                     # 作ったものの ID と URL
+    python anypoint_setup.py teardown --date 20261029 [--yes]   # 後片付け。--yes が無ければ消すものを出すだけ
 
 すでにあるもの (同じ名前の BG、Gateway、チーム、ユーザー) は作り直さない。
 ユーザーのパスワードは --out (既定 ../credentials.local.json、git に入らない) に書く。
@@ -16,7 +18,9 @@ import os
 import re
 import secrets
 import string
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -247,6 +251,173 @@ def cmd_proxy_auth_off(api, args):
     print('client-id-enforcement not in the active policies (already disabled)')
 
 
+def member_urls(api, appbg):
+    """public URL of each member app in APPBG / Sandbox, keyed by deployment name."""
+    env = sandbox_env(api, appbg)
+    base = f'/amc/application-manager/api/v2/organizations/{appbg}/environments/{env}/deployments'
+    urls = {}
+    for d in api.get(base).get('items', []):
+        full = api.get(f'{base}/{d["id"]}')
+        urls[d['name']] = full['target']['deploymentSettings']['http']['inbound']['publicUrl'].rstrip('/')
+    return urls
+
+
+def gateway_url(api, bg1, env, name):
+    for g in api.get(f'/gatewaymanager/api/v1/organizations/{bg1}/environments/{env}/gateways')['content']:
+        if g['name'] == name:
+            d = api.get(f'/gatewaymanager/api/v1/organizations/{bg1}/environments/{env}/gateways/{g["id"]}')
+            return d['configuration']['ingress']['publicUrl'].rstrip('/')
+    sys.exit(f'gateway {name} not found')
+
+
+def fill(text, values):
+    for k, v in values.items():
+        text = text.replace('{{' + k + '}}', v)
+    return text
+
+
+PAGE_HOME = '''# 新入社員オンボーディング ハンズオン
+
+自分の番号 (ユーザー名の `wsXX`、例 `ws03`) を使って、broker を BG1 / Sandbox に配備します。
+下のファイルの **`wsXX` を全部自分の番号に置き換えて** (VS Code の Replace All) から配備してください。
+
+## 使う値
+
+| 名前 | 値 |
+|---|---|
+| Business Group | {bg_name} (`{bg1}`) |
+| Environment | Sandbox |
+| Omni Gateway | `{gateway}` |
+| IT Provisioning Agent の URL | `{it}` |
+| Office Concierge Agent の URL | `{office}` |
+| Employee DB (MCP) の URL | `{db}` |
+| LLM (Model Proxy) の URL | `{llm}` |
+
+## クレデンシャル
+
+| 名前 | 値 |
+|---|---|
+| Anypoint のログイン | 配られたユーザー名とパスワード |
+| `openAI.clientId` / `openAI.clientSecret` / `openAI.apiKey` | `none` (LLM の Model Proxy は認証なし) |
+
+## ファイル
+
+ページ exchange.json、agent-network.yaml、broker1.agent の中身を、プロジェクトの同じ名前のファイルにそのまま貼ります
+(`broker1.agent` は `brokers/` の下)。
+
+## 呼んでみる
+
+配備したら、broker の URL は `{gw}/onboarding-broker-wsXX/` です (最後の `/` が要ります)。
+
+```bash
+curl -s {gw}/onboarding-broker-wsXX/ \\
+  -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \\
+  -d '{{"jsonrpc":"2.0","id":"1","method":"SendMessage","params":{{"message":{{"role":"ROLE_USER","parts":[{{"text":"Please start onboarding for new employee Taro Tanaka (tanaka.taro@example.com)"}}],"messageId":"11111111-1111-1111-1111-111111111111"}}}}}}'
+```
+'''
+
+
+def cmd_page(api, args):
+    """Exchange (BG1) に custom の資産を作り、受講者がコピペする値とファイルをページに載せる。"""
+    root, bg1, appbg = ids(api, args)
+    env = sandbox_env(api, bg1)
+    gw = gateway_url(api, bg1, env, args.gateway)
+    urls = member_urls(api, appbg)
+    llm = f'{gw}/{args.proxy_path}'
+    values = {
+        # every participant shares BG1 / Sandbox / the gateway, so names carry the participant's number
+        '-suffix': '-wsXX', '_suffix': '_wsXX',
+        'business-group-id': bg1,
+        'it-provisioning-agent-url': urls['it-provisioning-agent'] + '/',
+        'office-concierge-agent-url': urls['office-concierge-agent'] + '/',
+        'employee-db-app-url': urls['employee-db-app'],
+        'llm-base-url': llm,
+        # the Model Proxy has no authentication, so these are never checked
+        'llm-client-id': 'none', 'llm-client-secret': 'none', 'llm-api-key': 'none',
+    }
+    net = os.path.join(HERE, '..', 'onboarding-employees')
+    files = [('exchange.json', ['exchange.json'], 'json'),
+             ('agent-network.yaml', ['agent-network.yaml'], 'yaml'),
+             ('broker1.agent', ['brokers', 'broker1.agent'], '')]
+    pages = {'home': PAGE_HOME.format(bg_name=args.bg1, bg1=bg1, gateway=args.gateway, gw=gw, llm=llm,
+                                      it=values['it-provisioning-agent-url'],
+                                      office=values['office-concierge-agent-url'],
+                                      db=values['employee-db-app-url'])}
+    for name, path, lang in files:
+        text = fill(open(os.path.join(net, *path), encoding='utf-8').read(), values)
+        pages[name] = f'# {name}\n\n`wsXX` を自分の番号に置き換えてから貼ります。\n\n```{lang}\n{text.rstrip()}\n```\n'
+
+    auth = ['--username', os.environ['ANYPOINT_USERNAME'], '--password', os.environ['ANYPOINT_PASSWORD'],
+            '--organization', bg1]
+
+    def cli(*cmd):
+        r = subprocess.run(['anypoint-cli-v4', *cmd, *auth], capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', shell=(os.name == 'nt'))
+        return r.returncode, (r.stdout + r.stderr).strip()
+
+    asset = f'{bg1}/{args.page_asset}/1.0.0'
+    s, _ = api.call('GET', f'/exchange/api/v2/assets/{bg1}/{args.page_asset}/1.0.0')
+    if s != 200:
+        rc, out = cli('exchange', 'asset', 'upload', asset, '--type', 'custom',
+                      '--name', 'New Hire Onboarding Hands-on',
+                      '--description', 'Values and files for the new hire onboarding hands-on')
+        print(f'asset {args.page_asset}: {"created" if rc == 0 else out[-300:]}')
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, text in pages.items():
+            path = os.path.join(tmp, name.replace('.', '-') + '.md')
+            open(path, 'w', encoding='utf-8').write(text)
+            rc, out = cli('exchange', 'asset', 'page', 'upload', asset, name, path)
+            print(f'page {name}: {"ok" if rc == 0 else out[-300:]}')
+    print(f'https://anypoint.mulesoft.com/exchange/{bg1}/{args.page_asset}/')
+
+
+def cmd_teardown(api, args):
+    """後片付け。アプリ → API インスタンス → Gateway → ユーザー → チーム → BG の順に消す。"""
+    root, bg1, appbg = ids(api, args)
+    plan = []  # (label, path) to DELETE
+    for bg in (bg1, appbg):
+        if not bg:
+            continue
+        env = sandbox_env(api, bg)
+        dep = f'/amc/application-manager/api/v2/organizations/{bg}/environments/{env}/deployments'
+        for d in api.get(dep).get('items', []):
+            plan.append((f'app {d["name"]}', f'{dep}/{d["id"]}'))
+        apis = f'/apimanager/api/v1/organizations/{bg}/environments/{env}/apis'
+        for a in api.get(apis).get('assets', []):
+            for i in a['apis']:
+                plan.append((f'api {a["assetId"]} {i["id"]}', f'{apis}/{i["id"]}'))
+        gws = f'/gatewaymanager/api/v1/organizations/{bg}/environments/{env}/gateways'
+        for g in api.get(gws)['content']:
+            plan.append((f'gateway {g["name"]}', f'{gws}/{g["id"]}'))
+    if args.date:
+        users = api.get(f'/accounts/api/organizations/{root}/users?search=_{args.date}&limit=100')['data']
+        for u in users:
+            if re.fullmatch(rf'ws\d\d_{args.date}', u['username']):
+                plan.append((f'user {u["username"]}', f'/accounts/api/organizations/{root}/users/{u["id"]}'))
+    team, _ = find_team(api, root, args.team)
+    if team:
+        plan.append((f'team {args.team}', f'/accounts/api/organizations/{root}/teams/{team}'))
+    for name, bg in ((args.bg1, bg1), (args.appbg, appbg)):
+        if bg:
+            # Exchange assets (networks, the Model Proxy asset, the hands-on page) go with the BG
+            plan.append((f'BG {name}', f'/accounts/api/organizations/{bg}'))
+    for label, _ in plan:
+        print(('delete ' if args.yes else 'would delete ') + label)
+    if not args.yes:
+        print('dry run; pass --yes to delete')
+        return
+    for i, (label, path) in enumerate(plan):
+        if label.startswith('gateway') and not plan[i - 1][0].startswith('gateway'):
+            time.sleep(30)  # let the apps and API instances leave the gateway first
+        tries = 20 if label.startswith('BG') else 1  # a BG can't go while its gateway is still being removed
+        for _ in range(tries):
+            s, body = api.call('DELETE', path)
+            if s in (200, 202, 204, 404):
+                break
+            if tries > 1:
+                time.sleep(30)
+        print(f'{label}: {s}' + ('' if s in (200, 202, 204, 404) else f' {body[:200]}'))
+
 def cmd_show(api, args):
     root, bg1, appbg = ids(api, args)
     print(f'root   {root}')
@@ -269,7 +440,7 @@ def cmd_show(api, args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('step', choices=['org', 'team', 'users', 'proxy-auth-off', 'show'])
+    p.add_argument('step', choices=['org', 'team', 'users', 'proxy-auth-off', 'page', 'show', 'teardown'])
     p.add_argument('--org', help='root org ID (default: the login user\'s org)')
     p.add_argument('--bg1', default='BG1')
     p.add_argument('--appbg', default='APPBG')
@@ -282,13 +453,17 @@ def main():
     p.add_argument('--date', help='YYYYMMDD of the workshop, used in user names')
     p.add_argument('--email', default='tmiyashita+{name}@salesforce.com')
     p.add_argument('--proxy', default='workshop-llm-proxy')
+    p.add_argument('--proxy-path', default='llm', help='Model Proxy base path')
+    p.add_argument('--page-asset', default='new-hire-onboarding-handson')
+    p.add_argument('--yes', action='store_true', help='teardown: really delete')
     p.add_argument('--out', default=os.path.join(HERE, '..', 'credentials.local.json'))
     args = p.parse_args()
     if args.step == 'users' and not args.date:
         p.error('users needs --date')
     api = Api(os.environ['ANYPOINT_USERNAME'], os.environ['ANYPOINT_PASSWORD'])
     {'org': cmd_org, 'team': cmd_team, 'users': cmd_users,
-     'proxy-auth-off': cmd_proxy_auth_off, 'show': cmd_show}[args.step](api, args)
+     'proxy-auth-off': cmd_proxy_auth_off, 'page': cmd_page, 'show': cmd_show,
+     'teardown': cmd_teardown}[args.step](api, args)
 
 
 if __name__ == '__main__':
