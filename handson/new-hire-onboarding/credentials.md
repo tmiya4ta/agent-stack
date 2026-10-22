@@ -1,7 +1,8 @@
 # クレデンシャルの一覧
 
-ここには名前と使い道だけを書く。値は `credentials.local.md` (git に入らない) に、同じ見出しで書く。
-参加者のパスワードは `setup/anypoint_setup.py users` が `credentials.local.json` (git に入らない) に書き出す。
+ここには名前と使い道だけを書く。値は環境ごとに `~/.config/handson/new-hire-onboarding/<環境名>/env.json` (git の外) に書き、
+`python ../env_page.py` で HTML にする ([hosting.md](hosting.md) の「環境のメモ」)。
+参加者のパスワードは `setup/anypoint_setup.py users` が環境のフォルダの `users.json` に書き出す。
 
 ## 主催者が持つもの (参加者には配らない)
 

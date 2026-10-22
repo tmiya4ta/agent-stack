@@ -3,16 +3,19 @@
 主催者が当日までに作っておくもの。参加者は BG1 / Sandbox で onboarding-employees の broker を配備し、
 APPBG に置いたメンバーの 3 アプリを URL で呼ぶ。メンバーのアプリは参加者に見せない。
 参加者は VS Code (Anypoint Code Builder) で配備する。その手順は別のチュートリアルにあるので、ここには環境の作り方だけを書く。
-値 (ログイン、URL、鍵) は [credentials.md](credentials.md) の一覧に名前を、`credentials.local.md` (git に入らない) に値を書く。
+値 (ログイン、URL、鍵) の名前は [credentials.md](credentials.md) に、値は環境ごとに `~/.config/handson/new-hire-onboarding/<環境名>/env.json` に書く (git の外)。
+環境名は `<日付>-<お客さん>` (例 `20261029-acme`)。同じハンズオンを別のお客さんに別の org でやるので、環境ごとにフォルダを分ける。
+`python ../env_page.py` が全部の env.json から HTML を作り、デスクトップの「handson 環境」から開ける (下の「環境のメモ」)。
 受講者が見るのは BG1 の Exchange の資産 `new-hire-onboarding-handson` (使う URL、クレデンシャル、コピペする 3 つのファイル)。
 
 ## Claude に頼むとき
 
 「new-hire-onboarding をセットアップして」と言われたら、**確認を挟まずに**下の「手順」の 1〜8 を順に流し、「確かめる」と「予行」(CLI) まで通して、
-結果 (作ったものの ID と URL、受講者のユーザー名とパスワード、Exchange のページの URL) を `credentials.local.md` に書いてから報告する。
+結果 (作ったものの ID と URL、受講者のユーザー名とパスワード、Exchange のページの URL) を env.json に書き、`python ../env_page.py` で HTML を作り直してから報告する。
 聞いてよいのは、次のどれかが分からないときだけ:
 
-- 管理者のユーザー名とパスワード、LLM の行き先の URL と鍵 (`credentials.local.md` に無ければ)
+- 管理者のユーザー名とパスワード、LLM の行き先の URL と鍵 (その環境の env.json に無ければ)
+- お客さんの名前 (環境名に使う。分からなければ日付だけにして、あとで名前を変える)
 - ハンズオンの日付 (ユーザー名の `wsXX_<日付>`) と人数 (既定は ws00 + 受講者 5 人)
 
 「new-hire-onboarding を片付けて」と言われたら、下の「後片付け」を、まず消すものの一覧を出して見せてから `--yes` で流す (消すと戻せないので、ここだけは確認する)。
@@ -51,7 +54,7 @@ cd handson/new-hire-onboarding/setup
 |---|---|---|---|
 | 1 | BG1 と APPBG、vCore (APPBG 0.3、BG1 に残り全部)、BG1 に Managed Gateway Small 1 つ、Gateway `agent-network-shared-gw` (us-east-2、最新の LTS、Small) | `python anypoint_setup.py org` | 1〜2 分 |
 | 2 | チーム workshop。`/accounts/api/roles` の全ロールを BG1 / Sandbox に付ける。APPBG には付けない | `python anypoint_setup.py team` | 15 分ほど (50 回ごとに 429 で待つ) |
-| 3 | 参加者のユーザー `wsXX_<日付>`。チーム workshop に入れる。パスワードは `../credentials.local.json` に出る | `python anypoint_setup.py users --count 6 --date 20261029` | 1 分 |
+| 3 | 参加者のユーザー `wsXX_<日付>`。チーム workshop に入れる。パスワードは `--out` (既定は環境のフォルダの `users.json`) に出る | `python anypoint_setup.py users --count 6 --date 20261029 --env 20261029-acme` | 1 分 |
 | 4 | メンバーの 3 アプリを APPBG / Sandbox に配備 (下の「メンバーのアプリ」) | `yc harness deploy ...` | 1 つ 3〜5 分 |
 | 5 | Model Proxy `workshop-llm-proxy` を BG1 に作る | `LLM_TOKEN=<鍵> NODE_PATH=<node_modules> node model-proxy.js` | 2 分 |
 | 6 | Model Proxy の Client ID Enforcement を無効にする (認証なし) | `python anypoint_setup.py proxy-auth-off` | 1 分 (反映に 1 分) |
@@ -60,7 +63,7 @@ cd handson/new-hire-onboarding/setup
 
 ws00 は主催者の予行用にする (`--count 6` なら ws00 と参加者 5 人)。
 メールの既定は `tmiyashita+{name}@salesforce.com` (`--email` で変える)。org のユーザー名は Anypoint 全体で一意なので、日付で分ける。
-作ったものの ID と URL は `show` で出るので、`credentials.local.md` に写す。
+作ったものの ID と URL は `show` で出るので、env.json に写す。
 
 ### メンバーのアプリ
 
@@ -82,7 +85,7 @@ for u in employee-db-app it-provisioning-agent office-concierge-agent; do
 done
 ```
 
-出てきた URL を `credentials.local.md` に書く。broker の `exchange.json` に入れるのは、A2A は末尾 `/` 付きの URL、employee-db-app は base URL (`/mcp` は付けない)。
+出てきた URL を env.json に書く。broker の `exchange.json` に入れるのは、A2A は末尾 `/` 付きの URL、employee-db-app は base URL (`/mcp` は付けない)。
 
 ### Model Proxy
 
@@ -142,7 +145,7 @@ Model Proxy に認証が無いので `openAI.*` は `none` でよい。broker �
 
 ## 受講者に渡すもの
 
-- 1 人ずつ: ユーザー名 (`wsXX_<日付>`) とパスワード (`credentials.local.json`)
+- 1 人ずつ: ユーザー名 (`wsXX_<日付>`) とパスワード (環境のフォルダの `users.json`)
 - 全員に: Exchange のページの URL (`page` が最後に出す。`https://anypoint.mulesoft.com/exchange/<BG1 の ID>/new-hire-onboarding-handson/`)
 
 Exchange のページ (手順 7) に載せるもの:
@@ -165,7 +168,20 @@ python anypoint_setup.py teardown --date <日付> --yes    # 消す
 BG1 と APPBG の Sandbox のアプリ (受講者の broker とメンバーの 3 つ) → API インスタンス (broker の connection と Model Proxy) → Gateway →
 ユーザー `wsNN_<日付>` → チーム workshop → BG1 と APPBG、の順に消す。Exchange の資産 (受講者のネットワーク、Model Proxy、ハンズオンのページ) は BG と一緒に消える。
 BG は Gateway が消えきるまで消せないので、30 秒おきに試す (最大 10 分)。vCore と Managed Gateway の枠は root に戻る。
-yc の変数プロファイル `nho-<日付>` と `credentials.local.*` は手で消す。
+yc の変数プロファイル `nho-<日付>` は手で消す。env.json は消さずに `"status": "done"` にして `python ../env_page.py` を流す (一覧の「片付けた環境」に移る)。
+
+## 環境のメモ
+
+環境ごとの URL とクレデンシャルは `~/.config/handson/new-hire-onboarding/<環境名>/env.json` に置き、[../env_page.py](../env_page.py) で HTML にする。
+
+```bash
+python ../env_page.py               # 全部の env.json から HTML を作り直す
+python ../env_page.py --shortcut    # 初回だけ。デスクトップに「handson 環境」(~/.config/handson/index.html へのショートカット) を作る
+```
+
+env.json は `sections` の下に `{"label", "value"}` を並べる。パスワードや鍵は `"secret": true` (画面では伏せて、「表示」と「コピー」)、URL は `"link": true`。
+形は env_page.py の先頭に書いてある。載せるもの: 受講者に渡すもの (Exchange のページ、BG / Environment)、受講者のユーザーとパスワード、管理者、
+事前テスト用のリモートデスクトップ、BG と Gateway の ID と URL、メンバーのアプリの URL、LLM (Model Proxy の URL、行き先、鍵)。
 
 ## Gateway の名前
 
@@ -200,4 +216,4 @@ BG1 には private space を作らないので `agent-network-shared-gw` にす�
 
 | 回 | org | 状態 |
 |---|---|---|
-| 2026-10-29 | `anypoint-cbp-1791266292` (US)。ID と URL は `credentials.local.md` | 2026-10-21〜22 に 1〜8 を済ませた (BG1 の vCore は 0.5)。ws00 で broker を CLI で配備して全部成功の分岐を確認。Exchange のページは ws00 から見える。teardown は一覧を出すところまで (消すのは未実行) |
+| 2026-10-29 | `anypoint-cbp-1791266292` (US)。ID と URL は `~/.config/handson/new-hire-onboarding/20261029/env.json` | 2026-10-21〜22 に 1〜8 を済ませた (BG1 の vCore は 0.5)。ws00 で broker を CLI で配備して全部成功の分岐を確認。Exchange のページは ws00 から見える。teardown は一覧を出すところまで (消すのは未実行) |

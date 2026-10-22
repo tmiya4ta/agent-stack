@@ -3,14 +3,14 @@
     export ANYPOINT_USERNAME=... ANYPOINT_PASSWORD=...
     python anypoint_setup.py org                      # BG1 / APPBG、vCore、Gateway
     python anypoint_setup.py team                     # チーム workshop と、BG1 / Sandbox への全ロール
-    python anypoint_setup.py users --count 6 --date 20261029 --email tmiyashita+{name}@salesforce.com
+    python anypoint_setup.py users --count 6 --date 20261029 --env 20261029-acme --email tmiyashita+{name}@salesforce.com
     python anypoint_setup.py proxy-auth-off           # Model Proxy の Client ID Enforcement を無効にする
     python anypoint_setup.py page                     # 受講者が見る Exchange のページ (URL と、コピペする 3 つのファイル)
     python anypoint_setup.py show                     # 作ったものの ID と URL
     python anypoint_setup.py teardown --date 20261029 [--yes]   # 後片付け。--yes が無ければ消すものを出すだけ
 
 すでにあるもの (同じ名前の BG、Gateway、チーム、ユーザー) は作り直さない。
-ユーザーのパスワードは --out (既定 ../credentials.local.json、git に入らない) に書く。
+ユーザーのパスワードは --out (既定 ~/.config/handson/new-hire-onboarding/<--env>/users.json、git の外) に書く。
 """
 import argparse
 import json
@@ -456,10 +456,15 @@ def main():
     p.add_argument('--proxy-path', default='llm', help='Model Proxy base path')
     p.add_argument('--page-asset', default='new-hire-onboarding-handson')
     p.add_argument('--yes', action='store_true', help='teardown: really delete')
-    p.add_argument('--out', default=os.path.join(HERE, '..', 'credentials.local.json'))
+    p.add_argument('--env', help='environment name for ~/.config/handson/new-hire-onboarding/<env>/ (default: --date)')
+    p.add_argument('--out', help='users: where to write passwords (default: <env folder>/users.json)')
     args = p.parse_args()
     if args.step == 'users' and not args.date:
         p.error('users needs --date')
+    if args.step == 'users' and not args.out:
+        envdir = os.path.join(os.path.expanduser('~'), '.config', 'handson', 'new-hire-onboarding', args.env or args.date)
+        os.makedirs(envdir, exist_ok=True)
+        args.out = os.path.join(envdir, 'users.json')
     api = Api(os.environ['ANYPOINT_USERNAME'], os.environ['ANYPOINT_PASSWORD'])
     {'org': cmd_org, 'team': cmd_team, 'users': cmd_users,
      'proxy-auth-off': cmd_proxy_auth_off, 'page': cmd_page, 'show': cmd_show,
