@@ -26,7 +26,7 @@ APPBG に置いたメンバーの 3 アプリを URL で呼ぶ。メンバーの
 root org
   ├─ BG1 (Sandbox)       参加者の場所。チーム workshop に BG1 / Sandbox の全ロール
   │    ├─ Managed Omni Gateway agent-network-shared-gw   broker と API インスタンスの配備先
-  │    ├─ Model Proxy workshop-llm-proxy (/llm)           認証なし。行き先は主催者の LLM
+  │    ├─ Model Proxy workshop-llm-proxy (/llm)           JWT (HS256、全員同じ 1 つ)。行き先は主催者の LLM
   │    └─ 参加者ごとの broker  onboarding-broker-wsXX     (参加者が配備する)
   └─ APPBG (Sandbox)     主催者だけ。チーム workshop は付けない (見えなくする)
        ├─ employee-db-app          (MCP)
@@ -57,8 +57,8 @@ cd handson/new-hire-onboarding/setup
 | 3 | 参加者のユーザー `wsXX_<日付>`。チーム workshop に入れる。パスワードは `--out` (既定は環境のフォルダの `users.json`) に出る | `python anypoint_setup.py users --count 6 --date 20261029 --env 20261029-acme` | 1 分 |
 | 4 | メンバーの 3 アプリを APPBG / Sandbox に配備 (下の「メンバーのアプリ」) | `yc harness deploy ...` | 1 つ 3〜5 分 |
 | 5 | Model Proxy `workshop-llm-proxy` を BG1 に作る | `LLM_TOKEN=<鍵> NODE_PATH=<node_modules> node model-proxy.js` | 2 分 |
-| 6 | Model Proxy の Client ID Enforcement を無効にする (認証なし) | `python anypoint_setup.py proxy-auth-off` | 1 分 (反映に 1 分) |
-| 7 | 受講者が見る Exchange のページ。BG1 の custom 資産 `new-hire-onboarding-handson` に、使う値と、値を埋めた `exchange.json`、`agent-network.yaml`、`broker1.agent` を載せる | `python anypoint_setup.py page` | 1 分 |
+| 6 | Model Proxy の認証を JWT にする。Client ID Enforcement を無効にし、JWT Validation (HS256) を付ける。秘密鍵と受講者用の JWT は環境のフォルダの `llm-jwt.json` に出る (期限は `--jwt-days`、既定 90 日) | `python anypoint_setup.py proxy-jwt --env <環境名>` | 1 分 (反映に 1〜2 分) |
+| 7 | 受講者が見る Exchange のページ。BG1 の custom 資産 `new-hire-onboarding-handson` に、使う値と、値を埋めた `exchange.json`、`agent-network.yaml`、`broker1.agent` を載せる | `python anypoint_setup.py page --env <環境名>` | 1 分 |
 | 8 | 確かめる (下の「確かめる」と「予行」) | `python anypoint_setup.py show` と curl | 10 分 |
 
 ws00 は主催者の予行用にする (`--count 6` なら ws00 と参加者 5 人)。
@@ -99,7 +99,10 @@ done
 3. Routing は Model-based。Provider は **OpenAI** (行き先が `Authorization: Bearer` を受けるので)。
    Destination URL は `https://llm-proxy.workshops.mulesoft.com/openai/v1/` (末尾の `/` が要る)、API Key は Static で鍵
 4. 既定で Client ID Enforcement が付く (ほかに cors、llm-proxy-core、model-based-routing など 8 つ)。
-   無効にすると (`PATCH .../apis/<id>/policies/<policyId>` に `{"disabled":true}`)、認証なしで通る。無効にしたポリシーは一覧から消える
+   `proxy-jwt` がこれを無効にし (`PATCH .../apis/<id>/policies/<policyId>` に `{"disabled":true}`。無効にしたポリシーは一覧から消える)、
+   同じ order 3 に JWT Validation を付ける: signingMethod hmac、signingKeyLength 256、jwtKeyOrigin text (秘密鍵)、
+   jwtOrigin `httpBearerAuthenticationHeader`、skipClientIdValidation true、mandatoryExpClaim true。
+   JWT の中身は `sub` と `client_id` が `new-hire-onboarding-handson`、`exp` 付き
 
 1 ページ目の Continue で `POST https://omni.mulesoft.com/api/llm-proxies/create` (Exchange の資産、type llm)、
 Add Model Proxy で `.../api/llm-proxies/deploy` (API Manager のインスタンス) が呼ばれる。
@@ -110,8 +113,8 @@ Add Model Proxy で `.../api/llm-proxies/deploy` (API Manager のインスタン
 ```bash
 python anypoint_setup.py show        # BG、Gateway の URL、アプリ、API インスタンス
 
-# Model Proxy (認証なし)
-curl -s <Gateway の URL>/llm/chat/completions -H 'Content-Type: application/json' \
+# Model Proxy。JWT 無しは 400 JWT Token is required.、違う JWT は 401 Invalid token.、llm-jwt.json の token なら 200
+curl -s <Gateway の URL>/llm/chat/completions -H 'Content-Type: application/json' -H "Authorization: Bearer <JWT>" \
   -d '{"model":"gpt-5-mini","messages":[{"role":"user","content":"say hi"}]}'
 ```
 
@@ -128,7 +131,7 @@ cp -r ../onboarding-employees ~/work/ws00-net && cd ~/work/ws00-net
 sed -i -e 's/{{-suffix}}/-ws00/g' -e 's/{{_suffix}}/_ws00/g' -e 's/{{business-group-id}}/<BG1 の ID>/g' \
   -e 's#{{it-provisioning-agent-url}}#<URL>/#g' -e 's#{{office-concierge-agent-url}}#<URL>/#g' \
   -e 's#{{employee-db-app-url}}#<URL>#g' -e 's#{{llm-base-url}}#<Gateway の URL>/llm#g' \
-  -e 's/{{llm-client-id}}/none/g' -e 's/{{llm-client-secret}}/none/g' -e 's/{{llm-api-key}}/none/g' \
+  -e 's/{{llm-client-id}}/none/g' -e 's/{{llm-client-secret}}/none/g' -e 's/{{llm-api-key}}/<JWT>/g' \
   exchange.json agent-network.yaml brokers/broker1.agent
 A="--username ws00_<日付> --password <パスワード> --organization <BG1 の ID> --environment Sandbox"
 anypoint-cli-v4 agent-network project build
@@ -136,11 +139,11 @@ anypoint-cli-v4 agent-network project publish $A
 anypoint-cli-v4 agent-network project deploy $A -g agent-network-shared-gw \
   --property it-provisioning-agent-ws00.url:<URL>/ --property office-concierge-agent-ws00.url:<URL>/ \
   --property employee-db-server-ws00.url:<URL> --property openai-llm-ws00.url:<Gateway の URL>/llm \
-  --property openAI.clientId:none --property openAI.clientSecret:none --property openAI.apiKey:none < /dev/null
+  --property openAI.clientId:none --property openAI.clientSecret:none --property openAI.apiKey:<JWT> < /dev/null
 ```
 
 変数を全部 `--property` で渡さないと、deploy は入力待ちで止まり、900 秒後に `errorCode: 3018` になる (`yes ''` を流し込んでも進まない)。
-Model Proxy に認証が無いので `openAI.*` は `none` でよい。broker の呼び方は [onboarding-employees の README](onboarding-employees/README.md) の curl
+`openAI.apiKey` は `llm-jwt.json` の token (broker が `Authorization: Bearer` で送る)。`openAI.clientId` / `clientSecret` は使わないので `none` でよい。broker の呼び方は [onboarding-employees の README](onboarding-employees/README.md) の curl
 (`<Gateway の URL>/onboarding-broker-ws00/`、`SendMessage`、`A2A-Version: 1.0`)。全部成功なら `TASK_STATE_COMPLETED` で、社員 ID、PC、入館証が返る。
 
 ## 受講者に渡すもの
@@ -152,8 +155,8 @@ Exchange のページ (手順 7) に載せるもの:
 
 | ページ | 中身 |
 |---|---|
-| home | BG1 の名前と ID、Sandbox、Gateway の名前、メンバーの 3 つの URL、Model Proxy の URL、クレデンシャル (`openAI.*` は `none`)、broker の呼び方 |
-| exchange.json、agent-network.yaml、broker1.agent | `onboarding-employees/` のファイルの `{{...}}` を埋めたもの。suffix は `-wsXX` / `_wsXX` のままにして、受講者が自分の番号に置き換える |
+| home | BG1 の名前と ID、Sandbox、Gateway の名前、メンバーの 3 つの URL、Model Proxy の URL、クレデンシャル (`openAI.apiKey` に JWT と期限、`openAI.clientId` / `clientSecret` は `none`)、broker の呼び方 |
+| exchange.json、agent-network.yaml、broker1.agent | `onboarding-employees/` のファイルの `{{...}}` を埋めたもの (`{{llm-api-key}}` は JWT)。suffix は `-wsXX` / `_wsXX` のままにして、受講者が自分の番号に置き換える |
 
 全員が BG1 / Sandbox / 同じ Gateway に配備するので、Exchange の assetId、broker の名前、connection (= API インスタンス) の名前がぶつかる。
 そのために `wsXX` を自分の番号にしてもらう。`onboarding-employees/` のファイルを直したら `page` を流し直す (同じ資産のページを上書きする)。
@@ -205,6 +208,9 @@ BG1 には private space を作らないので `agent-network-shared-gw` にす�
 ## 気を付けること
 
 - vCore: root の `reassigned` に、子の BG が無くても使えない分が入っていることがある (2026-10-21 は 0.2)。`org` は 400 の「only N vCores available」を見て BG1 の分を減らす。
+- JWT Validation の jwtOrigin を `customExpression` にして `Authorization` と `api-key` の両方から読ませようとしたら、Flex 1.12.9 では
+  JWT 無しも偽物も通った (式が効かず、ポリシーが素通しになる)。標準の `httpBearerAuthenticationHeader` にしたら効いた。
+- `jwt-validation` の最新 (0.12.0) は Flex 1.12.9 に実装が無く 400。`proxy-jwt` は新しい版から順に試す (1.12.9 では 0.11.1)。
 - Gateway を API で作るときは `configuration` (ingress、logging、properties) が要る。`runtimeVersion` は `latest` だと 400 で、版の番号を入れる。shared space の public URL は空で送ると Gateway が付けてくれる。
 - チームのロールは、Sandbox の環境スコープ、だめなら BG1 のスコープで付ける。org で使えないロールは 403 で付かない。
   2026-10-21 は環境スコープ 81、BG スコープ 39 が付き、224 が 403 (Organization Administrator、Exchange Administrator、MuleSoft Agent AI User、Application Create / Owner の系統など)。

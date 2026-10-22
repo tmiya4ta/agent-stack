@@ -4,8 +4,8 @@
     python anypoint_setup.py org                      # BG1 / APPBG、vCore、Gateway
     python anypoint_setup.py team                     # チーム workshop と、BG1 / Sandbox への全ロール
     python anypoint_setup.py users --count 6 --date 20261029 --env 20261029-acme --email tmiyashita+{name}@salesforce.com
-    python anypoint_setup.py proxy-auth-off           # Model Proxy の Client ID Enforcement を無効にする
-    python anypoint_setup.py page                     # 受講者が見る Exchange のページ (URL と、コピペする 3 つのファイル)
+    python anypoint_setup.py proxy-jwt --env 20261029-acme   # Model Proxy の認証を Client ID から JWT (HS256) に替える
+    python anypoint_setup.py page --env 20261029-acme # 受講者が見る Exchange のページ (URL、JWT、コピペする 3 つのファイル)
     python anypoint_setup.py show                     # 作ったものの ID と URL
     python anypoint_setup.py teardown --date 20261029 [--yes]   # 後片付け。--yes が無ければ消すものを出すだけ
 
@@ -13,6 +13,9 @@
 ユーザーのパスワードは --out (既定 ~/.config/handson/new-hire-onboarding/<--env>/users.json、git の外) に書く。
 """
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -230,25 +233,82 @@ def cmd_users(api, args):
     print(f'passwords: {args.out}')
 
 
-def cmd_proxy_auth_off(api, args):
+def env_dir(args):
+    d = os.path.join(os.path.expanduser('~'), '.config', 'handson', 'new-hire-onboarding', args.env or args.date or '')
+    if not (args.env or args.date):
+        sys.exit('--env (or --date) is required')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def llm_jwt(args, create=False):
+    """the HS256 secret and the one token every participant puts in openAI.apiKey (<env folder>/llm-jwt.json)."""
+    path = os.path.join(env_dir(args), 'llm-jwt.json')
+    if os.path.exists(path):
+        return json.load(open(path, encoding='utf-8'))
+    if not create:
+        sys.exit(f'{path} not found; run proxy-jwt first')
+    b64 = lambda x: base64.urlsafe_b64encode(x).rstrip(b'=').decode()
+    secret = secrets.token_urlsafe(32)
+    exp = int(time.time()) + args.jwt_days * 86400
+    head = b64(json.dumps({'alg': 'HS256', 'typ': 'JWT'}, separators=(',', ':')).encode())
+    body = b64(json.dumps({'sub': args.page_asset, 'client_id': args.page_asset, 'iat': int(time.time()), 'exp': exp},
+                          separators=(',', ':')).encode())
+    sig = b64(hmac.new(secret.encode(), f'{head}.{body}'.encode(), hashlib.sha256).digest())
+    jwt = {'hs256Secret': secret, 'token': f'{head}.{body}.{sig}',
+           'exp': time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(exp))}
+    json.dump(jwt, open(path, 'w', encoding='utf-8'), indent=2)
+    print(f'new JWT (expires {jwt["exp"]}): {path}')
+    return jwt
+
+
+def cmd_proxy_jwt(api, args):
+    """Client ID Enforcement を無効にし、JWT Validation (HS256) を同じ位置 (order 3) に付ける。"""
     _, bg1, _ = ids(api, args)
     env = sandbox_env(api, bg1)
     base = f'/apimanager/api/v1/organizations/{bg1}/environments/{env}/apis'
     inst = [i for a in api.get(base)['assets'] if a['assetId'] == args.proxy for i in a['apis']]
     if not inst:
         sys.exit(f'model proxy {args.proxy} not found; create it with model-proxy.js first')
-    policies = api.get(f'{base}/{inst[0]["id"]}/policies')
+    pol = f'{base}/{inst[0]["id"]}/policies'
+    policies = api.get(pol)
     policies = policies.get('policies', policies)
-    for p in policies:
-        if ((p.get('template') or {}).get('assetId') or p.get('assetId')) == 'client-id-enforcement':
-            if p.get('disabled'):
-                print('client-id-enforcement is already disabled')
-                return
-            s, body = api.call('PATCH', f'{base}/{inst[0]["id"]}/policies/{p["policyId"]}', {'disabled': True})
-            print(f'client-id-enforcement disabled: {s}')
-            return
+    kind = lambda p: (p.get('template') or {}).get('assetId') or p.get('assetId')
     # a disabled policy drops out of this list
-    print('client-id-enforcement not in the active policies (already disabled)')
+    for p in policies:
+        if kind(p) == 'client-id-enforcement' and not p.get('disabled'):
+            s, _ = api.call('PATCH', f'{pol}/{p["policyId"]}', {'disabled': True})
+            print(f'client-id-enforcement disabled: {s}')
+    jwt = llm_jwt(args, create=True)
+    cfg = {
+        # the broker sends openAI.apiKey as "Authorization: Bearer"; a customExpression here did not take effect
+        # on Flex 1.12.9 (every request passed), so stay with the standard origin
+        'jwtOrigin': 'httpBearerAuthenticationHeader', 'jwtExpression': "#[attributes.headers['jwt']]",
+        'signingMethod': 'hmac', 'signingKeyLength': 256, 'jwtKeyOrigin': 'text', 'textKey': jwt['hs256Secret'],
+        'jwksUrl': 'http://your-jwks-service.example:80/base/path', 'jwksServiceTimeToLive': 60,
+        'jwksServiceConnectionTimeout': 10000,
+        'customKeyExpression': "#[authentication.properties['key_to_your_public_pem_certificate']]",
+        'skipClientIdValidation': True, 'clientIdExpression': '#[vars.claimSet.client_id]',
+        'validateAudClaim': False, 'mandatoryAudClaim': False, 'supportedAudiences': 'aud.example.com',
+        'mandatoryExpClaim': True, 'mandatoryNbfClaim': False, 'validateCustomClaim': False,
+    }
+    current = next((p for p in policies if kind(p) == 'jwt-validation'), None)
+    if current:
+        s, body = api.call('PATCH', f'{pol}/{current["policyId"]}', {'configurationData': cfg})
+        print(f'jwt-validation updated: {s}')
+        return
+    # the newest template may have no implementation for this gateway version (400); step down
+    templates = api.get(f'/apimanager/xapi/v1/organizations/{bg1}/exchange-policy-templates'
+                        f'?includeAllVersions=true&environmentId={env}&apiInstanceId={inst[0]["id"]}')
+    versions = sorted({t['version'] for t in templates if t.get('assetId') == 'jwt-validation'},
+                      key=lambda v: [int(x) for x in v.split('.')], reverse=True)
+    for v in versions:
+        s, body = api.call('POST', pol, {'configurationData': cfg, 'groupId': '68ef9520-24e9-4cf2-b2f5-620025690913',
+                                         'assetId': 'jwt-validation', 'assetVersion': v, 'order': 3})
+        if s == 201:
+            print(f'jwt-validation {v} added (takes a minute or two to reach the gateway)')
+            return
+    sys.exit(f'could not add jwt-validation: {s} {body[:200]}')
 
 
 def member_urls(api, appbg):
@@ -298,7 +358,10 @@ PAGE_HOME = '''# 新入社員オンボーディング ハンズオン
 | 名前 | 値 |
 |---|---|
 | Anypoint のログイン | 配られたユーザー名とパスワード |
-| `openAI.clientId` / `openAI.clientSecret` / `openAI.apiKey` | `none` (LLM の Model Proxy は認証なし) |
+| `openAI.apiKey` | `{jwt}` |
+| `openAI.clientId` / `openAI.clientSecret` | `none` (使わない) |
+
+`openAI.apiKey` は LLM (Model Proxy) の JWT です (全員同じ。期限 {jwt_exp})。broker が `Authorization: Bearer` で送ります。
 
 ## ファイル
 
@@ -324,6 +387,7 @@ def cmd_page(api, args):
     gw = gateway_url(api, bg1, env, args.gateway)
     urls = member_urls(api, appbg)
     llm = f'{gw}/{args.proxy_path}'
+    jwt = llm_jwt(args)
     values = {
         # every participant shares BG1 / Sandbox / the gateway, so names carry the participant's number
         '-suffix': '-wsXX', '_suffix': '_wsXX',
@@ -332,8 +396,8 @@ def cmd_page(api, args):
         'office-concierge-agent-url': urls['office-concierge-agent'] + '/',
         'employee-db-app-url': urls['employee-db-app'],
         'llm-base-url': llm,
-        # the Model Proxy has no authentication, so these are never checked
-        'llm-client-id': 'none', 'llm-client-secret': 'none', 'llm-api-key': 'none',
+        # the Model Proxy checks only the JWT (openAI.apiKey); client id / secret are not used
+        'llm-client-id': 'none', 'llm-client-secret': 'none', 'llm-api-key': jwt['token'],
     }
     net = os.path.join(HERE, '..', 'onboarding-employees')
     files = [('exchange.json', ['exchange.json'], 'json'),
@@ -342,7 +406,7 @@ def cmd_page(api, args):
     pages = {'home': PAGE_HOME.format(bg_name=args.bg1, bg1=bg1, gateway=args.gateway, gw=gw, llm=llm,
                                       it=values['it-provisioning-agent-url'],
                                       office=values['office-concierge-agent-url'],
-                                      db=values['employee-db-app-url'])}
+                                      db=values['employee-db-app-url'], jwt=jwt['token'], jwt_exp=jwt['exp'])}
     for name, path, lang in files:
         text = fill(open(os.path.join(net, *path), encoding='utf-8').read(), values)
         pages[name] = f'# {name}\n\n`wsXX` を自分の番号に置き換えてから貼ります。\n\n```{lang}\n{text.rstrip()}\n```\n'
@@ -366,7 +430,10 @@ def cmd_page(api, args):
         for name, text in pages.items():
             path = os.path.join(tmp, name.replace('.', '-') + '.md')
             open(path, 'w', encoding='utf-8').write(text)
-            rc, out = cli('exchange', 'asset', 'page', 'upload', asset, name, path)
+            for _ in range(3):  # the upload sometimes drops the connection (ECONNRESET)
+                rc, out = cli('exchange', 'asset', 'page', 'upload', asset, name, path)
+                if rc == 0:
+                    break
             print(f'page {name}: {"ok" if rc == 0 else out[-300:]}')
     print(f'https://anypoint.mulesoft.com/exchange/{bg1}/{args.page_asset}/')
 
@@ -440,7 +507,7 @@ def cmd_show(api, args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('step', choices=['org', 'team', 'users', 'proxy-auth-off', 'page', 'show', 'teardown'])
+    p.add_argument('step', choices=['org', 'team', 'users', 'proxy-jwt', 'page', 'show', 'teardown'])
     p.add_argument('--org', help='root org ID (default: the login user\'s org)')
     p.add_argument('--bg1', default='BG1')
     p.add_argument('--appbg', default='APPBG')
@@ -455,6 +522,7 @@ def main():
     p.add_argument('--proxy', default='workshop-llm-proxy')
     p.add_argument('--proxy-path', default='llm', help='Model Proxy base path')
     p.add_argument('--page-asset', default='new-hire-onboarding-handson')
+    p.add_argument('--jwt-days', type=int, default=90, help='proxy-jwt: lifetime of a new JWT')
     p.add_argument('--yes', action='store_true', help='teardown: really delete')
     p.add_argument('--env', help='environment name for ~/.config/handson/new-hire-onboarding/<env>/ (default: --date)')
     p.add_argument('--out', help='users: where to write passwords (default: <env folder>/users.json)')
@@ -467,7 +535,7 @@ def main():
         args.out = os.path.join(envdir, 'users.json')
     api = Api(os.environ['ANYPOINT_USERNAME'], os.environ['ANYPOINT_PASSWORD'])
     {'org': cmd_org, 'team': cmd_team, 'users': cmd_users,
-     'proxy-auth-off': cmd_proxy_auth_off, 'page': cmd_page, 'show': cmd_show,
+     'proxy-jwt': cmd_proxy_jwt, 'page': cmd_page, 'show': cmd_show,
      'teardown': cmd_teardown}[args.step](api, args)
 
 

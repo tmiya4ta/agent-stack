@@ -11,6 +11,7 @@
 | Anypoint の管理者 | BG、vCore、Gateway、チーム、ユーザー、APPBG への配備 |
 | 事前テスト用のリモートデスクトップ | Guacamole の URL とログイン。VS Code での予行に使う |
 | LLM の行き先 | LLM Proxy の Target URL と鍵。APPBG の A2A の 2 つの `llm.proxy.host` と `llm.apiKey` にも使う (直接向ける) |
+| Model Proxy の JWT の秘密鍵 | HS256。JWT Validation のポリシーに入れる。受講者用の JWT を作り直すときに使う (環境のフォルダの `llm-jwt.json`) |
 | メンバーのアプリの URL | APPBG に配備した 3 つの public endpoint。broker の `exchange.json` に入れる |
 
 ## 参加者が主催者から受け取るもの
@@ -19,4 +20,4 @@
 |---|---|
 | Anypoint のログイン | ユーザー名 (`wsXX_<日付>`) とパスワード。BG1 / Sandbox |
 | suffix | `wsXX` |
-| Exchange のページ | BG1 の `new-hire-onboarding-handson`。メンバーの 3 つの URL、LLM (Model Proxy) の URL (認証なし)、`openAI.*` の値 (`none`)、コピペする 3 つのファイル |
+| Exchange のページ | BG1 の `new-hire-onboarding-handson`。メンバーの 3 つの URL、LLM (Model Proxy) の URL、`openAI.apiKey` に入れる JWT (全員同じ 1 つ)、`openAI.clientId` / `clientSecret` の値 (`none`)、コピペする 3 つのファイル |
