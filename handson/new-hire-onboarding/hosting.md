@@ -96,16 +96,37 @@ done
 
 1. 左下で BG1 を選び、**Model Proxies > Add Model Proxy**
 2. Proxy Name `workshop-llm-proxy`、Base Path `llm`、Format は **OpenAI** (後から変えられない)、Environment Sandbox、Omni Gateway `agent-network-shared-gw`、Port 8081
-3. Routing は Model-based。Provider は **OpenAI** (行き先が `Authorization: Bearer` を受けるので)。
-   Destination URL は `https://llm-proxy.workshops.mulesoft.com/openai/v1/` (末尾の `/` が要る)、API Key は Static で鍵
+3. Routing は Model-based で、経路を 2 つ置く (行き先はどちらも渡された LLM。`Authorization: Bearer` でも `api-key` でも通る):
+
+   | 経路 | Provider | Request model override | Destination URL | ほか |
+   |---|---|---|---|---|
+   | A `workshop-llm` | **OpenAI** | Use model from request | `https://llm-proxy.workshops.mulesoft.com/openai/v1/` (末尾の `/` が要る) | API Key は Static で鍵 |
+   | B `workshop-llm-4o-mini` | **Azure OpenAI** | GPT 4o Mini | `https://llm-proxy.workshops.mulesoft.com/` | API Key は Static で鍵、Deployment ID `gpt-4o-mini`、API Version `2024-10-21` |
+
+   Fallback は経路 A、モデル GPT 5 Mini。
+   渡された LLM で使えるのはチャットが `gpt-5-mini` と `gpt-4o-mini`、埋め込みが `text-embedding-3-small` だけ
+   (2026-10-22 に `/models` のカタログの 355 個の名前を全部呼んで確かめた。ほかは 404)。なので経路はモデルごとに 2 つ
 4. 既定で Client ID Enforcement が付く (ほかに cors、llm-proxy-core、model-based-routing など 8 つ)。
    `proxy-jwt` がこれを無効にし (`PATCH .../apis/<id>/policies/<policyId>` に `{"disabled":true}`。無効にしたポリシーは一覧から消える)、
    同じ order 3 に JWT Validation を付ける: signingMethod hmac、signingKeyLength 256、jwtKeyOrigin text (秘密鍵)、
    jwtOrigin `httpBearerAuthenticationHeader`、skipClientIdValidation true、mandatoryExpClaim true。
    JWT の中身は `sub` と `client_id` が `new-hire-onboarding-handson`、`exp` 付き
 
+**モデル名にはプロバイダを付ける**: `openai/gpt-5-mini` は経路 A、`azureopenai/gpt-4o-mini` は経路 B に行く。
+プロバイダが 2 つあると、`gpt-5-mini` のような名前だけでは 400 (`Model 'gpt-5-mini' is not in the known unique model map and multiple
+providers are configured`) になり、Fallback を付けても変わらない。`azure/...` も 400 (`Unsupported provider 'azure'`)。
+そのため broker のモデル名 (`broker1.agent` の `model:` と `agent-network.yaml` の `llms.*.metadata.models`) を `openai/gpt-5-mini` にする。
+`page` が受講者のファイルでそこを置き換える (`--llm-model`)。リポジトリのファイルは `gpt-5-mini` のまま (Model Proxy を通さない配備もあるので)。
+
+**semantic caching は付けられない**: Advanced Options の「Enable semantic caching」には、先に Semantic Services で
+Semantic Caching Service を作る必要がある。その手順は Embedding → Vector → Object → Advanced → Review で、
+Embedding は渡された LLM の `text-embedding-3-small` (`https://llm-proxy.workshops.mulesoft.com/openai/v1/embeddings`) で足りるが、
+Vector の保存先は Azure AI Search しか選べず、渡された LLM と token には無い (2026-10-22)。Azure AI Search を用意できたら付けられる。
+
 1 ページ目の Continue で `POST https://omni.mulesoft.com/api/llm-proxies/create` (Exchange の資産、type llm)、
-Add Model Proxy で `.../api/llm-proxies/deploy` (API Manager のインスタンス) が呼ばれる。
+Add Model Proxy で `.../api/llm-proxies/deploy` (API Manager のインスタンス) が呼ばれる。経路の編集 (Edit Configuration) は
+`PATCH .../api/llm-proxies/update`。model-proxy.js は経路 B と Fallback も作成画面で入れる (2026-10-22 は経路 B と Fallback を編集画面で足したので、
+作成画面での動きは次に作るときが初めて。画面の項目は同じ)。
 途中で止めると資産だけ残る。作り直すと create が 409 になるが、そのまま 2 ページ目に進める。
 
 ### 確かめる
@@ -113,9 +134,10 @@ Add Model Proxy で `.../api/llm-proxies/deploy` (API Manager のインスタン
 ```bash
 python anypoint_setup.py show        # BG、Gateway の URL、アプリ、API インスタンス
 
-# Model Proxy。JWT 無しは 400 JWT Token is required.、違う JWT は 401 Invalid token.、llm-jwt.json の token なら 200
+# Model Proxy。JWT 無しは 400 JWT Token is required.、違う JWT は 401 Invalid token.、llm-jwt.json の token なら 200。
+# model を azureopenai/gpt-4o-mini にすると経路 B (応答の model が gpt-4o-mini-...)
 curl -s <Gateway の URL>/llm/chat/completions -H 'Content-Type: application/json' -H "Authorization: Bearer <JWT>" \
-  -d '{"model":"gpt-5-mini","messages":[{"role":"user","content":"say hi"}]}'
+  -d '{"model":"openai/gpt-5-mini","messages":[{"role":"user","content":"say hi"}]}'
 ```
 
 そのあと ws00 で broker を配備して呼ぶ (下の「予行」)。
@@ -133,6 +155,8 @@ sed -i -e 's/{{-suffix}}/-ws00/g' -e 's/{{_suffix}}/_ws00/g' -e 's/{{business-gr
   -e 's#{{employee-db-app-url}}#<URL>#g' -e 's#{{llm-base-url}}#<Gateway の URL>/llm#g' \
   -e 's/{{llm-client-id}}/none/g' -e 's/{{llm-client-secret}}/none/g' -e 's/{{llm-api-key}}/<JWT>/g' \
   exchange.json agent-network.yaml brokers/broker1.agent
+sed -i 's#model: "gpt-5-mini"#model: "openai/gpt-5-mini"#' brokers/broker1.agent
+sed -i 's#^          - gpt-5-mini$#          - openai/gpt-5-mini#' agent-network.yaml
 A="--username ws00_<日付> --password <パスワード> --organization <BG1 の ID> --environment Sandbox"
 anypoint-cli-v4 agent-network project build
 anypoint-cli-v4 agent-network project publish $A
@@ -208,6 +232,7 @@ BG1 には private space を作らないので `agent-network-shared-gw` にす�
 ## 気を付けること
 
 - vCore: root の `reassigned` に、子の BG が無くても使えない分が入っていることがある (2026-10-21 は 0.2)。`org` は 400 の「only N vCores available」を見て BG1 の分を減らす。
+- 渡された LLM は 1 分あたり 100 回まで (`x-ratelimit-limit: 100`)。越えると 429 で、1 分ほどで戻る。
 - JWT Validation の jwtOrigin を `customExpression` にして `Authorization` と `api-key` の両方から読ませようとしたら、Flex 1.12.9 では
   JWT 無しも偽物も通った (式が効かず、ポリシーが素通しになる)。標準の `httpBearerAuthenticationHeader` にしたら効いた。
 - `jwt-validation` の最新 (0.12.0) は Flex 1.12.9 に実装が無く 400。`proxy-jwt` は新しい版から順に試す (1.12.9 では 0.11.1)。

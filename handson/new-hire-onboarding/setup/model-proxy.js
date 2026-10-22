@@ -14,6 +14,7 @@ const cfg = {
   name: process.env.PROXY_NAME || 'workshop-llm-proxy',
   basePath: process.env.BASE_PATH || 'llm',
   destination: process.env.LLM_DESTINATION || 'https://llm-proxy.workshops.mulesoft.com/openai/v1/', // 末尾の / が要る
+  azureDestination: process.env.LLM_AZURE_DESTINATION || 'https://llm-proxy.workshops.mulesoft.com/', // Azure 形式は /openai/deployments/... を足す
   token: process.env.LLM_TOKEN,
   dryRun: process.argv.includes('--dry-run'),
 };
@@ -82,6 +83,28 @@ async function rootOrgName() {
     await page.fill('input[placeholder="Route A"]', 'workshop-llm');
     await page.fill('input[placeholder*="api.openai.com"], input[value="https://api.openai.com/v1/"]', cfg.destination);
     await page.fill('input[placeholder="Enter OpenAI API key"]', cfg.token);
+    // second route: the same endpoint through the Azure OpenAI provider, pinned to gpt-4o-mini.
+    // Requests then have to name the provider: openai/gpt-5-mini or azureopenai/gpt-4o-mini
+    // (a bare model name is a 400 once two providers are configured, fallback or not).
+    await page.locator('button:has-text("Add Route"), a:has-text("Add Route")').first().click();
+    await page.waitForTimeout(2000);
+    await page.fill('input[placeholder="Route B"]', 'workshop-llm-4o-mini');
+    await page.locator('text=Select provider').first().click();
+    await page.locator('[role=option]:has-text("Azure OpenAI")').first().click();
+    await page.waitForTimeout(2000);
+    await page.fill('xpath=(//*[normalize-space(text())="Destination URL"])[last()]/following::input[1]', cfg.azureDestination);
+    await page.fill('input[placeholder="Enter Azure OpenAI API key"]', cfg.token);
+    await page.fill('input[placeholder="e.g., gpt-4-deployment"]', 'gpt-4o-mini');
+    await page.fill('input[placeholder="e.g., 2024-10-21"]', '2024-10-21');
+    await page.locator('xpath=(//*[normalize-space(text())="Use model from request"])[last()]').click();
+    await page.locator('[role=option]:has-text("GPT 4o Mini")').first().click();
+    await page.waitForTimeout(1000);
+    // fallback: route A with gpt-5-mini (used when the named provider fails)
+    await page.locator('text=No fallback').first().click();
+    await page.locator('[role=option]:has-text("workshop-llm: OpenAI")').first().click();
+    await page.locator('xpath=(//*[normalize-space(text())="Model"])[last()]/following::*[@role="combobox" or self::button][1]').click();
+    await page.locator('[role=option]:text-is("GPT 5 Mini")').first().click();
+    await page.waitForTimeout(1000);
     // Add Model Proxy creates the API Manager instance (POST omni.mulesoft.com/api/llm-proxies/deploy)
     await page.locator('button:has-text("Add Model Proxy"):not([disabled])').click();
     await page.waitForURL(u => u.toString().includes('/llms/'), { timeout: 180000 });

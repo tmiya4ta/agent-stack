@@ -409,6 +409,9 @@ def cmd_page(api, args):
                                       db=values['employee-db-app-url'], jwt=jwt['token'], jwt_exp=jwt['exp'])}
     for name, path, lang in files:
         text = fill(open(os.path.join(net, *path), encoding='utf-8').read(), values)
+        # with two providers on the Model Proxy a bare model name is ambiguous (400), so name the provider
+        text = text.replace('model: "gpt-5-mini"', f'model: "{args.llm_model}"')
+        text = text.replace('          - gpt-5-mini\n', f'          - {args.llm_model}\n')
         pages[name] = f'# {name}\n\n`wsXX` を自分の番号に置き換えてから貼ります。\n\n```{lang}\n{text.rstrip()}\n```\n'
 
     auth = ['--username', os.environ['ANYPOINT_USERNAME'], '--password', os.environ['ANYPOINT_PASSWORD'],
@@ -522,6 +525,7 @@ def main():
     p.add_argument('--proxy', default='workshop-llm-proxy')
     p.add_argument('--proxy-path', default='llm', help='Model Proxy base path')
     p.add_argument('--page-asset', default='new-hire-onboarding-handson')
+    p.add_argument('--llm-model', default='openai/gpt-5-mini', help='page: model the broker asks the Model Proxy for (<provider>/<model>)')
     p.add_argument('--jwt-days', type=int, default=90, help='proxy-jwt: lifetime of a new JWT')
     p.add_argument('--yes', action='store_true', help='teardown: really delete')
     p.add_argument('--env', help='environment name for ~/.config/handson/new-hire-onboarding/<env>/ (default: --date)')
