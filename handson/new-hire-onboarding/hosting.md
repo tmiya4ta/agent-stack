@@ -190,10 +190,15 @@ Exchange のページ (手順 7) に載せるもの:
 ```bash
 python anypoint_setup.py teardown --date <日付>          # 消すものの一覧を出すだけ
 python anypoint_setup.py teardown --date <日付> --yes    # 消す
+python anypoint_setup.py teardown --participant ws00 --yes   # 1 人の broker だけ消す (予行のあとなど。ユーザーは残す)
 ```
 
-BG1 と APPBG の Sandbox のアプリ (受講者の broker とメンバーの 3 つ) → API インスタンス (broker の connection と Model Proxy) → Gateway →
+BG1 と APPBG の Sandbox のアプリ (受講者の broker とメンバーの 3 つ) → API インスタンス (broker の connection と Model Proxy) →
+ネットワークの Exchange 資産 → Gateway →
 ユーザー `wsNN_<日付>` → チーム workshop → BG1 と APPBG、の順に消す。Exchange の資産 (受講者のネットワーク、Model Proxy、ハンズオンのページ) は BG と一緒に消える。
+ネットワークの Exchange 資産 (agent-network と、一緒に公開される agent / mcp / llm) は、Exchange の DELETE が管理者でも公開した本人でも 403 になる。
+`anypoint-cli-v4 agent-network project unpublish --gav <BG>:<資産>:<版> --hard-delete` だけが消せる (確認に yes が要る。API インスタンスが残っていると止まる)。
+teardown は版ごとにこれを流す。hard-delete なので同じ名前でまた公開できる。
 BG は Gateway が消えきるまで消せないので、30 秒おきに試す (最大 10 分)。vCore と Managed Gateway の枠は root に戻る。
 yc の変数プロファイル `nho-<日付>` は手で消す。env.json は消さずに `"status": "done"` にして `python ../env_page.py` を流す (一覧の「片付けた環境」に移る)。
 

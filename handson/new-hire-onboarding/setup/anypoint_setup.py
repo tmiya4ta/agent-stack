@@ -8,6 +8,7 @@
     python anypoint_setup.py page --env 20261029-acme # 受講者が見る Exchange のページ (URL、JWT、コピペする 3 つのファイル)
     python anypoint_setup.py show                     # 作ったものの ID と URL
     python anypoint_setup.py teardown --date 20261029 [--yes]   # 後片付け。--yes が無ければ消すものを出すだけ
+    python anypoint_setup.py teardown --participant ws00 [--yes] # 1 人の broker だけ消す (ユーザーは残す)
 
 すでにあるもの (同じ名前の BG、Gateway、チーム、ユーザー) は作り直さない。
 ユーザーのパスワードは --out (既定 ~/.config/handson/new-hire-onboarding/<--env>/users.json、git の外) に書く。
@@ -442,33 +443,47 @@ def cmd_page(api, args):
 
 
 def cmd_teardown(api, args):
-    """後片付け。アプリ → API インスタンス → Gateway → ユーザー → チーム → BG の順に消す。"""
+    """後片付け。アプリ → API インスタンス → ネットワークの Exchange 資産 → Gateway → ユーザー → チーム → BG の順に消す。
+    --participant wsXX なら、その受講者の broker (アプリ、API インスタンス、ネットワークの資産) だけを消す。"""
     root, bg1, appbg = ids(api, args)
-    plan = []  # (label, path) to DELETE
+    plan = []  # (label, path) to DELETE; a path starting with "unpublish:" is a network GAV for the CLI
+    mine = (lambda name: True) if not args.participant else \
+        (lambda name: name.endswith(f'-{args.participant}') or name.endswith(f'_{args.participant}'))
     for bg in (bg1, appbg):
         if not bg:
             continue
         env = sandbox_env(api, bg)
         dep = f'/amc/application-manager/api/v2/organizations/{bg}/environments/{env}/deployments'
         for d in api.get(dep).get('items', []):
-            plan.append((f'app {d["name"]}', f'{dep}/{d["id"]}'))
+            if mine(d['name']):
+                plan.append((f'app {d["name"]}', f'{dep}/{d["id"]}'))
         apis = f'/apimanager/api/v1/organizations/{bg}/environments/{env}/apis'
         for a in api.get(apis).get('assets', []):
             for i in a['apis']:
-                plan.append((f'api {a["assetId"]} {i["id"]}', f'{apis}/{i["id"]}'))
+                if mine(a['assetId']):
+                    plan.append((f'api {a["assetId"]} {i["id"]}', f'{apis}/{i["id"]}'))
+        # agent network assets refuse the Exchange DELETE (403, even for the admin and the publisher);
+        # only `agent-network project unpublish` removes them, together with their agent / mcp / llm assets
+        for a in api.get(f'/exchange/api/v2/assets/search?organizationId={bg}&types=agent-network&limit=100'):
+            if a.get('type') == 'agent-network' and mine(a['assetId']):
+                versions = api.get(f'/exchange/api/v2/assets/{bg}/{a["assetId"]}').get('versions', [])
+                for v in sorted({x['version'] for x in versions}, reverse=True):
+                    plan.append((f'network {a["assetId"]} {v}', f'unpublish:{bg}:{a["assetId"]}:{v}'))
+        if args.participant:
+            continue
         gws = f'/gatewaymanager/api/v1/organizations/{bg}/environments/{env}/gateways'
         for g in api.get(gws)['content']:
             plan.append((f'gateway {g["name"]}', f'{gws}/{g["id"]}'))
-    if args.date:
+    if args.date and not args.participant:
         users = api.get(f'/accounts/api/organizations/{root}/users?search=_{args.date}&limit=100')['data']
         for u in users:
             if re.fullmatch(rf'ws\d\d_{args.date}', u['username']):
                 plan.append((f'user {u["username"]}', f'/accounts/api/organizations/{root}/users/{u["id"]}'))
     team, _ = find_team(api, root, args.team)
-    if team:
+    if team and not args.participant:
         plan.append((f'team {args.team}', f'/accounts/api/organizations/{root}/teams/{team}'))
     for name, bg in ((args.bg1, bg1), (args.appbg, appbg)):
-        if bg:
+        if bg and not args.participant:
             # Exchange assets (networks, the Model Proxy asset, the hands-on page) go with the BG
             plan.append((f'BG {name}', f'/accounts/api/organizations/{bg}'))
     for label, _ in plan:
@@ -479,6 +494,15 @@ def cmd_teardown(api, args):
     for i, (label, path) in enumerate(plan):
         if label.startswith('gateway') and not plan[i - 1][0].startswith('gateway'):
             time.sleep(30)  # let the apps and API instances leave the gateway first
+        if path.startswith('unpublish:'):
+            _, bg, asset, version = path.split(':')
+            r = subprocess.run(['anypoint-cli-v4', 'agent-network', 'project', 'unpublish', '--gav', f'{bg}:{asset}:{version}',
+                                '--hard-delete', '--username', os.environ['ANYPOINT_USERNAME'],
+                                '--password', os.environ['ANYPOINT_PASSWORD'], '--organization', bg],
+                               input='yes\n', capture_output=True, text=True, encoding='utf-8', errors='replace',
+                               shell=(os.name == 'nt'))
+            print(f'{label}: {"ok" if r.returncode == 0 else (r.stdout + r.stderr)[-200:]}')
+            continue
         tries = 20 if label.startswith('BG') else 1  # a BG can't go while its gateway is still being removed
         for _ in range(tries):
             s, body = api.call('DELETE', path)
@@ -528,6 +552,7 @@ def main():
     p.add_argument('--llm-model', default='openai/gpt-5-mini', help='page: model the broker asks the Model Proxy for (<provider>/<model>)')
     p.add_argument('--jwt-days', type=int, default=90, help='proxy-jwt: lifetime of a new JWT')
     p.add_argument('--yes', action='store_true', help='teardown: really delete')
+    p.add_argument('--participant', help='teardown: only this participant\'s broker (e.g. ws00)')
     p.add_argument('--env', help='environment name for ~/.config/handson/new-hire-onboarding/<env>/ (default: --date)')
     p.add_argument('--out', help='users: where to write passwords (default: <env folder>/users.json)')
     args = p.parse_args()
