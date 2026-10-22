@@ -54,7 +54,7 @@ cd handson/new-hire-onboarding/setup
 |---|---|---|---|
 | 1 | BG1 と APPBG、vCore (APPBG 0.3、BG1 に残り全部)、BG1 に Managed Gateway Small 1 つ、Gateway `agent-network-shared-gw` (us-east-2、最新の LTS、Small) | `python anypoint_setup.py org` | 1〜2 分 |
 | 2 | チーム workshop。`/accounts/api/roles` の全ロールを BG1 / Sandbox に付ける。APPBG には付けない | `python anypoint_setup.py team` | 15 分ほど (50 回ごとに 429 で待つ) |
-| 3 | 参加者のユーザー `wsXX_<日付>`。チーム workshop に入れる。パスワードは `--out` (既定は環境のフォルダの `users.json`) に出る | `python anypoint_setup.py users --count 6 --date 20261029 --env 20261029-acme` | 1 分 |
+| 3 | 参加者のユーザー `wsXX_<日付>`。チーム workshop に入れ、ログインしたときに開く BG を BG1 (`properties.cs_auth.activeOrganizationId`。既定は root)、既定の環境を Sandbox (`organizationPreferences.<BG1>.defaultEnvironment`。無いと Runtime Manager が Choose Environment で止まる) にする。パスワードは `--out` (既定は環境のフォルダの `users.json`) に出る | `WORKSHOP_PASSWORD=<受講者のパスワード> python anypoint_setup.py users --count 6 --date 20261029 --env 20261029-acme` | 1 分 |
 | 4 | メンバーの 3 アプリを APPBG / Sandbox に配備 (下の「メンバーのアプリ」) | `yc harness deploy ...` | 1 つ 3〜5 分 |
 | 5 | Model Proxy `workshop-llm-proxy` を BG1 に作る | `LLM_TOKEN=<鍵> NODE_PATH=<node_modules> node model-proxy.js` | 2 分 |
 | 6 | Model Proxy の認証を JWT にする。Client ID Enforcement を無効にし、JWT Validation (HS256) を付ける。秘密鍵と受講者用の JWT は環境のフォルダの `llm-jwt.json` に出る (期限は `--jwt-days`、既定 90 日) | `python anypoint_setup.py proxy-jwt --env <環境名>` | 1 分 (反映に 1〜2 分) |

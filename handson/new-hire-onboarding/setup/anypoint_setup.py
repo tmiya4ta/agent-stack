@@ -5,6 +5,7 @@
     python anypoint_setup.py team                     # チーム workshop と、BG1 / Sandbox への全ロール
     python anypoint_setup.py users --count 6 --date 20261029 --env 20261029-acme --email tmiyashita+{name}@salesforce.com
     python anypoint_setup.py proxy-jwt --env 20261029-acme   # Model Proxy の認証を Client ID から JWT (HS256) に替える
+    python anypoint_setup.py atelier --env 20261029-acme   # A2A のクライアント Atelier を APPBG に配備 (受講者の broker の snapshot 付き)
     python anypoint_setup.py page --env 20261029-acme # 受講者が見る Exchange のページ (URL、JWT、コピペする 3 つのファイル)
     python anypoint_setup.py show                     # 作ったものの ID と URL
     python anypoint_setup.py teardown --date 20261029 [--yes]   # 後片付け。--yes が無ければ消すものを出すだけ
@@ -21,7 +22,7 @@ import json
 import os
 import re
 import secrets
-import string
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -184,23 +185,24 @@ def cmd_team(api, args):
         if r['role_id'] in have:
             done['already'] += 1
             continue
-        # environment-scoped roles need envId; BG-scoped roles reject it, so try env first, then BG
+        # environment-scoped roles need envId; BG-scoped roles reject it, so try env first, then BG.
+        # A BG-scoped role answers the env attempt with 403 too (e.g. Mule Developer Generative AI User, which
+        # Vibes needs), so always try the BG scope
         s, _ = api.call('POST', path, [{'role_id': r['role_id'], 'context_params': {'org': bg1, 'envId': env}}])
         if s in (200, 201, 204, 409):
             done['env'] += 1
             continue
-        if s != 403:
-            s, _ = api.call('POST', path, [{'role_id': r['role_id'], 'context_params': {'org': bg1}}])
-            if s in (200, 201, 204, 409):
-                done['bg'] += 1
-                continue
+        s, _ = api.call('POST', path, [{'role_id': r['role_id'], 'context_params': {'org': bg1}}])
+        if s in (200, 201, 204, 409):
+            done['bg'] += 1
+            continue
         forbidden.append(r['name'])
     print(f'team {args.team}: env-scoped {done["env"]}, BG-scoped {done["bg"]}, already {done["already"]}, '
           f'not assignable {len(forbidden)}')
 
 
 def cmd_users(api, args):
-    root, _, _ = ids(api, args)
+    root, bg1, _ = ids(api, args)
     team, _ = find_team(api, root, args.team)
     if not team:
         sys.exit(f'team {args.team} not found; run `team` first')
@@ -215,7 +217,7 @@ def cmd_users(api, args):
             uid = user['id']
             print(f'{username}: exists')
         else:
-            pw = 'Ws' + ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(10)) + f'!{i}'
+            pw = args.password
             s, body = api.call('POST', f'/accounts/api/organizations/{root}/users',
                                {'username': username, 'firstName': name, 'lastName': 'workshop',
                                 'email': args.email.format(name=name, username=username), 'password': pw,
@@ -230,6 +232,17 @@ def cmd_users(api, args):
                         {'membership_type': 'member'})
         if s not in (200, 204):
             print(f'{username}: adding to team failed {s}')
+        if bg1:
+            # the BG a user lands in after login (the root org by default); only the admin's PUT can set it
+            s, _ = api.call('PUT', f'/accounts/api/organizations/{root}/users/{uid}',
+                            {'properties': {'cs_auth': {'activeOrganizationId': bg1}}})
+            if s != 200:
+                print(f'{username}: setting the default BG failed {s}')
+            # the profile's "Selected Environment in BG1" (without it Runtime Manager opens on Choose Environment)
+            s, _ = api.call('PUT', f'/accounts/api/organizations/{root}/users/{uid}',
+                            {'id': uid, 'organizationPreferences': {bg1: {'defaultEnvironment': sandbox_env(api, bg1)}}})
+            if s != 200:
+                print(f'{username}: setting the default environment failed {s}')
     json.dump(out, open(args.out, 'w'), indent=2)
     print(f'passwords: {args.out}')
 
@@ -337,7 +350,7 @@ def fill(text, values):
     return text
 
 
-PAGE_HOME = '''# 新入社員オンボーディング ハンズオン
+PAGE_HOME = '''# AI Workshop 当日ガイド
 
 自分の番号 (ユーザー名の `wsXX`、例 `ws03`) を使って、broker を BG1 / Sandbox に配備します。
 下のファイルの **`wsXX` を全部自分の番号に置き換えて** (VS Code の Replace All) から配備してください。
@@ -369,6 +382,9 @@ PAGE_HOME = '''# 新入社員オンボーディング ハンズオン
 ページ exchange.json、agent-network.yaml、broker1.agent の中身を、プロジェクトの同じ名前のファイルにそのまま貼ります
 (`broker1.agent` は `brokers/` の下)。
 
+**ほかの場所 (GitHub やテンプレート) のファイルは使わないでください。** LLM のモデル名がこのページでは `openai/gpt-5-mini` になっていて、
+`gpt-5-mini` のままだと broker が `An internal error occurred` で失敗します (Model Proxy が 400 を返す)。
+
 ## 呼んでみる
 
 配備したら、broker の URL は `{gw}/onboarding-broker-wsXX/` です (最後の `/` が要ります)。
@@ -378,6 +394,15 @@ curl -s {gw}/onboarding-broker-wsXX/ \\
   -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \\
   -d '{{"jsonrpc":"2.0","id":"1","method":"SendMessage","params":{{"message":{{"role":"ROLE_USER","parts":[{{"text":"Please start onboarding for new employee Taro Tanaka (tanaka.taro@example.com)"}}],"messageId":"11111111-1111-1111-1111-111111111111"}}}}}}'
 ```
+{atelier}'''
+
+PAGE_ATELIER = '''
+## ブラウザから呼ぶ (A2A クライアント)
+
+A2A クライアントを開き、**Import** → **Direct URL** に `{url}/scenarios/{snapshot}` (`wsXX` は自分の番号) を入れて読み込みます。
+タブ「Brokerなし」にメンバーの 3 つ、「Brokerあり」に自分の broker のウインドウがあります。
+
+- A2A クライアント: {url}/
 '''
 
 
@@ -407,7 +432,9 @@ def cmd_page(api, args):
     pages = {'home': PAGE_HOME.format(bg_name=args.bg1, bg1=bg1, gateway=args.gateway, gw=gw, llm=llm,
                                       it=values['it-provisioning-agent-url'],
                                       office=values['office-concierge-agent-url'],
-                                      db=values['employee-db-app-url'], jwt=jwt['token'], jwt_exp=jwt['exp'])}
+                                      db=values['employee-db-app-url'], jwt=jwt['token'], jwt_exp=jwt['exp'],
+                                      atelier=PAGE_ATELIER.format(url=urls['atelier'], snapshot=atelier_snapshot_name('wsXX'))
+                                      if 'atelier' in urls else '')}
     for name, path, lang in files:
         text = fill(open(os.path.join(net, *path), encoding='utf-8').read(), values)
         # with two providers on the Model Proxy a bare model name is ambiguous (400), so name the provider
@@ -427,9 +454,16 @@ def cmd_page(api, args):
     s, _ = api.call('GET', f'/exchange/api/v2/assets/{bg1}/{args.page_asset}/1.0.0')
     if s != 200:
         rc, out = cli('exchange', 'asset', 'upload', asset, '--type', 'custom',
-                      '--name', 'New Hire Onboarding Hands-on',
+                      '--name', args.page_name,
                       '--description', 'Values and files for the new hire onboarding hands-on')
         print(f'asset {args.page_asset}: {"created" if rc == 0 else out[-300:]}')
+    else:
+        rc, out = cli('exchange', 'asset', 'modify', asset, '--name', args.page_name)
+        print(f'asset {args.page_asset} name: {"ok" if rc == 0 else out[-300:]}')
+    # the CLI's --tags leaves the labels empty; the tags endpoint works
+    s, _ = api.call('PUT', f'/exchange/api/v2/assets/{bg1}/{args.page_asset}/1.0.0/tags',
+                    [{'value': t.strip()} for t in args.page_tags.split(',') if t.strip()])
+    print(f'asset {args.page_asset} tags {args.page_tags}: {s}')
     with tempfile.TemporaryDirectory() as tmp:
         for name, text in pages.items():
             path = os.path.join(tmp, name.replace('.', '-') + '.md')
@@ -440,6 +474,84 @@ def cmd_page(api, args):
                     break
             print(f'page {name}: {"ok" if rc == 0 else out[-300:]}')
     print(f'https://anypoint.mulesoft.com/exchange/{bg1}/{args.page_asset}/')
+
+
+ATELIER_REPO = 'https://github.com/tmiya4ta/agent-atelier'
+
+
+def atelier_snapshot_name(name):
+    return f'new-hire-onboarding-{name}.json'
+
+
+def atelier_snapshot(gw, urls, name):
+    """1 人分の Atelier の snapshot (Import で読む)。リポジトリの AI-Workshop-Step2.json と同じ形で、
+    タブ「Brokerなし」にメンバーの 3 つ、「Brokerあり」にその受講者の broker。"""
+    def conn(proto, url, label):
+        return {'key': f'{proto}::{url}', 'protoId': proto, 'url': url, 'name': label}
+
+    def window(c):
+        return {'protoId': c['protoId'], 'config': {'url': c['url'], 'name': c['name'], 'auth': ''}, 'pinned': False}
+
+    members = [conn('a2a', urls['it-provisioning-agent'] + '/', 'ITプロビジョニング'),
+               conn('a2a', urls['office-concierge-agent'] + '/', 'オフィスコンシェルジュ'),
+               conn('mcp', urls['employee-db-app'] + '/mcp', '社員MCPサーバー')]
+    broker = conn('a2a', f'{gw}/onboarding-broker-{name}/', f'Employee Onboarding Broker {name}')
+    return {'meta': {'name': f'AI Workshop — {name}',
+                     'description': 'IT プロビジョニング / オフィスコンシェルジュ / 社員 MCP サーバー / Onboarding Broker'},
+            'app': 'atelier', 'exportedAt': time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
+            'includesSecrets': False,
+            'state': {'v': 1, 'zoom': 1, 'theme': 'light', 'identities': [], 'catalogs': [], 'scripts': [],
+                      'selectedScriptId': None, 'scriptPinned': False, 'bookmarks': members + [broker],
+                      'closedWindows': [], 'activeWsIdx': 0,
+                      'workspaces': [{'name': 'Brokerなし', 'windows': [window(m) for m in members]},
+                                     {'name': 'Brokerあり', 'windows': [window(broker)]}]}}
+
+
+def cmd_atelier(api, args):
+    """A2A のクライアント Atelier (GitHub の最新) を APPBG / Sandbox に配備し、受講者ごとの snapshot を同梱する。"""
+    _, bg1, appbg = ids(api, args)
+    gw = gateway_url(api, bg1, sandbox_env(api, bg1), args.gateway)
+    urls = member_urls(api, appbg)
+    names = [f'ws{i:02d}' for i in range(args.start, args.start + args.count)]
+    snapshots = {atelier_snapshot_name(n): atelier_snapshot(gw, urls, n) for n in names}
+    version = time.strftime('1.%y%m%d.%H%M')  # a new GAV every time, so yc uploads it
+    run = lambda cmd, **kw: subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', **kw)
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, 'atelier')
+        if re.match(r'https?://', args.atelier):
+            r = run(['git', '-c', 'core.symlinks=false', 'clone', '-q', '--depth', '1', args.atelier, src])
+            if r.returncode != 0:
+                sys.exit(f'git clone {args.atelier}: {r.stderr[-300:]}')
+        else:
+            shutil.copytree(os.path.expanduser(args.atelier), src, ignore=shutil.ignore_patterns('target', '.git'))
+        # the snapshots hold this org's URLs, so they go into the copy only, never into the Atelier repository
+        for file, snap in snapshots.items():
+            json.dump(snap, open(os.path.join(src, 'ui', 'scenarios', file), 'w', encoding='utf-8'),
+                      ensure_ascii=False, indent=2)
+        app = os.path.join(src, 'mule-app')
+        pom = os.path.join(app, 'pom.xml')
+        text = open(pom, encoding='utf-8').read()
+        text = re.sub(r'<groupId>[0-9a-f-]{36}</groupId>', f'<groupId>{appbg}</groupId>', text, count=1)
+        text = re.sub(r'(<artifactId>atelier-static</artifactId>.*?<version>)[^<]+', rf'\g<1>{version}', text,
+                      count=1, flags=re.S)
+        # the JMX module (only for /logs) is a private build that is not in every Maven repository; leave it out
+        text = re.sub(r'\s*<dependency>\s*<groupId>com\.demo-group</groupId>\s*<artifactId>mule-jmx-module</artifactId>'
+                      r'.*?</dependency>', '', text, count=1, flags=re.S)
+        open(pom, 'w', encoding='utf-8').write(text)
+        jmx = os.path.join(app, 'src', 'main', 'mule', 'impl', 'jmx-endpoints.xml')
+        if os.path.exists(jmx):
+            os.remove(jmx)
+        conf = os.path.join(app, 'src', 'main', 'mule', 'global-config.xml')
+        text = open(conf, encoding='utf-8').read()
+        open(conf, 'w', encoding='utf-8').write(re.sub(r'\s*<jmx:config [^>]*/>', '', text))
+        r = run(['mvn', '-q', '-f', pom, 'clean', 'package', '-DskipTests'], shell=(os.name == 'nt'))
+        if r.returncode != 0:
+            sys.exit(f'mvn package failed:\n{(r.stdout + r.stderr)[-1500:]}')
+        jar = os.path.join(app, 'target', f'atelier-static-{version}-mule-application.jar')
+        r = run(['yc', 'deploy', 'file', appbg, sandbox_env(api, appbg), appbg, 'atelier', version, jar,
+                 f'target=ch2:{args.target}', 'name=atelier', '+mule.env=ch2'])
+        print((r.stdout + r.stderr).strip()[-800:])
+    print(f'snapshots: /scenarios/{atelier_snapshot_name("wsXX")} (Import > Direct URL)')
 
 
 def cmd_teardown(api, args):
@@ -534,11 +646,11 @@ def cmd_show(api, args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('step', choices=['org', 'team', 'users', 'proxy-jwt', 'page', 'show', 'teardown'])
+    p.add_argument('step', choices=['org', 'team', 'users', 'proxy-jwt', 'atelier', 'page', 'show', 'teardown'])
     p.add_argument('--org', help='root org ID (default: the login user\'s org)')
     p.add_argument('--bg1', default='BG1')
     p.add_argument('--appbg', default='APPBG')
-    p.add_argument('--appbg-vcores', type=float, default=0.3, help='0.1 per member app')
+    p.add_argument('--appbg-vcores', type=float, default=0.4, help='0.1 per member app and Atelier')
     p.add_argument('--gateway', default='agent-network-shared-gw')
     p.add_argument('--target', default='cloudhub-us-east-2')
     p.add_argument('--team', default='workshop')
@@ -546,11 +658,17 @@ def main():
     p.add_argument('--start', type=int, default=0)
     p.add_argument('--date', help='YYYYMMDD of the workshop, used in user names')
     p.add_argument('--email', default='tmiyashita+{name}@salesforce.com')
+    # an admin can't change a password later (only the e-mailed reset link can), so decide it here
+    p.add_argument('--password', default=os.environ.get('WORKSHOP_PASSWORD'),
+                   help='users: password of every new participant (default: $WORKSHOP_PASSWORD; not kept in git)')
     p.add_argument('--proxy', default='workshop-llm-proxy')
     p.add_argument('--proxy-path', default='llm', help='Model Proxy base path')
     p.add_argument('--page-asset', default='new-hire-onboarding-handson')
+    p.add_argument('--page-tags', default='guide', help='page: comma-separated tags of the Exchange asset')
+    p.add_argument('--page-name', default='AI Workshop当日ガイド', help='page: name of the Exchange asset')
     p.add_argument('--llm-model', default='openai/gpt-5-mini', help='page: model the broker asks the Model Proxy for (<provider>/<model>)')
     p.add_argument('--jwt-days', type=int, default=90, help='proxy-jwt: lifetime of a new JWT')
+    p.add_argument('--atelier', default=ATELIER_REPO, help='atelier: the Atelier repository (git URL or folder)')
     p.add_argument('--yes', action='store_true', help='teardown: really delete')
     p.add_argument('--participant', help='teardown: only this participant\'s broker (e.g. ws00)')
     p.add_argument('--env', help='environment name for ~/.config/handson/new-hire-onboarding/<env>/ (default: --date)')
@@ -558,13 +676,15 @@ def main():
     args = p.parse_args()
     if args.step == 'users' and not args.date:
         p.error('users needs --date')
+    if args.step == 'users' and not args.password:
+        p.error('users needs --password or WORKSHOP_PASSWORD')
     if args.step == 'users' and not args.out:
         envdir = os.path.join(os.path.expanduser('~'), '.config', 'handson', 'new-hire-onboarding', args.env or args.date)
         os.makedirs(envdir, exist_ok=True)
         args.out = os.path.join(envdir, 'users.json')
     api = Api(os.environ['ANYPOINT_USERNAME'], os.environ['ANYPOINT_PASSWORD'])
     {'org': cmd_org, 'team': cmd_team, 'users': cmd_users,
-     'proxy-jwt': cmd_proxy_jwt, 'page': cmd_page, 'show': cmd_show,
+     'proxy-jwt': cmd_proxy_jwt, 'atelier': cmd_atelier, 'page': cmd_page, 'show': cmd_show,
      'teardown': cmd_teardown}[args.step](api, args)
 
 
