@@ -514,7 +514,8 @@ def cmd_atelier(api, args):
     urls = member_urls(api, appbg)
     names = [f'ws{i:02d}' for i in range(args.start, args.start + args.count)]
     snapshots = {atelier_snapshot_name(n): atelier_snapshot(gw, urls, n) for n in names}
-    version = time.strftime('1.%y%m%d.%H%M')  # a new GAV every time, so yc uploads it
+    # a new GAV every time, so yc uploads it; int() drops the leading zero before 10:00 (0836 is not semver)
+    version = f"1.{time.strftime('%y%m%d')}.{int(time.strftime('%H%M'))}"
     run = lambda cmd, **kw: subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', **kw)
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, 'atelier')
