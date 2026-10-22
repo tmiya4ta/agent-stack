@@ -237,6 +237,9 @@ BG1 には private space を作らないので `agent-network-shared-gw` にす�
 ## 気を付けること
 
 - vCore: root の `reassigned` に、子の BG が無くても使えない分が入っていることがある (2026-10-21 は 0.2)。`org` は 400 の「only N vCores available」を見て BG1 の分を減らす。
+- broker のモデル名がプロバイダ無しの `gpt-5-mini` だと、broker は `An internal error occurred` で失敗し、アプリのログに Model Proxy の 400
+  (`not in the known unique model map and multiple providers are configured`) が出る。2026-10-22 に、リポジトリのファイルで配備した ws00 がこれになった。
+  受講者には Exchange のページのファイルだけを使ってもらう (home にも書いてある)。
 - 渡された LLM は 1 分あたり 100 回まで (`x-ratelimit-limit: 100`)。越えると 429 で、1 分ほどで戻る。
 - JWT Validation の jwtOrigin を `customExpression` にして `Authorization` と `api-key` の両方から読ませようとしたら、Flex 1.12.9 では
   JWT 無しも偽物も通った (式が効かず、ポリシーが素通しになる)。標準の `httpBearerAuthenticationHeader` にしたら効いた。
