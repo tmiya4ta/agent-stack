@@ -172,6 +172,8 @@ yc の変数プロファイル `nho-<日付>` は手で消す。env.json は消�
 
 ## 環境のメモ
 
+このリポジトリは GitHub で公開されている。お客さんの名前、org や BG の ID、URL、クレデンシャルは git に書かず、env.json にだけ書く。
+
 環境ごとの URL とクレデンシャルは `~/.config/handson/new-hire-onboarding/<環境名>/env.json` に置き、[../env_page.py](../env_page.py) で HTML にする。
 
 ```bash
@@ -216,4 +218,4 @@ BG1 には private space を作らないので `agent-network-shared-gw` にす�
 
 | 回 | org | 状態 |
 |---|---|---|
-| 2026-10-29 | `anypoint-cbp-1791266292` (US)。ID と URL は `~/.config/handson/new-hire-onboarding/20261029/env.json` | 2026-10-21〜22 に 1〜8 を済ませた (BG1 の vCore は 0.5)。ws00 で broker を CLI で配備して全部成功の分岐を確認。Exchange のページは ws00 から見える。teardown は一覧を出すところまで (消すのは未実行) |
+| 2026-10-29 | `anypoint-cbp-1791266292` (US)。ID と URL は `~/.config/handson/new-hire-onboarding/20261029-*/env.json (お客さんの名前は git に書かない)` | 2026-10-21〜22 に 1〜8 を済ませた (BG1 の vCore は 0.5)。ws00 で broker を CLI で配備して全部成功の分岐を確認。Exchange のページは ws00 から見える。teardown は一覧を出すところまで (消すのは未実行) |
