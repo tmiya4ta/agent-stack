@@ -399,7 +399,9 @@ curl -s {gw}/onboarding-broker-wsXX/ \\
 PAGE_ATELIER = '''
 ## ブラウザから呼ぶ (A2A クライアント)
 
-A2A クライアントを開き、**Import** → **Direct URL** に `{url}/scenarios/{snapshot}` (`wsXX` は自分の番号) を入れて読み込みます。
+A2A クライアントを開き、**import configuration** → **Repository** → タブ **Local** で、自分の番号の
+「AI Workshop — wsXX」を選びます。
+(一覧に無いときは **Direct URL** に `{url}/scenarios/{snapshot}` を入れても読み込めます。`wsXX` は自分の番号)
 タブ「Brokerなし」にメンバーの 3 つ、「Brokerあり」に自分の broker のウインドウがあります。
 
 - A2A クライアント: {url}/
@@ -529,6 +531,13 @@ def cmd_atelier(api, args):
         for file, snap in snapshots.items():
             json.dump(snap, open(os.path.join(src, 'ui', 'scenarios', file), 'w', encoding='utf-8'),
                       ensure_ascii=False, indent=2)
+        # list them first in the app's own index, which Import > Repository shows on its Local tab
+        index_path = os.path.join(src, 'ui', 'scenarios', 'index.json')
+        index = json.load(open(index_path, encoding='utf-8')) if os.path.exists(index_path) else {'items': []}
+        mine = [{'id': file[:-len('.json')], 'name': snap['meta']['name'], 'description': snap['meta']['description'],
+                 'url': f'/scenarios/{file}', 'counts': {'scripts': 0}} for file, snap in snapshots.items()]
+        index['items'] = mine + [it for it in index.get('items', []) if it.get('url') not in {m['url'] for m in mine}]
+        json.dump(index, open(index_path, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
         app = os.path.join(src, 'mule-app')
         pom = os.path.join(app, 'pom.xml')
         text = open(pom, encoding='utf-8').read()
@@ -552,7 +561,7 @@ def cmd_atelier(api, args):
         r = run(['yc', 'deploy', 'file', appbg, sandbox_env(api, appbg), appbg, 'atelier', version, jar,
                  f'target=ch2:{args.target}', 'name=atelier', '+mule.env=ch2'])
         print((r.stdout + r.stderr).strip()[-800:])
-    print(f'snapshots: /scenarios/{atelier_snapshot_name("wsXX")} (Import > Direct URL)')
+    print(f'snapshots: Import > Repository > Local, or /scenarios/{atelier_snapshot_name("wsXX")} (Import > Direct URL)')
 
 
 def cmd_teardown(api, args):
