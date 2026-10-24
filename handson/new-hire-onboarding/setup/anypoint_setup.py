@@ -5,6 +5,7 @@
     python anypoint_setup.py team                     # チーム workshop と、BG1 / Sandbox への全ロール
     python anypoint_setup.py users --count 6 --date 20261029 --env 20261029-acme --email tmiyashita+{name}@salesforce.com
     python anypoint_setup.py proxy-jwt --env 20261029-acme   # Model Proxy の認証を Client ID から JWT (HS256) に替える
+    python anypoint_setup.py members-llm --env 20261029-acme   # メンバーの A2A 2 つの LLM を Model Proxy に (--direct で直接に戻す)
     python anypoint_setup.py atelier --env 20261029-acme   # A2A のクライアント Atelier を APPBG に配備 (受講者の broker の snapshot 付き)
     python anypoint_setup.py page --env 20261029-acme # 受講者が見る Exchange のページ (URL、JWT、コピペする 3 つのファイル)
     python anypoint_setup.py show                     # 作ったものの ID と URL
@@ -161,6 +162,9 @@ def find_team(api, root, name):
     return next((t['team_id'] for t in teams if t['team_name'] == name), None), teams
 
 
+ROOT_SCOPED_ROLES = ('MuleSoft Agent AI User',)
+
+
 def cmd_team(api, args):
     root, bg1, _ = ids(api, args)
     if not bg1:
@@ -197,6 +201,13 @@ def cmd_team(api, args):
             done['bg'] += 1
             continue
         forbidden.append(r['name'])
+    # the MuleSoft Agent panel in omni.mulesoft.com checks this role on the root org; with BG1 only it says
+    # "You don't have permission to use the MuleSoft Agent" (2026-10-24)
+    root_scoped = {r['role_id'] for r in api.get(f'{path}?limit=500')['data'] if r.get('context_params', {}).get('org') == root}
+    for r in roles:
+        if r['name'] in ROOT_SCOPED_ROLES and r['role_id'] not in root_scoped:
+            s, _ = api.call('POST', path, [{'role_id': r['role_id'], 'context_params': {'org': root}}])
+            print(f'{r["name"]} on the root org: {s}')
     print(f'team {args.team}: env-scoped {done["env"]}, BG-scoped {done["bg"]}, already {done["already"]}, '
           f'not assignable {len(forbidden)}')
 
@@ -277,7 +288,8 @@ def llm_jwt(args, create=False):
 
 
 def cmd_proxy_jwt(api, args):
-    """Client ID Enforcement を無効にし、JWT Validation (HS256) を同じ位置 (order 3) に付ける。"""
+    """Client ID Enforcement を無効にし、JWT Validation (HS256) を同じ位置 (order 3) に付ける。
+    llm-proxy-core の呼び出し元 (使用量の集計に使う) も JWT のクレームから読むようにする。"""
     _, bg1, _ = ids(api, args)
     env = sandbox_env(api, bg1)
     base = f'/apimanager/api/v1/organizations/{bg1}/environments/{env}/apis'
@@ -306,6 +318,14 @@ def cmd_proxy_jwt(api, args):
         'validateAudClaim': False, 'mandatoryAudClaim': False, 'supportedAudiences': 'aud.example.com',
         'mandatoryExpClaim': True, 'mandatoryNbfClaim': False, 'validateCustomClaim': False,
     }
+    # llm-proxy-core names the caller in the usage metrics from authentication.clientName, which only Client ID
+    # Enforcement fills; without it no tokens are counted (Monitoring and Cost Management stay at 0), so read the JWT
+    for p in policies:
+        if kind(p) == 'llm-proxy-core':
+            s, _ = api.call('PATCH', f'{pol}/{p["policyId"]}', {'configurationData': {
+                'clientIdentifier': '#[authentication.properties.claims.sub]',
+                'clientId': '#[authentication.properties.claims.client_id]', 'inputFormat': 'openai'}})
+            print(f'llm-proxy-core client from the JWT claims: {s}')
     current = next((p for p in policies if kind(p) == 'jwt-validation'), None)
     if current:
         s, body = api.call('PATCH', f'{pol}/{current["policyId"]}', {'configurationData': cfg})
@@ -334,6 +354,40 @@ def member_urls(api, appbg):
         full = api.get(f'{base}/{d["id"]}')
         urls[d['name']] = full['target']['deploymentSettings']['http']['inbound']['publicUrl'].rstrip('/')
     return urls
+
+
+MEMBER_AGENTS = ('it-provisioning-agent', 'office-concierge-agent')
+
+
+def cmd_members_llm(api, args):
+    """メンバーの A2A 2 つの LLM の行き先を Model Proxy (JWT) にする。--direct なら渡された LLM に直接 ($LLM_TOKEN) に戻す。
+    配備のプロパティを書き換えるだけで、アプリは作り直さない (書き換えると CloudHub が配備し直す)。"""
+    _, bg1, appbg = ids(api, args)
+    if args.direct:
+        if not os.environ.get('LLM_TOKEN'):
+            sys.exit('--direct needs LLM_TOKEN (the key of the LLM)')
+        props = {'llm.proxy.host': args.llm_host, 'llm.proxy.path': '/openai/v1/responses', 'llm.model': 'gpt-5-mini'}
+        key = os.environ['LLM_TOKEN']
+    else:
+        gw = gateway_url(api, bg1, sandbox_env(api, bg1), args.gateway)
+        # the agents call the Responses API; the Model Proxy passes /llm/responses through like /llm/chat/completions
+        props = {'llm.proxy.host': re.sub(r'^https?://', '', gw), 'llm.proxy.path': f'/{args.proxy_path}/responses',
+                 'llm.model': args.llm_model}
+        key = llm_jwt(args)['token']
+    env = sandbox_env(api, appbg)
+    base = f'/amc/application-manager/api/v2/organizations/{appbg}/environments/{env}/deployments'
+    for d in api.get(base).get('items', []):
+        if d['name'] not in MEMBER_AGENTS:
+            continue
+        app = api.get(f'{base}/{d["id"]}')['application']
+        conf = app['configuration']['mule.agent.application.properties.service']
+        conf['properties'] = {**(conf.get('properties') or {}), **props}
+        # the GET masks secure values, so send the key again
+        conf['secureProperties'] = {'llm.apiKey': key}
+        s, body = api.call('PATCH', f'{base}/{d["id"]}', {'application': {'ref': app['ref'], 'configuration': {
+            'mule.agent.application.properties.service': conf}}})
+        print(f'{d["name"]}: {s}' + ('' if s == 200 else f' {body[:300]}'))
+    print('redeploying; check the apps in a few minutes')
 
 
 def gateway_url(api, bg1, env, name):
@@ -376,7 +430,7 @@ PAGE_HOME = '''# AI Workshop 当日ガイド
 | `openAI.clientId` / `openAI.clientSecret` | `none` (使わない) |
 
 `openAI.apiKey` は LLM (Model Proxy) の JWT です (全員同じ。期限 {jwt_exp})。broker が `Authorization: Bearer` で送ります。
-
+{members_llm}
 ## ファイル
 
 ページ exchange.json、agent-network.yaml、broker1.agent の中身を、プロジェクトの同じ名前のファイルにそのまま貼ります
@@ -408,6 +462,23 @@ A2A クライアントを開き、**import configuration** → **Repository** �
 '''
 
 
+PAGE_MEMBERS_LLM = '''
+IT Provisioning Agent と Office Concierge Agent も、同じ Model Proxy を通って LLM を呼んでいます。
+broker の呼び出しもメンバーの呼び出しも、Model Proxy の画面 (API Manager の `workshop-llm-proxy`) で一緒に見られます。
+'''
+
+
+def members_via_proxy(api, appbg, gw):
+    """True when members-llm has pointed both member agents at the Model Proxy."""
+    env = sandbox_env(api, appbg)
+    base = f'/amc/application-manager/api/v2/organizations/{appbg}/environments/{env}/deployments'
+    host = re.sub(r'^https?://', '', gw)
+    hosts = [api.get(f'{base}/{d["id"]}')['application']['configuration']['mule.agent.application.properties.service']
+             .get('properties', {}).get('llm.proxy.host')
+             for d in api.get(base).get('items', []) if d['name'] in MEMBER_AGENTS]
+    return bool(hosts) and all(h == host for h in hosts)
+
+
 def cmd_page(api, args):
     """Exchange (BG1) に custom の資産を作り、受講者がコピペする値とファイルをページに載せる。"""
     root, bg1, appbg = ids(api, args)
@@ -435,6 +506,7 @@ def cmd_page(api, args):
                                       it=values['it-provisioning-agent-url'],
                                       office=values['office-concierge-agent-url'],
                                       db=values['employee-db-app-url'], jwt=jwt['token'], jwt_exp=jwt['exp'],
+                                      members_llm=PAGE_MEMBERS_LLM if members_via_proxy(api, appbg, gw) else '',
                                       atelier=PAGE_ATELIER.format(url=urls['atelier'], snapshot=atelier_snapshot_name('wsXX'))
                                       if 'atelier' in urls else '')}
     for name, path, lang in files:
@@ -660,7 +732,7 @@ def cmd_show(api, args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('step', choices=['org', 'team', 'users', 'proxy-jwt', 'atelier', 'page', 'show', 'teardown'])
+    p.add_argument('step', choices=['org', 'team', 'users', 'proxy-jwt', 'members-llm', 'atelier', 'page', 'show', 'teardown'])
     p.add_argument('--org', help='root org ID (default: the login user\'s org)')
     p.add_argument('--bg1', default='BG1')
     p.add_argument('--appbg', default='APPBG')
@@ -681,7 +753,9 @@ def main():
     p.add_argument('--page-asset', default='new-hire-onboarding-handson')
     p.add_argument('--page-tags', default='guide', help='page: comma-separated tags of the Exchange asset')
     p.add_argument('--page-name', default='AI Workshop当日ガイド', help='page: name of the Exchange asset')
-    p.add_argument('--llm-model', default='openai/gpt-5-mini', help='page: model the broker asks the Model Proxy for (<provider>/<model>)')
+    p.add_argument('--llm-model', default='openai/gpt-5-mini', help='page / members-llm: model the agents ask the Model Proxy for (<provider>/<model>)')
+    p.add_argument('--direct', action='store_true', help='members-llm: back to the LLM itself ($LLM_TOKEN), not the Model Proxy')
+    p.add_argument('--llm-host', default='llm-proxy.workshops.mulesoft.com', help='members-llm --direct: host of the LLM')
     p.add_argument('--jwt-days', type=int, default=90, help='proxy-jwt: lifetime of a new JWT')
     p.add_argument('--atelier', default=ATELIER_REPO, help='atelier: the Atelier repository (git URL or folder)')
     p.add_argument('--yes', action='store_true', help='teardown: really delete')
@@ -699,7 +773,7 @@ def main():
         args.out = os.path.join(envdir, 'users.json')
     api = Api(os.environ['ANYPOINT_USERNAME'], os.environ['ANYPOINT_PASSWORD'])
     {'org': cmd_org, 'team': cmd_team, 'users': cmd_users,
-     'proxy-jwt': cmd_proxy_jwt, 'atelier': cmd_atelier, 'page': cmd_page, 'show': cmd_show,
+     'proxy-jwt': cmd_proxy_jwt, 'members-llm': cmd_members_llm, 'atelier': cmd_atelier, 'page': cmd_page, 'show': cmd_show,
      'teardown': cmd_teardown}[args.step](api, args)
 
 

@@ -58,6 +58,7 @@ cd handson/new-hire-onboarding/setup
 | 4 | メンバーの 3 アプリを APPBG / Sandbox に配備 (下の「メンバーのアプリ」) | `yc harness deploy ...` | 1 つ 3〜5 分 |
 | 5 | Model Proxy `workshop-llm-proxy` を BG1 に作る | `LLM_TOKEN=<鍵> NODE_PATH=<node_modules> node model-proxy.js` | 2 分 |
 | 6 | Model Proxy の認証を JWT にする。Client ID Enforcement を無効にし、JWT Validation (HS256) を付ける。秘密鍵と受講者用の JWT は環境のフォルダの `llm-jwt.json` に出る (期限は `--jwt-days`、既定 90 日) | `python anypoint_setup.py proxy-jwt --env <環境名>` | 1 分 (反映に 1〜2 分) |
+| 6b | メンバーの A2A 2 つの LLM の行き先を Model Proxy にする (`llm.proxy.host` を Gateway、`llm.proxy.path` を `/llm/responses`、`llm.model` を `openai/gpt-5-mini`、`llm.apiKey` を JWT)。配備のプロパティを書き換えるだけで、CloudHub が配備し直す | `python anypoint_setup.py members-llm --env <環境名>` | 3〜5 分 |
 | 7 | 受講者が見る Exchange のページ。BG1 の custom 資産 `new-hire-onboarding-handson` に、使う値と、値を埋めた `exchange.json`、`agent-network.yaml`、`broker1.agent` を載せる | `python anypoint_setup.py page --env <環境名>` | 1 分 |
 | 8 | 確かめる (下の「確かめる」と「予行」) | `python anypoint_setup.py show` と curl | 10 分 |
 
@@ -67,7 +68,11 @@ ws00 は主催者の予行用にする (`--count 6` なら ws00 と参加者 5 �
 
 ### メンバーのアプリ
 
-A2A の 2 つは Model Proxy を通さず、LLM に直接向ける。yc の変数プロファイル (`~/.yc/agentnet-vars.json`) に、LLM のホストと鍵を入れておく。
+A2A の 2 つは、まず LLM に直接向けて配備し、Model Proxy ができてから手順 6b (`members-llm`) で Model Proxy に向け直す
+(Model Proxy は Responses API の `/llm/responses` もそのまま通す。2026-10-24 に確かめた)。
+`members-llm` が先に流れていると、`page` がホームに「メンバーも同じ Model Proxy を通る」と書く。
+直接に戻すのは `LLM_TOKEN=<鍵> python anypoint_setup.py members-llm --env <環境名> --direct`。
+配備のときに使う yc の変数プロファイル (`~/.yc/agentnet-vars.json`) には、LLM のホストと鍵を入れておく。
 
 ```json
 "nho-20261029": {
@@ -248,6 +253,22 @@ BG1 には private space を作らないので `agent-network-shared-gw` にす�
 - チームのロールは、Sandbox の環境スコープ、だめなら BG1 のスコープで付ける。org で使えないロールは 403 で付かない。
   2026-10-21 は環境スコープ 81、BG スコープ 39 が付き、224 が 403 (Organization Administrator、Exchange Administrator、MuleSoft Agent AI User、Application Create / Owner の系統など)。
   それでも ws00 の権限で broker の build、publish、deploy まで通った。
+  2026-10-24 に [Enhanced Experience の権限の表](https://docs.mulesoft.com/general/exp-home-start#permissions) と照らすと、
+  Monitoring Viewer / Monitoring Administrator だけが無かった (環境スコープは 403、BG1 のスコープなら付いた)。
+  ほかは全部ある (Edit APIs Configuration という名前のロールは無く、Manage APIs Configuration がそれに当たる)。
+  表の Organization Administrator は open policy と外部 Gateway のネイティブポリシー用なので、受講者には付けない。
+- omni.mulesoft.com の MuleSoft Agent (右の欄) は、`MuleSoft Agent AI User` が **root org のスコープ** に無いと
+  「You don't have permission to use the MuleSoft Agent」になる (BG1 のスコープだけでは足りない。2026-10-24 に ws99 で確かめた)。
+  `team` は BG1 と root の両方に付ける。管理者も、入っているチーム (Anypoint Admin など) にこのロールが無ければ同じになる。
+  ロールがあっても、org が Salesforce につながっていないと「Anypoint is not fully connected to Salesforce」と出て使えない
+  (2026-10-24 のこの org はつながっていない)。
+- omni.mulesoft.com は、ユーザーの「ログインしたときに開く BG」(BG1) を見ず、root org で開く。Model Proxies は「No Model Proxies found」になるので、
+  左下の BG の切り替えで BG1 にする (2026-10-24 に ws99 で確かめた)。
+- Model Proxy の `llm-proxy-core` は、使用量 (トークン) を「誰の呼び出しか」と一緒に記録する。その「誰か」を既定では
+  `#[authentication.clientName]` から読むが、これは Client ID Enforcement が入れる値なので、JWT に替えると空になり、トークンが記録されない
+  (Monitoring の Total Tokens が 0、Cost Management の Optimizations に Model Proxy が出ない。Total Requests とエラーは出る)。
+  `proxy-jwt` が `clientIdentifier` を `#[authentication.properties.claims.sub]`、`clientId` を `#[authentication.properties.claims.client_id]` にする
+  ([Model Wallet の手順](https://docs.mulesoft.com/general/exp-model-wallets-manage#configure-policies-on-a-model-proxy) と同じ)。2026-10-24 に直して、数分後に出た。
 - root にはもとから「Workshop Team」というチームがある (workshops の org の作り)。触らずに別に workshop を作る。
 - employee-db-app の DB は SQLite で、全員が同じものを使う。再起動すると消える。
 - `deploy` は 900 秒待って `errorCode: 3018` でタイムアウトすることがあるが、配備はできていることが多い。アプリの状態を直接見る。
@@ -257,4 +278,4 @@ BG1 には private space を作らないので `agent-network-shared-gw` にす�
 
 | 回 | org | 状態 |
 |---|---|---|
-| 2026-10-29 | `anypoint-cbp-1791266292` (US)。ID と URL は `~/.config/handson/new-hire-onboarding/20261029-*/env.json (お客さんの名前は git に書かない)` | 2026-10-21〜22 に 1〜8 を済ませた (BG1 の vCore は 0.5)。ws00 で broker を CLI で配備して全部成功の分岐を確認。Exchange のページは ws00 から見える。teardown は一覧を出すところまで (消すのは未実行) |
+| 2026-10-29 | `anypoint-cbp-1791266292` (US)。ID と URL は `~/.config/handson/new-hire-onboarding/20261029-*/env.json (お客さんの名前は git に書かない)` | 2026-10-21〜22 に 1〜8 を済ませた (BG1 の vCore は 0.5)。ws00 で broker を CLI で配備して全部成功の分岐を確認。Exchange のページは ws00 から見える。teardown は一覧を出すところまで (消すのは未実行)。10-24 に ws99 と Atelier を足し、メンバーの A2A 2 つを Model Proxy 経由にした (`members-llm`、2 つとも単独で応答を確認)。Exchange のページも流し直した |
