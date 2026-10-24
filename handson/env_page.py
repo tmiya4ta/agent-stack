@@ -75,6 +75,12 @@ def esc(s):
     return html.escape(str(s), quote=True)
 
 
+def name(env):
+    """一覧と見出しに出す名前。お客さんが分かるように <customer>-<handson> にする (フォルダ名は変えない)。"""
+    c = str(env.get('customer') or '').strip().lower().replace(' ', '-')
+    return f'{c}-{env["handson"]}' if c else env['handson']
+
+
 def page(title, body):
     return (f'<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>{esc(title)}</title>'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><style>{STYLE}</style></head>'
@@ -82,7 +88,7 @@ def page(title, body):
 
 
 def env_html(env):
-    head = f'<p><a href="../../index.html">← 環境の一覧</a></p><h1>{esc(env["handson"])} / {esc(env["env"])}</h1>'
+    head = f'<p><a href="../../index.html">← 環境の一覧</a></p><h1>{esc(name(env))} / {esc(env["env"])}</h1>'
     meta = ' · '.join(x for x in (env.get('customer'), env.get('date'), env.get('status')) if x)
     out = [head, f'<p class="sub">{esc(meta)}</p>']
     if env.get('note'):
@@ -104,7 +110,7 @@ def env_html(env):
                 acts = copy
             rows.append(f'<tr><td class="k">{esc(it.get("label", ""))}</td>{cell}<td class="a">{acts}</td></tr>')
         out.append(f'<section><h2>{esc(sec.get("title", ""))}</h2><table>{"".join(rows)}</table></section>')
-    return page(f'{env["handson"]} / {env["env"]}', ''.join(out))
+    return page(f'{name(env)} / {env["env"]}', ''.join(out))
 
 
 def index_html(envs):
@@ -118,7 +124,7 @@ def index_html(envs):
             tag = '<span class="tag done">done</span>' if e.get('status') == 'done' else '<span class="tag">active</span>'
             sub = ' · '.join(x for x in (e.get('customer'), e.get('date')) if x)
             out.append(f'<a class="env" href="{esc(e["handson"])}/{esc(e["env"])}/index.html">'
-                       f'<b>{esc(e["handson"])}{tag}</b><span>{esc(e["env"])}</span><br><span>{esc(sub)}</span></a>')
+                       f'<b>{esc(name(e))}{tag}</b><span>{esc(e["env"])}</span><br><span>{esc(sub)}</span></a>')
         out.append('</div>')
     return page('ハンズオンの環境', ''.join(out))
 
