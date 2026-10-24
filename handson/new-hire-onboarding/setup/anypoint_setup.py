@@ -514,7 +514,11 @@ def cmd_atelier(api, args):
     _, bg1, appbg = ids(api, args)
     gw = gateway_url(api, bg1, sandbox_env(api, bg1), args.gateway)
     urls = member_urls(api, appbg)
-    names = [f'ws{i:02d}' for i in range(args.start, args.start + args.count)]
+    # --names ws00,ws01,ws99 picks participants one by one; otherwise --start / --count make a run of numbers
+    if args.names:
+        names = [n.strip() for n in args.names.split(',') if n.strip()]
+    else:
+        names = [f'ws{i:02d}' for i in range(args.start, args.start + args.count)]
     snapshots = {atelier_snapshot_name(n): atelier_snapshot(gw, urls, n) for n in names}
     # a new GAV every time, so yc uploads it; int() drops the leading zero before 10:00 (0836 is not semver)
     version = f"1.{time.strftime('%y%m%d')}.{int(time.strftime('%H%M'))}"
@@ -666,6 +670,7 @@ def main():
     p.add_argument('--team', default='workshop')
     p.add_argument('--count', type=int, default=6)
     p.add_argument('--start', type=int, default=0)
+    p.add_argument('--names', help='atelier: participants by name, e.g. ws00,ws01,ws99 (instead of --start / --count)')
     p.add_argument('--date', help='YYYYMMDD of the workshop, used in user names')
     p.add_argument('--email', default='tmiyashita+{name}@salesforce.com')
     # an admin can't change a password later (only the e-mailed reset link can), so decide it here
