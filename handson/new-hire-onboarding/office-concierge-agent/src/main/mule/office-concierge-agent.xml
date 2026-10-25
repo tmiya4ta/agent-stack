@@ -103,7 +103,7 @@ Do not write any preamble or pleasantries outside the table.
 			<http:headers><![CDATA[#[{
   "Content-Type": "application/json",
   "Authorization": "Bearer " ++ p('llm.apiKey')
-}]]]></http:headers>
+} ++ (if (isEmpty(p('llm.agentToken'))) {} else { "X-Agent-Token": p('llm.agentToken') })]]]></http:headers>
 		</http:request>
 		<ee:transform doc:name="Extract response text" doc:id="d1e2f3a4-1111-2222-3333-444455556666">
 			<ee:message>

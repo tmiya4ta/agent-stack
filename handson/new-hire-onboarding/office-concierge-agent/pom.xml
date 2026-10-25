@@ -4,7 +4,7 @@
 
 	<groupId>com.mycompany</groupId>
 	<artifactId>office-concierge-agent-app</artifactId>
-	<version>1.7.9</version>
+	<version>1.7.10</version>
 	<packaging>mule-application</packaging>
 
 	<name>office-concierge-agent-app</name>
