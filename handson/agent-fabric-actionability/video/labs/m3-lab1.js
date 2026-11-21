@@ -1,0 +1,65 @@
+// Lab 3-1 Trusted Agent Identity。Workshop UI は Lab 2-3 の続き (Multi-Agent Orchestrator、Alex Chen でサインイン済み)
+s.lib();
+await s.login();
+s.skipStart(); await s.bg(s.V.WS); s.skipEnd();
+await s.uiOpen();
+s.skipStart();
+await s.click(page.getByRole('button', { name: 'Multi-Agent Orchestrator' })); await page.waitForTimeout(3000);
+await s.broker({ narrate: false });
+if (await page.getByRole('button', { name: 'Sign In as Alex Chen' }).isVisible().catch(() => false)) { await s.click(page.getByRole('button', { name: 'Sign In as Alex Chen' })); await page.waitForTimeout(6000); }
+await s.click(s.uiBtn('Zoom out')); await s.click(s.uiBtn('Zoom out'));
+await s.tab('a');
+s.skipEnd();
+await s.intro('3-1', 'Trusted Agent Identity でユーザー ID を引き継ぐ');
+await s.step('まず、Broker が呼び出す Commerce MCP に、ID を引き継ぐ設定 (On-Behalf-Of) がどのように行われているかを確認します', 3500);
+await s.step('左のメニューの MCP Servers で「Commerce MCP Server」を検索し、Commerce MCP Server を開きます (Lab 2-1 で作成したものではありません)', 600);
+await s.click(page.getByRole('link', { name: 'MCP Servers' }).first()); await page.waitForTimeout(4000);
+await s.paste(page.locator('main input').first(), 'Commerce MCP Server'); await page.waitForTimeout(3500);
+await s.shot('07-search-commerce-mcp');
+await s.click(page.getByText('Commerce MCP Server', { exact: true }).first()); await page.waitForTimeout(5000);
+await s.step('Instances タブを開き、インスタンスの ID をクリックします', 600);
+await s.click(page.getByRole('tab', { name: 'Instances', exact: true })); await page.waitForTimeout(3000);
+await s.click(page.locator('[data-testid="api-instance-link"]').first());
+s.skipStart(); await page.getByRole('button', { name: /Apply Policy/ }).first().waitFor({ timeout: 60000 }); await page.waitForTimeout(2000); s.skipEnd();
+await s.shot('07-commerce-instance');
+await s.step('Policies タブの一覧から、OAuth2 OBO Credential Injection のポリシーを開きます。ゲートウェイから Commerce MCP に送るリクエストに適用する Outbound のポリシーです', 600);
+await s.click(page.getByText('OAuth2 OBO Credential Injection', { exact: true }).first()); await page.waitForTimeout(5000);
+await s.shot('07-obo-token-exchange-flow');
+await s.step('Token Exchange Flow は oauth2-token-exchange で、OAuth のトークン交換 (RFC 8693) を使います', 4000);
+await s.step('Target Type は audience、Target Value は commerce-mcp-obo です。交換後のトークンは、Commerce MCP でのみ有効になります', 4500);
+await s.scrollTo(page.getByText('Client ID', { exact: true }).first(), 'start');
+await s.step('Client ID と Client Secret はトークン交換用のクライアント、Token Endpoint は ID プロバイダー (Keycloak) のエンドポイントです。アプリケーションのコードは不要です', 5000);
+await s.step('Commerce MCP は全員で共有しているため、保存せずに Cancel で閉じます', 600);
+await s.click(page.getByRole('button', { name: 'Cancel' })); await page.waitForTimeout(1500);
+if (await page.getByRole('button', { name: 'Discard and Leave' }).isVisible().catch(() => false)) { await s.click(page.getByRole('button', { name: 'Discard and Leave' })); }
+await page.waitForTimeout(4000);
+
+await s.step('設定を確認したので、実際に動作することを確かめます。Workshop UI のタブに戻ります', 600);
+await s.tab('ui'); await page.waitForTimeout(1500);
+await s.step('Multi-Agent Orchestrator タブで、右上の Switch persona をクリックし、Jamie Torres でサインインします', 600);
+await s.click(page.getByRole('button', { name: 'Switch persona' })); await page.waitForTimeout(1500);
+await s.click(page.getByRole('button', { name: /Jamie Torres/ }).first()); await page.waitForTimeout(800);
+await s.shot('07-jamie-signin');
+await s.click(page.getByRole('button', { name: 'Sign In as Jamie Torres' })); await page.waitForTimeout(6000);
+await s.step('右上の表示が Jamie Torres になりました。発行されたトークンには、Jamie の ID が含まれます', 3500);
+await s.step('上のプロンプトのうち、1 つ目の Jamie 自身の注文 (ORD-2026-00003) を確認するプロンプトをクリックします', 600);
+await s.promptMap(/ORD-2026-00003/);
+await s.shot('07-jamie-p1-chat');
+await s.step('Jamie 自身の注文なので、Commerce MCP が注文を返し、Broker が配送状況を回答しました', 4000);
+await s.step('中央の Orchestration の Identity タブを開きます', 600);
+await s.click(page.getByRole('button', { name: 'Identity' })); await page.waitForTimeout(3000);
+if (await page.getByText('Not available yet').count()) { await s.click(page.getByRole('button', { name: 'Reasoning Map' })); await page.waitForTimeout(1500); await s.click(page.getByRole('button', { name: 'Identity' })); await page.waitForTimeout(3000); }
+await s.step('Incoming token は、サインインしたときに UI に発行されたトークンです', 3500);
+await page.mouse.move(840, 500); await page.mouse.wheel(0, 400); await page.waitForTimeout(2000);
+await s.shot('07-identity-after');
+await s.step('Exchanged token は、Broker が実際に Commerce MCP に送ったトークンで、OBO のポリシーが交換したものです', 4000);
+await s.step('username と sub は Jamie のまま、aud は commerce-mcp-obo だけに限定され、有効期限も短くなっています。本人の ID を保ったまま、権限を最小限にしたトークンです', 6000);
+await page.mouse.wheel(0, -400); await page.waitForTimeout(1000);
+await s.click(page.getByRole('button', { name: 'Reasoning Map' })); await page.waitForTimeout(1500);
+await s.step('次に、2 つ目のプロンプトをクリックして、ほかのお客様 (Ashley) の注文 ORD-2026-00002 を問い合わせます', 600);
+await s.prompt(/ORD-2026-00002/);
+await s.shot('07-jamie-p2-chat');
+await s.step('ほかのお客様の注文なので、Commerce MCP は返さず、Broker は注文が見つからないと回答しました', 4500);
+await s.step('Broker に送られるのは「注文 ORD-2026-0000X の状況を確認して」というメッセージだけです。結果を決めているのは、交換後のトークンに含まれる ID です', 6000);
+await s.step('Jamie は Jamie のデータだけを参照できることを、エージェントの振る舞いではなく、データの層で保証しています', 4500);
+return 'ok';

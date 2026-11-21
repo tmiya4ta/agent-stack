@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+
+    <!-- CloudHub 2.0 の Ingress は 8081 に転送する -->
+    <http:listener-config name="HTTP_Listener_config">
+        <http:listener-connection host="0.0.0.0" port="8081"/>
+    </http:listener-config>
+
+    <!-- Codelab の HTML (src/main/resources/web。build.sh が codelab/actionability.md から作る) をそのまま返す -->
+    <flow name="codelab-site">
+        <http:listener config-ref="HTTP_Listener_config" path="/*"/>
+        <http:load-static-resource resourceBasePath="${app.home}/web" defaultFile="index.html"/>
+    </flow>
+</mule>

@@ -1,0 +1,10 @@
+name: actionability-codelab
+kind: api
+runtime: mule
+version: 1.0.4
+build: mvn -B clean package -DskipTests
+artifact: target/*-mule-application.jar
+endpoint: /
+deploy:
+  mule:
+    target: ch2

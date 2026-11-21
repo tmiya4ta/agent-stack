@@ -1,0 +1,111 @@
+{
+  "cover": {
+    "subtitle": ""
+  },
+  "overview": {
+    "title": "本ワークショップの概要",
+    "lead": "アパレル企業 Vogue Studios の既存の注文・顧客 API を変更することなく、AI スタイリングサービス「Vogue Premiere」から活用できるようにします。",
+    "items": [
+      [
+        "Module 1  Gain Visibility",
+        "AI エコシステム全体の可視化: 外部のエージェントを検出し、1 か所で管理"
+      ],
+      [
+        "Module 2  Enable AI Actions",
+        "AI によるアクションの実現: API の MCP 化、ツールの制御、複数エージェントの連携"
+      ],
+      [
+        "Module 3  Govern AI Agents",
+        "ガバナンスによる本番活用: ユーザー ID の引き継ぎと、ネットワークの可視化"
+      ],
+      [
+        "Module 4  Align AI Costs",
+        "AI コストの最適化: モデルの選択、ユーザーごとの予算、トークンの削減"
+      ]
+    ]
+  },
+  "modules": [
+    {
+      "id": "m1",
+      "title": "Module 1  Gain Visibility",
+      "labs": "Agent Scanner",
+      "lead": "組織に点在するエージェントを検出し、1 か所のレジストリで管理します。",
+      "items": [
+        [
+          "Lab 1-1  Agent Scanner",
+          "Amazon Bedrock 上のエージェントの検出と、Exchange への登録",
+          "m1-lab1"
+        ]
+      ]
+    },
+    {
+      "id": "m2",
+      "title": "Module 2  Enable AI Actions",
+      "labs": "MCP Bridge · MCP Global Access Control · Orchestration",
+      "lead": "既存の API を AI エージェントが使えるツールにし、実行できる操作を制御し、複数のエージェントを連携させます。",
+      "items": [
+        [
+          "Lab 2-1  MCP Bridge",
+          "2 つの REST API を、コーディングなしで 1 つの MCP サーバーとして公開",
+          "m2-lab1"
+        ],
+        [
+          "Lab 2-2  MCP Global Access Control",
+          "注文作成ツールを、エージェントから見えないように制御",
+          "m2-lab2"
+        ],
+        [
+          "Lab 2-3  Orchestration",
+          "Broker による複数の専門エージェントの連携と、推論の過程の確認",
+          "m2-lab3"
+        ]
+      ]
+    },
+    {
+      "id": "m3",
+      "title": "Module 3  Govern AI Agents",
+      "labs": "Trusted Agent Identity · Agent Visualizer",
+      "lead": "すべてのリクエストに正しいユーザー ID を持たせ、エージェントのネットワークを可視化します。",
+      "items": [
+        [
+          "Lab 3-1  Trusted Agent Identity",
+          "On-Behalf-Of (OBO) によるユーザー ID の引き継ぎと、最小権限の確認",
+          "m3-lab1"
+        ],
+        [
+          "Lab 3-2  Agent Visualizer",
+          "エージェントと MCP サーバーの関係をマップで確認",
+          "m3-lab2"
+        ]
+      ]
+    },
+    {
+      "id": "m4",
+      "title": "Module 4  Align AI Costs",
+      "labs": "Semantic Routing · Model Wallet · Cost Optimization",
+      "lead": "LLM とツールの利用コストを、ゲートウェイで統制し、削減します。",
+      "items": [
+        [
+          "Lab 4-1  Semantic Routing",
+          "プロンプトの内容に応じた LLM の自動選択と、不正なプロンプトのブロック",
+          "m4-lab1"
+        ],
+        [
+          "Lab 4-2  Model Wallet",
+          "ユーザーごとのトークン予算の設定",
+          "m4-lab2"
+        ],
+        [
+          "Lab 4-3  Cost Optimization",
+          "ツールの説明の短縮と Progressive Disclosure による、トークンの削減",
+          "m4-lab3"
+        ]
+      ]
+    }
+  ],
+  "prep": {
+    "id": "lab0",
+    "title": "事前準備",
+    "desc": "Anypoint Platform へのサインインと、新しい画面 (Enhanced UI) の確認"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "cover": { "subtitle": "" },
+  "overview": {
+    "title": "アジェンダ",
+    "agenda": true,
+    "items": [
+      ["Gain Visibility", "AI エコシステム全体の可視化: 点在するエージェントを検出し、1 か所で管理"],
+      ["Enable AI Actions", "AI によるアクションの実現: API の MCP 化、ツールの制御、複数エージェントの連携"],
+      ["Govern AI Agents", "ガバナンスによる本番活用: ユーザー ID の引き継ぎと、ネットワークの可視化"],
+      ["Align AI Costs", "AI コストの最適化: モデルの選択、ユーザーごとの予算、トークンの削減"]
+    ]
+  },
+  "modules": [
+    { "id": "m1", "title": "Gain Visibility", "labs": "点在する AI エージェントを、1 か所で把握",
+      "features": [
+        { "name": "Agent Scanner",
+          "problem": "AWS など他社の基盤で作られた AI エージェントが社内に点在し、どこにどのようなエージェントがあるのかを把握できない",
+          "solution": "Agent Scanner が外部のプロバイダーに接続し、エージェントを自動で検出して、Anypoint のカタログに登録します" }
+      ] },
+    { "id": "m2", "title": "Enable AI Actions", "labs": "既存の API を、AI エージェントが実行できるアクションに",
+      "features": [
+        { "name": "MCP Bridge",
+          "problem": "既存の REST API を AI エージェントから使うには、API ごとに MCP サーバーを開発し、運用する必要がある",
+          "solution": "MCP Bridge なら、既存の API を選ぶだけで MCP サーバーとして公開できます。コーディングは不要です" }
+      ] },
+    { "id": "m3", "title": "Govern AI Agents", "labs": "ユーザー ID を守り、エージェントのネットワークを可視化" },
+    { "id": "m4", "title": "Align AI Costs", "labs": "LLM とツールのコストを、ビジネス価値に見合ったものに" }
+  ]
+}

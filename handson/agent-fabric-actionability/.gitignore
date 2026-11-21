@@ -1,2 +1,6 @@
 # クレデンシャルの値 (credentials.md の一覧の値をここに書く)
 *.local.md
+
+# codelab-site の HTML は build.sh で codelab/ から作る
+codelab-site/src/main/resources/web/
+codelab-site/target/

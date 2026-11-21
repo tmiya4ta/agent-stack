@@ -33,7 +33,7 @@
 | Keycloak | ペルソナ (Alex Chen、Ashley Grover、Jamie Torres、Attendee、Emily、Thomas、Alex (Marketing))、クライアント `vogue-ui` (UI) と `commerce-mcp-obo` (機密。token exchange を許す)。コストのラボのペルソナには `cost_center` の claim | 04、05、08 | — | 未 |
 | Workshop UI | Anypoint に「Connect」して BG と環境を選ぶ。MCP のテスト (ツールの一覧、フォーム、生の応答)、broker のチャット (ネットワーク図、Reasoning Map、Trace、Identity)、Semantic Routing のテスト、Model Wallet のポリシーの一括設定 (Configure policies、Equalize priorities) | 02〜05、07、08 | — (一番大きい。作るかどうかから決める) | 未 |
 | Amazon Bedrock | エージェント 1 つ (Vogue Premiere Loyalty Agent の人格、Claude 3.5 Haiku の推論プロファイル、action group と knowledge base は無し)。参加者に配る IAM のキー (読み取りだけ) | 01 | — | 未 |
-| LLM の行き先 | Model Proxy から呼ぶ OpenAI 互換と Gemini の URL と鍵。意味検索のサービス (`<semantic-service>`、埋め込みの鍵は要らない) | 07、08 | `ai/model/emu` の `llm.openai.emu`、`llm.gemini.emu`、`embed-emu` が使えるかもしれない (本物のモデル名 GPT-5 Mini / Gemini 2.5 Flash で選ぶので要確認) | 未 |
+| LLM の行き先 | Model Proxy から呼ぶ OpenAI 互換と Gemini の URL と鍵。意味検索のサービス (`<semantic-service>`、埋め込みの鍵は要らない) | 07、08 | Semantic service は Basic scale、Provider OpenAI、URL は埋め込みの窓口そのもの (`…/v1/embeddings`)、Model `text-embedding-3-small`。emu と Hugging Face では作成時の検証が通らなかった (2026-10-24)。kurita の org では `semantic` が workshop BG / Sandbox にある | kurita で○ |
 | 主催者の Model Wallet | `finance-team` (claim finance) と `engineering-team` (claim engineering、Gemini は 1 日 2,000 トークン) | 08 | — | 未 |
 | Titanium | 任意。Distributed Traces と Log Search | 06 | — | 未 |
 
